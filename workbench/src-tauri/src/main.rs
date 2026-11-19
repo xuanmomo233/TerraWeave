@@ -28,7 +28,7 @@ fn bounded(root:&Path,name:&str,max:u64)->Result<Vec<u8>,String>{
  fs::read(file).map_err(|e|e.to_string())
 }
 #[tauri::command]
-fn read_asset(name:String)->Result<String,String>{
+fn read_asset(name:String,minecraft:Option<String>)->Result<String,String>{
  let allowed=((name.starts_with("minecraft/models/")||name.starts_with("minecraft/blockstates/"))&&name.ends_with(".json"))||(name.starts_with("minecraft/textures/")&&name.ends_with(".png"));
  if !allowed{return Err("Unsupported asset type".into())}
  let assets=workbench::project().join("assets");
@@ -43,7 +43,16 @@ fn read_asset(name:String)->Result<String,String>{
  }else if name.starts_with("minecraft/textures/block/"){
   bounded(&assets.join("liuyun-textures"),&name,2_000_000).ok()
  }else{None};
- let bytes=match overlay{Some(bytes)=>bytes,None=>bounded(&assets,&name,2_000_000)?};
+ let version=minecraft.as_deref().unwrap_or("1.20.1");
+ if version.len()>12||!matches!(version.split('.').count(),2|3)
+  ||!version.split('.').all(|n|!n.is_empty()&&n.bytes().all(|b|b.is_ascii_digit())){
+  return Err("Invalid Minecraft version".into());
+ }
+ let vanilla=if version=="1.20.1"{assets}else{assets.join("vanilla").join(version)};
+ let bytes=match overlay{Some(bytes)=>bytes,None=>bounded(&vanilla,&name,2_000_000)
+  .or_else(|error|if name=="minecraft/textures/entity/banner_base.png" {
+      bounded(&vanilla,"minecraft/textures/entity/banner/banner_base.png",2_000_000)
+  }else{Err(error)})?};
  if name.ends_with(".png"){Ok(format!("data:image/png;base64,{}",STANDARD.encode(bytes)))}else{String::from_utf8(bytes).map_err(|e|e.to_string())}
 }
 #[tauri::command]
@@ -120,5 +129,5 @@ fn main(){
 }
 #[cfg(test)]mod tests{
  use super::*;
- #[test]fn assets_remain_local(){assert!(bounded(Path::new("."),"../secret",10).is_err());assert!(read_asset("minecraft/../../secret.png".into()).is_err());}
+ #[test]fn assets_remain_local(){assert!(bounded(Path::new("."),"../secret",10).is_err());assert!(read_asset("minecraft/../../secret.png".into(),None).is_err());assert!(read_asset("minecraft/textures/block/stone.png".into(),Some("..".into())).is_err());}
 }

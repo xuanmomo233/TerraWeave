@@ -100,6 +100,7 @@ dialog .dialog-actions > button {width:auto;min-inline-size:70px;flex:0 1 auto;m
 .property-section .coords {gap:6px;}
 .slice-controls {display:grid;grid-template-columns:minmax(0,1fr) 4.25rem;gap:8px;align-items:center;margin-block:5px 8px;}
 .slice-controls input {margin:0;}
+#picked-block {overflow-wrap:anywhere;}
 .camera-inspector {container-type:inline-size;}
 .camera-angle-fields {grid-template-columns:repeat(2,minmax(0,1fr));}
 @container (max-width:15rem) {

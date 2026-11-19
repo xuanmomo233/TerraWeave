@@ -17,7 +17,7 @@ export const DESIGN_TOOLS=[
  {name:'update_draft',description:'Save a design name, notes and visibility without duplicating block data.',inputSchema:schema({draft_id:id,label:{type:'string'},notes:{type:'string'},visible:{type:'boolean'}},['draft_id'])},
  {name:'undo_draft',description:'Undo a draft edit and optionally display its saved revision. No world writes.',inputSchema:schema({draft_id:id,preview:previewOptions},['draft_id'])},
  {name:'redo_draft',description:'Redo a draft edit and optionally display its saved revision. No world writes.',inputSchema:schema({draft_id:id,preview:previewOptions},['draft_id'])},
- {name:'edit_draft',description:'Change or fill blocks in a draft using the local 1.20.1 block registry. Optionally display the saved revision in the same request. No world writes. reset clears the draft overlay.',inputSchema:schema({draft_id:id,blocks:{type:'array',items:block,maxItems:16384},fill:schema({bounds,state},['bounds','state']),reset:{type:'boolean'},preview:previewOptions},['draft_id'])},
+ {name:'edit_draft',description:'Change or fill draft blocks using their saved world version. Optionally display the saved revision in the same request. No world writes. reset clears the draft overlay.',inputSchema:schema({draft_id:id,blocks:{type:'array',items:block,maxItems:16384},fill:schema({bounds,state},['bounds','state']),reset:{type:'boolean'},preview:previewOptions},['draft_id'])},
  {name:'inspect_draft',description:'Read draft revision, changed coordinates, before/after block states and added/replaced/removed counts.',inputSchema:schema({draft_id:id,offset:integer,limit:integer},['draft_id']),annotations:{readOnlyHint:true}},
  {name:'preview_draft',description:'Display a design at a world-coordinate focus. Large planning designs stream local detail rather than loading their full volume.',inputSchema:schema({draft_id:id,mode:{type:'string',enum:['target','base','diff']},focus:{type:'array',items:{type:'number'},minItems:3,maxItems:3},keep_camera:{type:'boolean'}},['draft_id'])},
  {name:'export_draft',description:'Freeze a draft revision and its before-states as a JSON file for the independent world-writer MCP.',inputSchema:schema({draft_id:id},['draft_id'])},
@@ -25,7 +25,7 @@ export const DESIGN_TOOLS=[
 ];
 
 export function designService(ctx){
- const {folder,atomic,read,readRegion,readRegionMetadata,currentRegion,saveSnapshot,savePreview,displayRegion,readSavedPositions,normalizeState,validateBounds,validateEdits,planning,captureDetail}=ctx;
+ const {folder,atomic,read,readRegion,readRegionMetadata,currentRegion,saveSnapshot,savePreview,displayRegion,readSavedPositions,normalizeState,prepareBlockAssets,validateBounds,validateEdits,planning,captureDetail}=ctx;
  const valid=id=>typeof id==='string'&&/^[a-zA-Z0-9-]{1,99}$/.test(id);
  function file(group,id){if(!valid(id))throw Error('Invalid '+group+' identity');return path.join(folder(group),id+'.json');}
  function draft(id){
@@ -87,7 +87,9 @@ export function designService(ctx){
   if(d.schema===2)overlay(d.base_cells);
   if(showTarget)overlay(d.changes);
   const context_blocks=draftContext(base.snapshot.context_blocks,d.base_cells,d.changes,showTarget);
-  const snapshot={...base.snapshot,blocks,context_blocks,source:'design_draft',block_entity_count:null,block_entity_positions:undefined,draft_id:d.id,draft_revision:d.revision};
+  const block_entities=base.snapshot.block_entities&&Object.fromEntries(Object.entries(base.snapshot.block_entities)
+   .filter(([position])=>blocks[position]===base.snapshot.blocks[position]));
+  const snapshot={...base.snapshot,blocks,context_blocks,block_entities,source:'design_draft',block_entity_count:null,block_entity_positions:undefined,draft_id:d.id,draft_revision:d.revision};
   const pins=blocks===base.snapshot.blocks&&context_blocks===base.snapshot.context_blocks
    ?{snapshot_id:base.region.snapshot_id,snapshot_hash:base.region.snapshot_hash}
    :saveSnapshot(snapshot);
@@ -162,7 +164,9 @@ export function designService(ctx){
    if(states.length>512)throw Error('At most 512 unique block states');
    if(states.length){
     const missing=d.schema===2?blocks.map(keyOf).filter(key=>d.base_cells[key]===undefined):[];
-    const normalized=states.map(normalizeState);
+    const minecraft=readRegionMetadata(d.base_region_id).minecraft;
+    if(minecraft&&minecraft!=='1.20.1')await prepareBlockAssets?.(minecraft);
+    const normalized=states.map(state=>normalizeState(state,minecraft));
     const cells=missing.length?readSavedPositions(d.world_uuid,missing):{};
     if(missing.length){d={...d,base_cells:{...d.base_cells,...cells}};base=baseFor(d);}
     const mapping=new Map(states.map((s,i)=>[s,normalized[i]]));
@@ -177,8 +181,9 @@ export function designService(ctx){
   if(name==='preview_draft')return preview(draft(args.draft_id),requestedPreview({mode:args.mode,focus:args.focus,keep_camera:args.keep_camera??false}));
   if(name==='export_draft'){
    const d=draft(args.draft_id);
+   const base=baseFor(d);
    const packet={schema:1,world_uuid:d.world_uuid,draft_id:d.id,draft_revision:d.revision,
-    label:d.label,base:baseFor(d).blocks,changes:d.changes,previously_applied:d.applied_states??{}};
+    minecraft:readRegionMetadata(d.base_region_id).minecraft??base.minecraft,label:d.label,base:base.blocks,changes:d.changes,previously_applied:d.applied_states??{}};
    const digest=createHash('sha256').update(JSON.stringify(packet)).digest('hex');
    const filename=path.join(folder('exports'),'design-'+d.id+'-'+d.revision+'-'+digest.slice(0,12)+'.json');
    if(!fs.existsSync(filename))atomic(filename,packet);

@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {createHash,randomUUID} from 'node:crypto';
 import {setTimeout as sleep} from 'node:timers/promises';
+import {supportedMinecraft} from '../minecraft-version.js';
 
 const sha=value=>createHash('sha256').update(value).digest('hex');
 const idFor=value=>{
@@ -23,11 +24,14 @@ function coordinate(key){
  return p;
 }
 const stateOk=s=>typeof s==='string'&&/^minecraft:[a-z0-9_]+(?:\[[a-z0-9_=-]+(?:,[a-z0-9_=-]+)*\])?$/.test(s)&&s.length<=512;
+const signState=s=>typeof s==='string'&&/^minecraft:[a-z0-9_]+_sign(?:\[|$)/.test(s);
+const exactEntityState=s=>typeof s==='string'&&/^minecraft:(?:chest|trapped_chest|barrel|(?:[a-z_]+_)?shulker_box|[a-z_]+_banner)(?:\[|$)/.test(s);
 function packet(value){
  const plain=x=>!!x&&typeof x==='object'&&!Array.isArray(x);
  if(!plain(value)||value.schema!==1||!validId(value.world_uuid)||!validId(value.draft_id)||
   !Number.isSafeInteger(value.draft_revision)||value.draft_revision<1||
   !plain(value.base)||!plain(value.changes)||!plain(value.previously_applied))throw Error('无效的织境工坊方案文件');
+ if(value.minecraft!==undefined&&!supportedMinecraft(value.minecraft))throw Error('不支持的方案游戏版本');
  for(const table of [value.base,value.changes,value.previously_applied])for(const [key,state] of Object.entries(table)){
   coordinate(key);
   if(!stateOk(state)||!Object.hasOwn(value.base,key))throw Error('缺少原始方块状态 '+key);
@@ -69,6 +73,14 @@ export function bridgeTransport(directory,{timeout=90_000}={}){
   const heartbeat=optional(path.join(root,'heartbeat.json'));
   if(!heartbeat||Date.now()-heartbeat.at_ms>10_000)throw Error('请先通过独立流程启动目标服和配套插件');
   if(heartbeat.world_uuid!==request.world_uuid)throw Error('写入目标与方案世界 UUID 不一致');
+  if(request.minecraft&&heartbeat.minecraft!==request.minecraft)
+   throw Error('方案版本 '+request.minecraft+' 与目标服 '+heartbeat.minecraft+' 不一致');
+  if(heartbeat.sign_payload!==1&&request.blocks?.some(block=>
+   Object.hasOwn(block,'before_sign')||Object.hasOwn(block,'after_sign')||signState(block.state)||signState(block.before)))
+   throw Error('目标服的配套插件需要升级，才能写入或撤销告示牌');
+  if(heartbeat.block_entity_payload!==1&&request.blocks?.some(block=>
+   block.before_entity?.codec||block.after_entity?.codec||exactEntityState(block.state)||exactEntityState(block.before)))
+   throw Error('目标服的配套插件缺少容器或旗帜的 NBT 恢复能力');
   fs.mkdirSync(requests,{recursive:true});
   const incoming=path.join(requests,id+'.json'),processing=incoming+'.processing';
   if(!fs.existsSync(incoming)&&!fs.existsSync(processing)){
@@ -122,7 +134,7 @@ export function worldWriter({directory,send}){
   record.error=undefined;
   try{
    for(let index=record.batches.length;index<record.batch_ends.length;index++){
-    const request={action:'apply_blocks',world_uuid:record.world_uuid,physics:false,durable:true,blocks:record.edits.slice(record.batch_ends[index-1]??0,record.batch_ends[index])};
+    const request={action:'apply_blocks',world_uuid:record.world_uuid,...(record.minecraft?{minecraft:record.minecraft}:{}),physics:false,durable:true,blocks:record.edits.slice(record.batch_ends[index-1]??0,record.batch_ends[index])};
     const receipt=await send(idFor(record.id+'/'+index),request);
     if(receipt.world_uuid!==record.world_uuid||!Array.isArray(receipt.changes)||!Array.isArray(receipt.conflicts))throw Error('插件返回了无效的写入回执');
     record.batches.push(receipt);
@@ -160,7 +172,7 @@ export function worldWriter({directory,send}){
      return {x,y,z,before,state};
     });
     const record={id,digest,order:operations.length,kind:'apply',world_uuid:design.world_uuid,draft_id:design.draft_id,
-     draft_revision:design.draft_revision,label:design.label,edits,batch_ends:batchEnds(edits),batches:[],complete:false};
+     draft_revision:design.draft_revision,minecraft:design.minecraft,label:design.label,edits,batch_ends:batchEnds(edits),batches:[],complete:false};
     durable(file(id),record);
     return resume(record);
    }));
@@ -189,9 +201,11 @@ export function worldWriter({directory,send}){
      operations[index]=original;
     }
     ready(operations,next,original.world_uuid);
-    const edits=changesIn(source).map(c=>({x:c.x,y:c.y,z:c.z,before:c.after,state:c.before}));
+    const edits=changesIn(source).map(c=>({x:c.x,y:c.y,z:c.z,before:c.after,state:c.before,
+     ...(Object.hasOwn(c,'after_entity')?{before_entity:c.after_entity,after_entity:c.before_entity}:
+      Object.hasOwn(c,'after_sign')?{before_sign:c.after_sign,after_sign:c.before_sign}:{})}));
     const record={id:next,parent:id,order:operations.length,kind:direction,world_uuid:original.world_uuid,
-     draft_id:original.draft_id,draft_revision:original.draft_revision,label:original.label,edits,batch_ends:batchEnds(edits),batches:[],complete:false};
+     draft_id:original.draft_id,draft_revision:original.draft_revision,minecraft:source.minecraft??source.batches.find(b=>b.minecraft)?.minecraft,label:original.label,edits,batch_ends:batchEnds(edits),batches:[],complete:false};
     durable(file(next),record);
     return resume(record);
    }));

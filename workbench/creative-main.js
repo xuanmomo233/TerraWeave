@@ -301,7 +301,7 @@ function renderScene(incomingDelta){
     ?new Set([...delta.blocks,...delta.context_blocks].map(([,state])=>state).filter(state=>state!==null))
     :new Set([...Object.values(wanted.blocks),...Object.values(wanted.context_blocks??{})]);
    const opaqueStates=delta?new Set(previous.opaqueStates):new Set();
-   await Promise.all([...states].map(async state=>{if(await opaqueModel(state))opaqueStates.add(state);}));
+   await Promise.all([...states].map(async state=>{if(await opaqueModel(state,wanted.minecraft))opaqueStates.add(state);}));
    if(wanted!==snapshot||wantedRegion!==region)return;
    residentGeometry=null;
    chunks.origin=wanted.bounds.slice(0,3);
@@ -309,7 +309,7 @@ function renderScene(incomingDelta){
    else chunks.reset(makeIndex(wanted,1,{cull:true,opaqueStates}),config.max_y,config.min_y);
    while(chunks.busy)await new Promise(r=>setTimeout(r,10));
    const updated=await chunks.update((wanted.bounds[0]+wanted.bounds[3]+1)/2,(wanted.bounds[2]+wanted.bounds[5]+1)/2,256,256,{
-    parts:(state,options)=>parts(state,options,!!config.show_invisible),dirty,prepare:awaitTextures
+    parts:(state,options)=>parts(state,{...options,minecraft:wanted.minecraft},!!config.show_invisible),dirty,prepare:awaitTextures
    });
    if(wanted!==snapshot||wantedRegion!==region)return;
    residentGeometry={hash:wantedRegion.snapshot_hash,snapshot:wanted,profile,opaqueStates};
@@ -540,12 +540,12 @@ async function captures(q){
  return captureScope(async()=>{
   const r=q.region,snap=q.snapshot,origin=snap.bounds.slice(0,3);
   const scene=captureScene(q.display_mode),staged=new TexturedWorld(scene,api,parts);
-  const localChunks=new ChunkRenderer(scene,(s,o)=>parts(s,o,!!q.show_invisible),origin);
+  const localChunks=new ChunkRenderer(scene,(s,o)=>parts(s,{...o,minecraft:snap.minecraft},!!q.show_invisible),origin);
   const helpers=[];
   try{
    const states=new Set([...Object.values(snap.blocks),...Object.values(snap.context_blocks??{})]);
    const opaqueStates=new Set();
-   await Promise.all([...states].map(async state=>{if(await opaqueModel(state))opaqueStates.add(state);}));
+   await Promise.all([...states].map(async state=>{if(await opaqueModel(state,snap.minecraft))opaqueStates.add(state);}));
    localChunks.reset(makeIndex(snap,1,{cull:true,opaqueStates}),q.max_y,q.min_y);
    const b=snap.bounds;
    await localChunks.update((b[0]+b[3]+1)/2,(b[2]+b[5]+1)/2,256,256,{prepare:awaitTextures});
@@ -759,7 +759,7 @@ renderer.domElement.addEventListener('pointerdown',e=>{
   return;
  }
  if(!h||(h.source==='construction_grid'&&tool==='erase'))return;
- ui.picked(h.coordinate,h.state);
+ ui.picked(h.coordinate,h.state,h.appearance??snapshot.block_entities?.[h.coordinate.join()]);
  if(blockOutline){scene.remove(blockOutline);blockOutline.geometry.dispose();blockOutline.material.dispose();}const shape=new THREE.BoxGeometry(1.005,1.005,1.005);blockOutline=new THREE.LineSegments(new THREE.EdgesGeometry(shape),new THREE.LineBasicMaterial({color:0x65acff,depthTest:false}));shape.dispose();blockOutline.position.copy(local(h.coordinate.map(v=>v+.5)));scene.add(blockOutline);requestDraw();
  if(tool==='paint'||tool==='erase'){ui.paintAt(h,tool==='erase',e.shiftKey);return;}if(!marking)return;
  if(!corner){corner=h.coordinate;ui.say('第一个角 '+corner.join(', ')+'；请选择第二个角。');return;}

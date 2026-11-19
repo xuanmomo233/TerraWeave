@@ -30,7 +30,7 @@ for source in (root / "tools").glob("*.mjs"):
     target = stage / "tools" / source.name
     target.parent.mkdir(exist_ok=True)
     shutil.copyfile(source, target)
-for name in ("snapshot-delta.js", "package.json", "SDK.md"):
+for name in ("snapshot-delta.js", "minecraft-version.js", "package.json", "SDK.md"):
     shutil.copyfile(root / name, stage / name)
 (stage / "runtime").mkdir(exist_ok=True)
 shutil.copyfile(args.webview_bootstrapper, stage / "runtime/MicrosoftEdgeWebview2Setup.exe")
@@ -38,7 +38,7 @@ with ZipFile(args.node_zip) as node:
     for name in ("node.exe", "LICENSE"):
         dest = "NODE-LICENSE.txt" if name == "LICENSE" else name
         (stage / "runtime" / dest).write_bytes(node.read(f"node-v{node_version}-win-x64/{name}"))
-payload = [config, stage / "assets/block-states-1.20.1.json", stage / "snapshot-delta.js", stage / "package.json",
+payload = [config, stage / "assets/block-states-1.20.1.json", stage / "snapshot-delta.js", stage / "minecraft-version.js", stage / "package.json",
            stage / "SDK.md", stage / "runtime/node.exe", stage / "runtime/NODE-LICENSE.txt",
            stage / "runtime/MicrosoftEdgeWebview2Setup.exe"]
 payload.extend(stage / "tools" / file.name for file in (root / "tools").glob("*.mjs")
@@ -68,7 +68,7 @@ if args.archive:
         archive.write(binary, "织境工坊.exe")
         for file in sorted(payload):
             archive.write(file, file.relative_to(stage).as_posix())
-        for name in ("package-lock.json", "index.html", "server-plugin/WorkbenchLive.java", "server-plugin/plugin.yml"):
+        for name in ("package-lock.json", "index.html", "server-plugin/WorkbenchLive.java", "server-plugin/PaperBlockEntityCodec.java", "server-plugin/plugin.yml"):
             archive.write(root / name, name)
         for pattern in ("*.css","*.js","src-tauri/*.*","src-tauri/src/*.rs","src-tauri/icons/*","src-tauri/capabilities/*.json","public/*","tools/*"):
             for file in root.glob(pattern):

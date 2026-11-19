@@ -1,6 +1,6 @@
 {
   "name": "terraweave-workbench",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "private": true,
   "type": "module",
   "scripts": {
@@ -13,12 +13,13 @@
     "start": "node tools/creative-workbench.mjs show_workbench",
     "mcp": "node tools/creative-workbench.mjs --stdio",
     "mcp:writer": "node tools/writer-mcp.mjs --stdio",
-    "test": "node --test tools/creative-workbench.test.mjs tools/design-core.test.mjs tools/project-store.test.mjs tools/workspace-ui.test.mjs tools/planning.test.mjs tools/volume.test.mjs tools/fluid.test.mjs tools/textured-world.test.mjs tools/render-context.test.mjs tools/void-world.test.mjs tools/project-catalog.test.mjs tools/world-writer.test.mjs",
+    "test": "node --test tools/creative-workbench.test.mjs tools/design-core.test.mjs tools/project-store.test.mjs tools/workspace-ui.test.mjs tools/planning.test.mjs tools/anvil-compat.test.mjs tools/volume.test.mjs tools/fluid.test.mjs tools/textured-world.test.mjs tools/render-context.test.mjs tools/void-world.test.mjs tools/project-catalog.test.mjs tools/world-writer.test.mjs",
     "test:integration": "npm run test:ui",
     "test:design": "node --test tools/design-core.test.mjs tools/world-writer.test.mjs",
     "test:storage": "node --test tools/project-store.test.mjs",
-    "test:map": "node --test tools/planning.test.mjs tools/volume.test.mjs tools/render-context.test.mjs",
+    "test:map": "node --test tools/planning.test.mjs tools/anvil-compat.test.mjs tools/volume.test.mjs tools/render-context.test.mjs",
     "test:writer:live": "node tools/test-writer-live.mjs",
+    "test:entities:live": "node tools/test-block-entities-live.mjs",
     "test:ui": "node tools/map-visual-qa.mjs",
     "build:desktop": "tools\\build-desktop.cmd"
   },

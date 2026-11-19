@@ -15,6 +15,8 @@ export function draftContext(context,baseCells,changes,showTarget){
 }
 import {readWorldChunk} from './world-surface.mjs';
 import {sectionIndices} from './world-volume.mjs';
+import {completeAnvilChunk} from '../minecraft-version.js';
+import {blockEntityAppearance} from './block-entity-appearance.mjs';
 function savedChunkReader(directory,voidWorld){
  const chunks=new Map();
  function chunk(cx,cz){
@@ -23,7 +25,7 @@ function savedChunkReader(directory,voidWorld){
   let data;
   try{data=readWorldChunk(cx,cz,directory,voidWorld);}catch{}
   let result=null;
-  if(data?.DataVersion===3465&&['full','minecraft:full'].includes(data.Status)){
+  if(completeAnvilChunk(data)){
    const sections=new Map();
    result={sections,entities:data.block_entities??[]};
    for(const s of data.sections??[]){
@@ -57,14 +59,18 @@ export function savedDetailSnapshot(bounds,index){
  const identity={schema:1,world:index.world,minecraft:index.minecraft,uuid:index.world_uuid,world_revision:index.revision,
   environment_revision:index.environment_revision,bounds,context_source:'saved_anvil_neighbors',source:'saved_anvil_detail'};
  if(index.pristine_void) return {...identity,blocks:{},context_blocks:{},block_entity_count:0,block_entity_positions:[],unknown_chunks:[]};
- const reader=savedChunkReader(index.directory,index.void_world),blocks={},unknown_chunks=[],block_entity_positions=[];
+ const reader=savedChunkReader(index.directory,index.void_world),blocks={},unknown_chunks=[],block_entity_positions=[],block_entities={};
  for(let cz=Math.floor(bounds[2]/16);cz<=Math.floor(bounds[5]/16);cz++){
   for(let cx=Math.floor(bounds[0]/16);cx<=Math.floor(bounds[3]/16);cx++){
    const chunk=reader.chunk(cx,cz);
    if(!chunk){unknown_chunks.push(`${cx},${cz}`);continue;}
-   for(const {x,y,z} of chunk.entities){
+   for(const entity of chunk.entities){
+    const {x,y,z}=entity;
     const position=[x,y,z];
-    if(position.every((n,i)=>Number.isInteger(n)&&n>=bounds[i]&&n<=bounds[i+3]))block_entity_positions.push(position);
+    if(!position.every((n,i)=>Number.isInteger(n)&&n>=bounds[i]&&n<=bounds[i+3]))continue;
+    block_entity_positions.push(position);
+    const appearance=blockEntityAppearance(entity);
+    if(appearance)block_entities[position.join(',')]=appearance;
    }
   }
  }
@@ -77,7 +83,7 @@ export function savedDetailSnapshot(bounds,index){
  if(!Object.keys(blocks).length)throw Error('此范围没有可读取的存档区块，请选择已生成区域');
  return {
   ...identity,blocks,context_blocks:savedRenderContext(bounds,reader),
-  block_entity_count:block_entity_positions.length,block_entity_positions,unknown_chunks
+  block_entity_count:block_entity_positions.length,block_entity_positions,block_entities,unknown_chunks
  };
 }
 export function savedBlocks(keys,index){

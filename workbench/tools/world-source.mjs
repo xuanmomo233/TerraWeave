@@ -12,10 +12,18 @@ function readLink(root){
  return fs.existsSync(settings)?JSON.parse(fs.readFileSync(settings,'utf8')):null;
 }
 function levelHash(directory){return createHash('sha256').update(fs.readFileSync(path.join(directory,'level.dat'))).digest('hex');}
+export function overworldRegionDirectory(directory){
+ for(const relative of ['dimensions/minecraft/overworld/region','region']){
+  const candidate=path.join(directory,relative);
+  if(fs.statSync(candidate,{throwIfNoEntry:false})?.isDirectory())return candidate;
+ }
+ return null;
+}
 export function identifyWorld(directory,root=ROOT){
  const absolute=fs.realpathSync(path.resolve(root,directory));
- if(!fs.statSync(path.join(absolute,'region'),{throwIfNoEntry:false})?.isDirectory()||
-  !fs.statSync(path.join(absolute,'level.dat'),{throwIfNoEntry:false})?.isFile())throw Error('请选择包含 level.dat 和 region 的世界存档目录');
+ const region_directory=overworldRegionDirectory(absolute);
+ if(!region_directory||!fs.statSync(path.join(absolute,'level.dat'),{throwIfNoEntry:false})?.isFile())
+  throw Error('请选择包含 level.dat 和主世界区块的存档目录');
  const uid=path.join(absolute,'uid.dat');
  const bytes=fs.existsSync(uid)?fs.readFileSync(uid):null;
  if(bytes&&bytes.length!==16)throw Error('存档 uid.dat 无效');
@@ -23,7 +31,7 @@ export function identifyWorld(directory,root=ROOT){
  const uuid=hex?hex.match(/^(.{8})(.{4})(.{4})(.{4})(.{12})$/).slice(1).join('-'):
   localId(absolute);
  const voidWorld=readVoidWorld(absolute);
- return {directory:absolute,world_uuid:uuid,world:voidWorld?.name??path.basename(absolute),...(voidWorld?{void_world:voidWorld}:{})};
+ return {directory:absolute,region_directory,world_uuid:uuid,world:voidWorld?.name??path.basename(absolute),...(voidWorld?{void_world:voidWorld}:{})};
 }
 export function worldSource(root=ROOT,override=root===ROOT?process.env.TERRAWEAVE_WORLD:undefined){
  let directory;

@@ -31,7 +31,7 @@ export const MAP_TOOLS=[
 export function mapService(ctx){
  const {root,planning,desktopRequest,saveSnapshot,savePreview,displayRegion}=ctx;
  const viewFile=path.join(root,'map-view.json');
- const info=()=>{const index=worldIndex();const {regions,chunks,directory,...publicIndex}=index;let view=null;try{view=JSON.parse(fs.readFileSync(viewFile,'utf8'));}catch{}return {...publicIndex,view};};
+ const info=()=>{const index=worldIndex();const {regions,chunks,directory,region_directory,...publicIndex}=index;let view=null;try{view=JSON.parse(fs.readFileSync(viewFile,'utf8'));}catch{}return {...publicIndex,view};};
  function sceneInfo(index=worldIndex(),preview=false){
   const volumeCache=path.join(root,'volume-cache');
   const common={environment_revision:index.environment_revision,representation:'minecraft_block_models',

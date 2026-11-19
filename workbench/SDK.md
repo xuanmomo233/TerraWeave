@@ -2,7 +2,7 @@
 
 将整个 ZIP 解压至可写目录，双击第一层的「织境工坊.exe」。便携开发包与安装版均内置 Node.js，缺少 WebView2 时通过微软官方安装程序补齐。安装版支持 English、简体中文和自选安装目录。
 
-在「文件 → 世界存档来源」选择含 `level.dat` 和 `region` 的已有 Java 版存档。首次进入三维会从本机 1.20.1 安装或 Mojang 获取原版预览所需的模型和纹理。规划和预览写入本地 `project-state/workbench`，可用 `TERRAWEAVE_STATE` 指定独立工程目录。
+在「文件 → 世界存档来源」选择含 `level.dat` 的 Java 版存档根目录。首次进入三维会从本机资源或 Mojang 获取对应存档版本的原版模型和纹理。规划和预览写入本地 `project-state/workbench`，可用 `TERRAWEAVE_STATE` 指定独立工程目录。
 
 ## 开发与构建
 

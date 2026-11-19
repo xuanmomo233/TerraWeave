@@ -32,6 +32,7 @@ function orderedBlocks(blocks){
 export function snapshotBytes(snapshot){
  const canonical={schema:1,minecraft:snapshot.minecraft,world:snapshot.world,uuid:snapshot.uuid,bounds:snapshot.bounds,blocks:orderedBlocks(snapshot.blocks)};
  if(snapshot.context_blocks)canonical.context_blocks=orderedBlocks(snapshot.context_blocks);
+ if(snapshot.block_entities&&Object.keys(snapshot.block_entities).length)canonical.block_entities=orderedBlocks(snapshot.block_entities);
  return JSON.stringify(canonical);
 }
 export function projectStore(root){
@@ -115,7 +116,14 @@ export function projectStore(root){
  }
  function compact(){
   const data=initialize(),keep=new Set(),pending=[];
-  for(const e of Object.values(data.regions)){e.versions=e.versions.slice(0,data.retention.region_versions);pending.push(e.head,...e.versions);}
+  let trimmed=false;
+  for(const e of Object.values(data.regions)){
+   if(e.versions.length>data.retention.region_versions){
+    e.versions=e.versions.slice(0,data.retention.region_versions);
+    trimmed=true;
+   }
+   pending.push(e.head,...e.versions);
+  }
   try{pending.push(read(path.join(root,'current-region.json')).id);}catch(e){if(e.code!=='ENOENT')throw e;}
   for(const filename of files('drafts')){const d=read(path.join(root,'drafts',filename));pending.push(d.base_region_id,d.preview_region_id);}
   for(const c of data.checkpoints)pending.push(c.region_id);
@@ -131,8 +139,9 @@ export function projectStore(root){
   for(const file of files('regions'))if(!keep.has(file.slice(0,-5)))remove.push(path.join(root,'regions',file));
   for(const file of files('snapshots'))if(!snapshots.has(file.slice(0,-5)))remove.push(path.join(root,'snapshots',file));
   // Reference discovery completes before any unlink. Draft bases, images and explicit checkpoints remain pinned.
+  if(trimmed)atomic(manifest,data);
   let bytes=0;for(const file of remove){bytes+=fs.statSync(file).size;fs.unlinkSync(file);}
-  atomic(manifest,data);return {removed_files:remove.length,freed_bytes:bytes,...summary()};
+  return {removed_files:remove.length,freed_bytes:bytes,...summary()};
  }
  return {initialize,decorate,resolve,entityFor,saveSnapshot,commit,savePreview,listRegions,revisions,checkpoint,saveWorkspace,archive,retention,cleanupAssets,summary,compact};
 }

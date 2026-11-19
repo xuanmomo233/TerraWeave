@@ -1,10 +1,11 @@
 use crate::{
     iris_context::{gl, Context},
     iris_mesh::{Scene, SceneSource, Texture},
-    iris_pack::{driver, Pack, PackSources, Program},
+    iris_pack::{driver, image_format, Pack, PackSources, Program},
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use base64::{engine::general_purpose::STANDARD,Engine as _};
 use std::ptr::null;
 
 const IDENTITY: [f32; 16] = [
@@ -261,7 +262,7 @@ fn noise_texture(size: i32) -> Texture {
 }
 fn color_index(name: &str) -> Option<usize> {
     if let Some(n) = name.strip_prefix("colortex") {
-        return n.parse().ok().filter(|n| *n < 8);
+        return n.parse().ok().filter(|n| *n < 16);
     }
     [
         "gcolor",
@@ -277,13 +278,33 @@ fn color_index(name: &str) -> Option<usize> {
     .position(|n| *n == name)
 }
 
+fn image_slot(name:&str)->Option<usize> {
+    name.strip_prefix("colorimg")?.parse().ok()
+}
+fn program_stage(program:&Program)->&str {
+    let name=program.source.group.as_deref().unwrap_or(&program.source.name);
+    if name.starts_with("gbuffers_")||name=="shadow" { return "gbuffers"; }
+    if name=="final" { return "composite"; }
+    name.trim_end_matches(|c:char| c.is_ascii_digit())
+}
+
+struct StorageBuffer {
+    id:u32,
+    bytes:usize,
+}
+impl Drop for StorageBuffer {
+    fn drop(&mut self){unsafe{gl::DeleteBuffers(1,&self.id);}}
+}
+
 struct Buffers {
     width: i32,
     height: i32,
     colors: Vec<[Texture; 2]>,
-    read: [usize; 8],
+    read: [usize; 16],
     depth: [Texture; 3],
     screen: Texture,
+    custom: Vec<Texture>,
+    storage:Vec<(u32,StorageBuffer)>,
 }
 impl Buffers {
     fn new(pack: &Pack, width: i32, height: i32, fb: &Framebuffer) -> Result<Self, String> {
@@ -293,15 +314,55 @@ impl Buffers {
             .iter()
             .map(|f| [color(*f), color(*f)])
             .collect();
+        let mut custom=Vec::new();
+        let mut image_bytes=0i64;
+        for image in &pack.images {
+            let dimension=|index:usize,base:i32| if image.relative {
+                (image.size[index]*base as f32).ceil() as i32
+            } else {image.size[index] as i32};
+            let (w,h)=(dimension(0,width).max(1),dimension(1,height).max(1));
+            image_bytes+=i64::from(w)*i64::from(h)*16;
+            if w>4096||h>4096||image_bytes>128*1024*1024 {
+                return Err(format!("自定义光影图像超出显存范围：{}",image.image));
+            }
+            let tex=buffer_texture(w,h,image_format(&image.format).unwrap(),false);
+            Self::clear_color(fb,tex.0,[0.;4])?;
+            custom.push(tex);
+        }
+        let mut storage=Vec::new();
+        let mut total=0usize;
+        for source in &pack.storage {
+            let bytes=source.capacity(width,height).ok_or("光影存储缓冲大小溢出")?;
+            total=total.checked_add(bytes).ok_or("光影存储缓冲大小溢出")?;
+            if total>128*1024*1024{return Err("光影存储缓冲超出显存范围".into());}
+            let seed=source.seed.as_ref().map(|data|STANDARD.decode(data).map_err(|_|"无效的存储缓冲初始数据")).transpose()?;
+            if seed.as_ref().is_some_and(|s|s.len()>bytes){return Err("初始数据长于存储缓冲".into());}
+            let mut buffer=StorageBuffer{id:0,bytes};
+            unsafe{
+                gl::GenBuffers(1,&mut buffer.id);
+                gl::BindBuffer(gl::SHADER_STORAGE_BUFFER,buffer.id);
+                gl::BufferData(gl::SHADER_STORAGE_BUFFER,bytes as isize,null(),gl::DYNAMIC_DRAW);
+                gl::ClearBufferData(gl::SHADER_STORAGE_BUFFER,gl::R8UI,gl::RED_INTEGER,gl::UNSIGNED_BYTE,null());
+                if let Some(seed)=seed {
+                    gl::BufferSubData(gl::SHADER_STORAGE_BUFFER,0,seed.len() as isize,seed.as_ptr().cast());
+                }
+                gl::BindBuffer(gl::SHADER_STORAGE_BUFFER,0);
+                let error=gl::GetError();
+                if error!=gl::NO_ERROR{return Err(format!("光影存储缓冲分配失败，OpenGL 0x{error:x}"));}
+            }
+            storage.push((source.binding,buffer));
+        }
         let buffers = Self {
             width,
             height,
             colors,
-            read: [0; 8],
+            read: [0; 16],
             depth: std::array::from_fn(|_| {
                 buffer_texture(width, height, gl::DEPTH_COMPONENT24, true)
             }),
             screen: color(gl::RGBA8),
+            custom,
+            storage,
         };
         for pair in &buffers.colors {
             for tex in pair {
@@ -327,7 +388,10 @@ impl Buffers {
         Ok(())
     }
     fn clear(&mut self, pack: &Pack, fb: &Framebuffer, fog: [f32; 3]) -> Result<(), String> {
-        for slot in 0..8 {
+        for (index,image) in pack.images.iter().enumerate() {
+            if image.clear { Self::clear_color(fb,self.custom[index].0,[0.;4])?; }
+        }
+        for slot in 0..self.colors.len() {
             if pack.persistent.contains(&slot) {
                 continue;
             }
@@ -360,6 +424,7 @@ impl Buffers {
                 Some("screen") => Ok(Some(self.screen.0)),
                 Some(name) => {
                     let i = color_index(name).ok_or_else(|| format!("颜色附件无效：{name}"))?;
+                    if i>=self.colors.len(){return Err(format!("颜色附件尚未分配：{name}"));}
                     Ok(Some(self.colors[i][self.read[i] ^ (flip as usize)].0))
                 }
             })
@@ -381,14 +446,16 @@ struct Resources {
     shadow_color: Texture,
     shadow_depth: [Texture; 2],
     neutral: Texture,
+    textures: Vec<Texture>,
     buffers: Option<Buffers>,
     previous: Option<DrawFrame>,
     sequence: u64,
 }
 impl Resources {
-    fn new(pack: Pack, scene: Scene) -> Self {
+    fn new(pack: Pack, scene: Scene) -> Result<Self,String> {
         let (shadow, noise) = (pack.shadow_size, pack.noise_size);
-        Self {
+        let textures=pack.textures.iter().map(|entry|Texture::png(&entry.png)).collect::<Result<_,_>>()?;
+        Ok(Self {
             pack,
             scene,
             noise: noise_texture(noise),
@@ -397,10 +464,11 @@ impl Resources {
                 buffer_texture(shadow, shadow, gl::DEPTH_COMPONENT24, true)
             }),
             neutral: Texture::rgba(1, 1, &[128, 128, 255, 255], false),
+            textures,
             buffers: None,
             previous: None,
             sequence: 0,
-        }
+        })
     }
 }
 
@@ -499,13 +567,40 @@ impl Render<'_> {
     fn bind_uniforms(&self, p: &Program, base_texture: u32) -> Result<(), String> {
         let f = self.frame;
         let old = self.previous;
+        let time_angle=f.day_time as f32 / 24000.0;
         p.bind();
+        for (binding,minimum) in &p.storage_blocks{
+            let (_,buffer)=self.buffer.storage.iter()
+                .find(|(candidate,buffer)|candidate==binding&&buffer.bytes>=*minimum)
+                .ok_or_else(||format!("{} 的存储缓冲 {binding} 太小",p.source.name))?;
+            unsafe{gl::BindBufferBase(gl::SHADER_STORAGE_BUFFER,*binding,buffer.id);}
+        }
+        if p.images.len()>8{return Err(format!("{} 图像绑定数超出限制",p.source.name));}
+        for (unit,name) in p.images.iter().enumerate() {
+            if !gl::BindImageTexture::is_loaded(){return Err("显卡无法绑定光影图像".into());}
+            let (texture,format)=if let Some(slot)=image_slot(name) {
+                let format=*self.assets.pack.formats.get(slot).ok_or_else(||format!("尚未分配的光影图像 {name}"))?;
+                (self.buffer.read(slot),format)
+            } else {
+                let index=self.assets.pack.images.iter().position(|i|i.image==*name)
+                    .ok_or_else(||format!("找不到光影图像 {name}"))?;
+                (self.buffer.custom[index].0,image_format(&self.assets.pack.images[index].format).unwrap())
+            };
+            unsafe { gl::BindImageTexture(unit as u32,texture,0,gl::FALSE,0,gl::READ_WRITE,format); }
+            p.int(name,unit as i32);
+        }
         for (unit, (name, compare)) in p.samplers.iter().enumerate() {
             if unit >= 16 {
                 return Err(format!("{} 的采样器数超出限制", p.source.name));
             }
             let mut sampler = 0;
-            let tex = if let Some(slot) = color_index(name) {
+            let stage=program_stage(p);
+            let custom=self.assets.pack.textures.iter().position(|t|t.sampler==*name&&t.stage.as_deref()==Some(stage))
+                .or_else(||self.assets.pack.textures.iter().position(|t|t.sampler==*name&&t.stage.is_none()));
+            let image=self.assets.pack.images.iter().position(|t|t.sampler==*name);
+            let tex = if let Some(index)=custom { self.assets.textures[index].0 }
+            else if let Some(index)=image { self.buffer.custom[index].0 }
+            else if let Some(slot) = color_index(name) {
                 self.buffer.read(slot)
             } else {
                 match name.as_str() {
@@ -541,10 +636,14 @@ impl Render<'_> {
             ("viewHeight", f.height as f32),
             ("aspectRatio", f.width as f32 / f.height as f32),
             ("rainStrength", f.rain),
+            ("timeAngle", time_angle),
+            ("timeBrightness", (time_angle * std::f32::consts::TAU).sin().max(0.0)),
             ("wetness", f.rain),
             ("frameTimeCounter", f.time_counter % 3600.0),
             ("BiomeTemp", f.biome_temp),
             ("inSwamp", f.in_swamp),
+            ("isSwamp", f.in_swamp),
+            ("alphaTestRef", p.source.alpha_test),
             ("sunElevation", f.sun_world[1]),
             ("nightVision", 0.),
             ("blindness", 0.),
@@ -560,6 +659,7 @@ impl Render<'_> {
             ("heldBlockLightValue2", 0),
             ("entityId", 0),
             ("framemod8", (self.sequence % 8) as i32),
+            ("framemod2", (self.sequence % 2) as i32),
             ("frameCounter", self.sequence as i32),
         ] {
             p.int(name, value);
@@ -593,6 +693,10 @@ impl Render<'_> {
         Ok(())
     }
     fn check(&mut self, name: &str) -> Result<(), String> {
+        let p=self.program(name)?;
+        if !p.storage_blocks.is_empty()||!p.images.is_empty(){
+            unsafe {gl::MemoryBarrier(gl::ALL_BARRIER_BITS);}
+        }
         let error = unsafe { gl::GetError() };
         if error != gl::NO_ERROR {
             return Err(format!("{name} 执行失败，OpenGL 0x{error:x}"));
@@ -650,6 +754,7 @@ impl Render<'_> {
             Some(self.buffer.depth[0].0),
         )?;
         self.bind_uniforms(basic, self.assets.scene.atlas.0)?;
+        basic.int("renderStage", 1);
         fullscreen();
         self.check("gbuffers_skybasic")?;
         let sky = self.program("gbuffers_skytextured")?;
@@ -657,17 +762,30 @@ impl Render<'_> {
             &self.buffer.destination(sky, false)?,
             Some(self.buffer.depth[0].0),
         )?;
+        unsafe {
+            gl::Enable(gl::ALPHA_TEST);
+            gl::AlphaFunc(gl::GREATER, 0.0);
+            gl::Enable(gl::BLEND);
+            // Vanilla's celestial sprites have a black RGB background, including in opaque PNGs.
+            gl::BlendFuncSeparate(gl::SRC_ALPHA, gl::ONE, gl::ZERO, gl::ONE);
+        }
         matrices(&f.rotation, &f.projection);
         self.bind_uniforms(sky, self.assets.scene.sun.0)?;
+        sky.int("renderStage", 4);
         celestial(f.sun_world, 30., [[0., 0.], [1., 0.], [1., 1.], [0., 1.]]);
         let x = (f.moon_phase % 4) as f32 * 0.25;
         let y = 1. - (f.moon_phase / 4) as f32 * 0.5;
         self.bind_uniforms(sky, self.assets.scene.moon.0)?;
+        sky.int("renderStage", 5);
         celestial(
             f.sun_world.map(|n| -n),
             20.,
             [[x, y - 0.5], [x + 0.25, y - 0.5], [x + 0.25, y], [x, y]],
         );
+        unsafe {
+            gl::Disable(gl::ALPHA_TEST);
+            gl::Disable(gl::BLEND);
+        }
         self.check("gbuffers_skytextured")
     }
     fn geometry(&mut self, name: &str) -> Result<(), String> {
@@ -677,6 +795,7 @@ impl Render<'_> {
             Some(self.buffer.depth[0].0),
         )?;
         self.bind_uniforms(p, self.assets.scene.atlas.0)?;
+        p.int("renderStage", match name { "gbuffers_block"=>12, "gbuffers_water"=>17, _=>8 });
         matrices(&self.frame.view, &self.frame.projection);
         unsafe {
             gl::Enable(gl::DEPTH_TEST);
@@ -729,7 +848,50 @@ impl Render<'_> {
         self.buffer.flip(&targets);
         self.check(name)
     }
-    fn run(&mut self, render_shadow: bool) -> Result<(), String> {
+    fn dispatch_compute(&mut self, name:&str) -> Result<(),String> {
+        let p=self.program(name)?;
+        let local=p.local_size.ok_or("光影计算阶段缺少工作组尺寸")?;
+        if local.iter().any(|n| *n<=0) { return Err("光影计算阶段工作组尺寸无效".into()); }
+        self.bind_uniforms(p,self.assets.scene.atlas.0)?;
+        let relative=p.source.relative.unwrap_or([1.,1.]);
+        let group=p.source.groups.unwrap_or_else(||[
+            (self.frame.width as f32*relative[0]/local[0] as f32).ceil() as u32,
+            (self.frame.height as f32*relative[1]/local[1] as f32).ceil() as u32,1]);
+        let invocations=group.iter().fold(1u64,|acc,&n|acc.saturating_mul(u64::from(n)))
+            .saturating_mul(local.iter().map(|&n|n as u64).product());
+        if group.iter().any(|&n|n==0||n>65535)||invocations>268_435_456 {
+            return Err(format!("{} 的计算工作组超出渲染范围",p.source.name));
+        }
+        unsafe {
+            gl::DispatchCompute(group[0],group[1],group[2]);
+            gl::MemoryBarrier(gl::ALL_BARRIER_BITS);
+        }
+        self.check(name)
+    }
+    fn run_group(&mut self,name:&str)->Result<(),String>{
+        let mut compute=self.assets.pack.programs.iter()
+            .filter(|(_,p)|p.source.group.as_deref()==Some(name))
+            .map(|(key,_)|key.clone()).collect::<Vec<_>>();
+        compute.sort_unstable();
+        for kernel in compute {self.dispatch_compute(&kernel)?;}
+        if self.assets.pack.programs.contains_key(name){self.composite(name)?;}
+        Ok(())
+    }
+    fn fullscreen_passes(&mut self, prefix: &str) -> Result<(), String> {
+        let mut passes = self.assets.pack.programs.values().filter_map(|program| {
+            let name=program.source.group.as_ref().unwrap_or(&program.source.name);
+            let suffix = name.strip_prefix(prefix)?;
+            let order = if suffix.is_empty() { 0 } else { suffix.parse::<u32>().ok()? };
+            Some((order, name.clone()))
+        }).collect::<Vec<_>>();
+        passes.sort_unstable();
+        passes.dedup();
+        for (_, name) in passes {
+            self.run_group(&name)?;
+        }
+        Ok(())
+    }
+    fn run(&mut self, render_shadow: bool, setup:bool) -> Result<(), String> {
         let f = self.frame;
         unsafe {
             gl::Disable(gl::CULL_FACE);
@@ -737,11 +899,14 @@ impl Render<'_> {
             gl::Disable(gl::SCISSOR_TEST);
         }
         texture_matrices();
+        self.buffer
+            .clear(&self.assets.pack, self.framebuffer, f.fog_color)?;
+        if setup {self.fullscreen_passes("setup")?;}
+        self.fullscreen_passes("begin")?;
         if render_shadow {
             self.shadow()?;
         }
-        self.buffer
-            .clear(&self.assets.pack, self.framebuffer, f.fog_color)?;
+        self.fullscreen_passes("prepare")?;
         self.sky()?;
         self.geometry("gbuffers_terrain")?;
         if self.assets.pack.programs.contains_key("gbuffers_block") {
@@ -749,29 +914,14 @@ impl Render<'_> {
         }
         self.framebuffer
             .copy_depth_to(self.scratch, self.buffer.depth[1].0, f.width, f.height)?;
+        self.framebuffer
+            .copy_depth_to(self.scratch, self.buffer.depth[2].0, f.width, f.height)?;
+        self.fullscreen_passes("deferred")?;
         self.geometry("gbuffers_water")?;
         self.framebuffer
             .copy_depth_to(self.scratch, self.buffer.depth[2].0, f.width, f.height)?;
-        let mut composites = self
-            .assets
-            .pack
-            .programs
-            .keys()
-            .filter_map(|name| {
-                let suffix = name.strip_prefix("composite")?;
-                let order = if suffix.is_empty() {
-                    0
-                } else {
-                    suffix.parse::<u32>().ok()?
-                };
-                Some((order, name.clone()))
-            })
-            .collect::<Vec<_>>();
-        composites.sort_unstable_by_key(|(i, _)| *i);
-        for (_, name) in composites {
-            self.composite(&name)?;
-        }
-        self.composite("final")
+        self.fullscreen_passes("composite")?;
+        self.run_group("final")
     }
     fn read_final(&self) -> Result<Vec<u8>, String> {
         let f = self.frame;
@@ -832,9 +982,15 @@ impl Engine {
         let pack = Pack::compile(source)?;
         for (name, program) in &pack.programs {
             if !matches!(name.as_str(),"shadow"|"gbuffers_skybasic"|"gbuffers_skytextured"|"gbuffers_terrain"|"gbuffers_block"|"gbuffers_water"|"final")
-                && !name.starts_with("composite"){continue;}
+                && program.local_size.is_none()
+                && !["begin","prepare","deferred","composite"].iter().any(|prefix|name.starts_with(prefix)){continue;}
             if program.samplers.len()>16{return Err(format!("{name} 的采样器数超出限制"));}
             for (sampler,_) in &program.samplers{
+                if pack.textures.iter().any(|t|t.sampler==*sampler&&(t.stage.is_none()||t.stage.as_deref()==Some(program_stage(program))))
+                    ||pack.images.iter().any(|i|i.sampler==*sampler){continue;}
+                if color_index(sampler).is_some_and(|slot|slot>=pack.formats.len()){
+                    return Err(format!("{name} 引用了未分配的颜色缓冲 {sampler}"));
+                }
                 if color_index(sampler).is_none()&&!matches!(sampler.as_str(),"texture"|"gtexture"|"tex"|"normals"|"specular"|"lightmap"|"noisetex"|"depthtex0"|"gdepthtex"|"depthtex1"|"depthtex2"|"shadowcolor"|"shadowcolor0"|"shadowtex0"|"shadowtex1"|"shadow"|"watershadow"){
                     return Err(format!("{name} 使用尚未接入的纹理 {sampler}"));
                 }
@@ -856,17 +1012,17 @@ impl Engine {
         if self.checked.as_ref().is_none_or(|p|p.hash!=pack.hash){self.check(pack)?;}
         let compiled=self.checked.take().unwrap();
         let count = compiled.programs.len();
-        self.resources = Some(Resources::new(compiled, scene));
+        self.resources = Some(Resources::new(compiled, scene)?);
         Ok(json!({"compiled_programs":count,"driver":driver()}))
     }
     pub fn draw(&mut self, frame: DrawFrame) -> Result<Vec<u8>, String> {
         frame.validate()?;
         let state = self.resources.as_mut().ok_or("尚未打开离线光影场景")?;
-        if state
+        let new_buffers=state
             .buffers
             .as_ref()
-            .is_none_or(|b| b.width != frame.width || b.height != frame.height)
-        {
+            .is_none_or(|b| b.width != frame.width || b.height != frame.height);
+        if new_buffers {
             state.buffers = Some(Buffers::new(
                 &state.pack,
                 frame.width,
@@ -902,7 +1058,7 @@ impl Engine {
                     .clear_history(&state.pack, &self.framebuffer)?;
             }
             for sample in 0..frame.samples {
-                rendering.run(sample == 0)?;
+                rendering.run(sample == 0,new_buffers&&sample==0)?;
                 if sample == 0 {
                     passes = std::mem::take(&mut rendering.passes);
                 } else {
@@ -917,7 +1073,7 @@ impl Engine {
         state.buffers = Some(buffer);
         if result.is_ok() {
             state.sequence = sequence + u64::from(frame.samples);
-            self.report = json!({"archive":state.pack.name,"archive_sha256":state.pack.hash,"driver":driver(),
+            self.report = json!({"archive":state.pack.name,"archive_sha256":state.pack.archive_sha256,"render_profile_sha256":state.pack.hash,"driver":driver(),
               "compiled_programs":state.pack.programs.len(),"stages":passes,"vertices":state.scene.vertices,
               "frame":state.sequence,"temporal_samples":frame.samples,"history_reset":reset,
               "shader_time":frame.time_counter,"width":frame.width,"height":frame.height});

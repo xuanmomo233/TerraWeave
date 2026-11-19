@@ -1,13 +1,29 @@
 import {invoke} from '@tauri-apps/api/core';
 import {Matrix4,Vector3} from 'three';
-import {createTextureAtlas} from './textured-world.js';
+import {createTextureAtlas,modelGroupKey} from './textured-world.js';
 import {awaitTextures} from './model-terrain.js';
 import {callWorkbench} from './workbench-api.js';
 
-const keyFor=g=>JSON.stringify([g.state,g.mask,g.fluid_mask,g.fluid_corners]);
 const blockEntity=/^minecraft:(?:conduit|chest|trapped_chest|ender_chest|.*_bed|.*_banner|.*_sign|.*_head|.*_skull|.*shulker_box|end_portal)(?:\[|$)/;
 const celestialUp=new Vector3(0,1,0);
 const toArray=attribute=>Array.from(attribute.array);
+const moonNames=['full_moon','waning_gibbous','third_quarter','waning_crescent','new_moon','waxing_crescent','first_quarter','waxing_gibbous'];
+
+async function celestialTextures(minecraft){
+ const read=name=>invoke('read_asset',{name:'minecraft/textures/environment/'+name+'.png',minecraft});
+ try{return await Promise.all([read('sun'),read('moon_phases')]);}
+ catch{
+  const [sun,...directory]=await Promise.all([read('celestial/sun'),...moonNames.map(name=>read('celestial/moon/'+name))]);
+  const phases=await Promise.all(directory.map(async url=>{
+   const image=new Image();image.src=url;await image.decode();return image;
+  }));
+  const size=Math.max(...phases.map(p=>Math.max(p.width,p.height))),canvas=document.createElement('canvas');
+  canvas.width=size*4;canvas.height=size*2;
+  const ctx=canvas.getContext('2d');ctx.imageSmoothingEnabled=false;
+  phases.forEach((phase,i)=>ctx.drawImage(phase,i%4*size,Math.floor(i/4)*size,size,size));
+  return [sun,canvas.toDataURL('image/png')];
+ }
+}
 
 function entityId(state,rules,water){
  const [name,properties='']=state.replace(/\]$/,'').split('[');
@@ -46,7 +62,7 @@ async function collectScene({lod,chunks,snapshot,region},inputs){
  for(const group of lod.enabled?lod.meshes.values():[]){
   const tile=group.userData.tile;
   for(const g of tile.groups){
-   const parts=lod.prepared.get(keyFor(g));if(!parts?.length)continue;
+   const parts=lod.prepared.get(modelGroupKey(g,tile.minecraft));if(!parts?.length)continue;
    const positions=positionsFor(tile,g,region.panorama?null:snapshot.bounds);
    if(!positions.length)continue;
    for(const part of parts){
@@ -85,7 +101,7 @@ async function collectScene({lod,chunks,snapshot,region},inputs){
    if(!ids.has(idKey))ids.set(idKey,entityId(state,inputs.pack.block_rules,water));
    batches.push({model,positions,entity:ids.get(idKey)});
   }
-  const [sun,moon]=await Promise.all(['sun','moon_phases'].map(name=>invoke('read_asset',{name:'minecraft/textures/environment/'+name+'.png'})));
+  const [sun,moon]=await celestialTextures(snapshot.minecraft);
   return {scene:{models,batches,atlas:canvas.toDataURL('image/png'),sun,moon,light:inputs.world.chunks,origin:snapshot.bounds.slice(0,3)},missing:[...missing]};
  }finally{if(!shared)textureAtlas.texture.dispose();}
 }
@@ -198,6 +214,7 @@ export class OfflineIrisView{
   return this.canvas;
  }
  show(data){
+  if(data.region.panorama&&!data.lod.meshes.size)return;
   if(this.pending){this.queued=data;return;}
   this.nextFrameAt=performance.now()+1000/30;
   this.pending=this.draw(data).catch(e=>{

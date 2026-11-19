@@ -270,7 +270,7 @@ impl Texture {
         }
         Self(id)
     }
-    fn png(encoded: &str) -> Result<Self, String> {
+    pub(crate) fn png(encoded: &str) -> Result<Self, String> {
         let data = encoded
             .strip_prefix("data:image/png;base64,")
             .ok_or("贴图必须为 PNG")?;

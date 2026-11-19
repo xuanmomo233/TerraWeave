@@ -10,23 +10,24 @@ const read=(file,fallback)=>{
 };
 const entries=dir=>fs.existsSync(dir)?fs.readdirSync(dir,{withFileTypes:true}):[];
 const compatibility=new Map();
-function shaderEntry(assets,id){
- const file=path.join(assets,'shaderpacks',id),stamp=fs.statSync(file),key=stamp.size+':'+stamp.mtimeMs;
+function shaderEntry(assets,id,minecraft){
+ const file=path.join(assets,'shaderpacks',id),stamp=fs.statSync(file),options=fs.statSync(file+'.txt',{throwIfNoEntry:false});
+ const key=[minecraft,stamp.size,stamp.mtimeMs,options?.size,options?.mtimeMs].join(':');
  const previous=compatibility.get(file);
- if(previous?.key===key)return previous.entry;
+ if(previous?.key===key&&!fs.existsSync(file+'.inputs'))return previous.entry;
  let issues;
- try{issues=checkIrisSupport(nativeIrisSources(assets,id));}catch(error){issues=[error.message];}
+ try{issues=checkIrisSupport(nativeIrisSources(assets,id,minecraft));}catch(error){issues=[error.message];}
  const entry={id,name:id,format:'iris_zip',supported:issues.length===0,issues};
  compatibility.set(file,{key,entry});
  return entry;
 }
 
-export function readRenderSettings(assets){
+export function readRenderSettings(assets,minecraft){
  const config=read(path.join(assets,'render-settings.json'),{pack_order:['流云琼阁启动器材质包.zip'],shader:'off',roots:[]});
  const packs=entries(path.join(assets,'resourcepacks')).filter(e=>e.isDirectory()||e.isFile()&&e.name.toLowerCase().endsWith('.zip')).map(e=>e.name);
  const shaders=entries(path.join(assets,'shaderpacks'))
   .filter(e=>e.isFile()&&e.name.toLowerCase().endsWith('.zip'))
-  .map(e=>shaderEntry(assets,e.name));
+  .map(e=>shaderEntry(assets,e.name,minecraft));
  const selected=shaders.find(entry=>entry.id===config.shader);
  const shader=selected?.supported?config.shader:'off';
  return {pack_order:config.pack_order,shader,packs,shaders,shader_error:selected&&!selected.supported?selected.issues.join(' · '):undefined};
@@ -69,8 +70,8 @@ function extractPack(bytes,target){
  if(!imported)throw Error('未找到可导入的 Minecraft 方块资源');
 }
 
-export function saveRenderSettings(assets,args){
- const catalog=readRenderSettings(assets),order=args.pack_order;
+export function saveRenderSettings(assets,args,minecraft){
+ const catalog=readRenderSettings(assets,minecraft),order=args.pack_order;
  if(!Array.isArray(order)||order.length>20||new Set(order).size!==order.length||order.some(n=>!catalog.packs.includes(n)))throw Error('无效的材质包顺序');
  if(args.shader!=='off'&&!catalog.shaders.some(s=>s.id===args.shader&&s.supported))throw Error('请选择工作台支持的光影配置');
  const roots=order.map(name=>{
@@ -90,7 +91,7 @@ export function saveRenderSettings(assets,args){
  const out=path.join(assets,'render-settings.json'),pending=out+'.pending-'+randomUUID();
  fs.writeFileSync(pending,JSON.stringify(config),{flag:'wx'});
  fs.renameSync(pending,out);
- return readRenderSettings(assets);
+ return readRenderSettings(assets,minecraft);
 }
 
 export function assetRoots(assets){

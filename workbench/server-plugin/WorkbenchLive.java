@@ -1,9 +1,15 @@
 import org.bukkit.*;
 import org.bukkit.block.Block;
+import org.bukkit.block.BlockState;
+import org.bukkit.block.Sign;
 import org.bukkit.block.TileState;
 import org.bukkit.block.data.BlockData;
+import org.bukkit.block.sign.Side;
+import org.bukkit.block.sign.SignSide;
 import org.bukkit.plugin.java.JavaPlugin;
 import com.google.gson.*;
+import net.kyori.adventure.text.serializer.gson.GsonComponentSerializer;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.nio.channels.FileChannel;
@@ -11,9 +17,10 @@ import java.security.MessageDigest;
 import java.util.*;
 
 public final class WorkbenchLive extends JavaPlugin {
-    private final Gson gson = new GsonBuilder().create();
+    private final Gson gson = new GsonBuilder().serializeNulls().create();
     private Path root, requests, responses, receipts, intents;
     private World world;
+    private PaperBlockEntityCodec entityCodec;
     public void onEnable() {
         try {
             root = getDataFolder().toPath();
@@ -23,6 +30,10 @@ public final class WorkbenchLive extends JavaPlugin {
             Files.createDirectories(receipts); Files.createDirectories(intents);
             String name = getServer().getWorlds().get(0).getName();
             world = Bukkit.getWorld(name);
+            try { entityCodec = PaperBlockEntityCodec.detect(); }
+            catch (ReflectiveOperationException unavailable) {
+                getLogger().warning("Exact block entity restore is unavailable: " + unavailable);
+            }
             getServer().getScheduler().runTaskTimer(this, this::poll, 1L, 2L);
             getServer().getScheduler().runTaskTimer(this, this::heartbeat, 1L, 20L);
             getLogger().info("Persistent map workbench ready: " + world.getName());
@@ -40,7 +51,10 @@ public final class WorkbenchLive extends JavaPlugin {
     private JsonObject identity() {
         JsonObject r = new JsonObject();
         r.addProperty("pid", ProcessHandle.current().pid()); r.addProperty("world", world.getName());
-        r.addProperty("world_uuid", world.getUID().toString()); r.addProperty("minecraft", "1.20.1");
+        r.addProperty("world_uuid", world.getUID().toString()); r.addProperty("minecraft", Bukkit.getMinecraftVersion());
+        r.addProperty("data_version", Bukkit.getUnsafe().getDataVersion());
+        r.addProperty("sign_payload", 1);
+        r.addProperty("block_entity_payload", entityCodec == null ? 0 : 1);
         r.addProperty("at_ms", System.currentTimeMillis()); r.addProperty("server_root", getServer().getWorldContainer().getAbsolutePath());
         return r;
     }
@@ -68,7 +82,69 @@ public final class WorkbenchLive extends JavaPlugin {
         r.add("blocks",blocks); r.addProperty("block_entity_count",blockEntities.size());r.add("block_entity_positions",blockEntities);r.add("unknown_chunks",gson.toJsonTree(unknown));
         r.addProperty("source","live_paper_main_thread"); return r;
     }
-    private record Edit(int x,int y,int z,BlockData data,String before) {}
+    private record Edit(int x,int y,int z,BlockData data,String before,JsonElement beforeEntity,JsonElement afterEntity) {}
+
+    private static JsonElement signPayload(BlockState state) throws IOException {
+        if (!(state instanceof Sign sign)) return JsonNull.INSTANCE;
+        JsonObject payload = new JsonObject();
+        payload.addProperty("waxed", sign.isWaxed());
+        for (Side side : Side.values()) {
+            SignSide surface = sign.getSide(side);
+            JsonObject data = new JsonObject();
+            JsonArray lines = new JsonArray();
+            for (int i=0;i<4;i++) lines.add(GsonComponentSerializer.gson().serialize(surface.line(i)));
+            data.add("lines", lines);
+            data.addProperty("color", surface.getColor().name());
+            data.addProperty("glowing", surface.isGlowingText());
+            payload.add(side.name(), data);
+        }
+        var persistent = sign.getPersistentDataContainer();
+        if (!persistent.isEmpty()) payload.addProperty("persistent", Base64.getEncoder().encodeToString(persistent.serializeToBytes()));
+        return payload;
+    }
+
+    private static void restoreSign(BlockState state, JsonElement payload) throws IOException {
+        if (payload.isJsonNull()) return;
+        if (!(state instanceof Sign sign)) throw new IllegalArgumentException("Sign payload requires a sign block");
+        JsonObject data = payload.getAsJsonObject();
+        sign.setWaxed(data.get("waxed").getAsBoolean());
+        for (Side side : Side.values()) {
+            JsonObject surface = data.getAsJsonObject(side.name());
+            JsonArray lines = surface.getAsJsonArray("lines");
+            if (lines.size() != 4) throw new IllegalArgumentException("Expected four sign lines");
+            SignSide target = sign.getSide(side);
+            for (int i=0;i<4;i++) target.line(i, GsonComponentSerializer.gson().deserialize(lines.get(i).getAsString()));
+            target.setColor(DyeColor.valueOf(surface.get("color").getAsString()));
+            target.setGlowingText(surface.get("glowing").getAsBoolean());
+        }
+        var persistent = sign.getPersistentDataContainer();
+        for (NamespacedKey key : persistent.getKeys()) persistent.remove(key);
+        if (data.has("persistent")) persistent.readFromBytes(Base64.getDecoder().decode(data.get("persistent").getAsString()));
+    }
+    private boolean reversibleEntity(BlockState state) {
+        return state instanceof Sign || entityCodec != null && entityCodec.supports(state);
+    }
+    private JsonElement captureEntity(BlockState state) throws Exception {
+        if (state instanceof Sign) return signPayload(state);
+        return entityCodec != null ? entityCodec.capture(state) : JsonNull.INSTANCE;
+    }
+    private static boolean nativePayload(JsonElement payload) {
+        return payload != null && payload.isJsonObject() && payload.getAsJsonObject().has("codec");
+    }
+    private boolean sameEntity(JsonElement actual, JsonElement expected) throws Exception {
+        if (actual.equals(expected)) return true;
+        return entityCodec != null && nativePayload(actual) && nativePayload(expected)
+            && entityCodec.equivalent(actual,expected);
+    }
+    private void restoreEntity(BlockState state, JsonElement payload) throws Exception {
+        if (nativePayload(payload)) {
+            if (entityCodec == null) throw new IllegalArgumentException("Exact block entity codec unavailable");
+            entityCodec.restore(state,payload);
+        } else restoreSign(state,payload);
+    }
+    private static JsonElement entityField(JsonObject data, String phase) {
+        return data.has(phase+"_entity") ? data.get(phase+"_entity") : data.get(phase+"_sign");
+    }
     private JsonObject execute(JsonObject q, String id, String digest) throws Exception {
         String action=q.get("action").getAsString();
         if(action.equals("status"))return identity();
@@ -79,6 +155,26 @@ public final class WorkbenchLive extends JavaPlugin {
         if(action.equals("read_blocks")){
             JsonArray positions=q.getAsJsonArray("positions");if(positions==null||positions.size()>16384)throw new IllegalArgumentException("Maximum 16384 positions");JsonObject blocks=new JsonObject();JsonArray unknown=new JsonArray();
             for(JsonElement e:positions){int[] p=gson.fromJson(e,int[].class);if(p.length!=3)throw new IllegalArgumentException("Three coordinates required");bounds(gson.toJsonTree(new int[]{p[0],p[1],p[2],p[0],p[1],p[2]}));String key=p[0]+","+p[1]+","+p[2];if(!world.isChunkGenerated(Math.floorDiv(p[0],16),Math.floorDiv(p[2],16))){unknown.add(key);continue;}blocks.addProperty(key,world.getBlockAt(p[0],p[1],p[2]).getBlockData().getAsString());}JsonObject r=identity();r.add("blocks",blocks);r.add("unknown",unknown);return r;
+        }
+        if(action.equals("read_block_entities")){
+            JsonArray input=q.getAsJsonArray("positions");
+            if(input==null||input.size()>128)throw new IllegalArgumentException("Maximum 128 block entities");
+            JsonObject entities=new JsonObject();
+            for(JsonElement item:input){
+                int[] p=gson.fromJson(item,int[].class);
+                if(p.length!=3)throw new IllegalArgumentException("Three coordinates required");
+                bounds(gson.toJsonTree(new int[]{p[0],p[1],p[2],p[0],p[1],p[2]}));
+                if(!world.isChunkGenerated(Math.floorDiv(p[0],16),Math.floorDiv(p[2],16)))continue;
+                BlockState state=world.getBlockAt(p[0],p[1],p[2]).getState();
+                JsonObject entry=new JsonObject();
+                entry.addProperty("state",state.getBlockData().getAsString());
+                entry.addProperty("snapshot_available",!(state instanceof TileState)||reversibleEntity(state));
+                entry.add("payload",captureEntity(state));
+                entities.add(p[0]+","+p[1]+","+p[2],entry);
+            }
+            JsonObject result=identity();
+            result.add("entities",entities);
+            return result;
         }
         if(action.equals("normalize")){
             JsonArray input=q.getAsJsonArray("states"),states=new JsonArray();
@@ -92,13 +188,13 @@ public final class WorkbenchLive extends JavaPlugin {
         List<Edit> edits=new ArrayList<>();
         if(action.equals("fill")) {
             int[] b=bounds(q.get("bounds")); BlockData data=Bukkit.createBlockData(q.get("state").getAsString());
-            for(int y=b[1];y<=b[4];y++)for(int z=b[2];z<=b[5];z++)for(int x=b[0];x<=b[3];x++)edits.add(new Edit(x,y,z,data,null));
+            for(int y=b[1];y<=b[4];y++)for(int z=b[2];z<=b[5];z++)for(int x=b[0];x<=b[3];x++)edits.add(new Edit(x,y,z,data,null,null,null));
         } else if(action.equals("apply_blocks")) {
             JsonArray input=q.getAsJsonArray("blocks"); if(input==null||input.size()>16384)throw new IllegalArgumentException("Maximum 16384 block edits per call");
             Set<String> seen=new HashSet<>();
             for(JsonElement item:input){JsonObject e=item.getAsJsonObject();int x=e.get("x").getAsInt(),y=e.get("y").getAsInt(),z=e.get("z").getAsInt();
                 bounds(gson.toJsonTree(new int[]{x,y,z,x,y,z}));if(!seen.add(x+","+y+","+z))throw new IllegalArgumentException("Duplicate edit coordinate");
-                edits.add(new Edit(x,y,z,Bukkit.createBlockData(e.get("state").getAsString()),e.has("before")?Bukkit.createBlockData(e.get("before").getAsString()).getAsString():null));}
+                edits.add(new Edit(x,y,z,Bukkit.createBlockData(e.get("state").getAsString()),e.has("before")?Bukkit.createBlockData(e.get("before").getAsString()).getAsString():null,entityField(e,"before"),entityField(e,"after")));}
         } else throw new IllegalArgumentException("Unknown workbench operation");
         return applyEdits(q, edits, id, digest);
     }
@@ -123,6 +219,7 @@ public final class WorkbenchLive extends JavaPlugin {
         } else {
             intent = new JsonObject();
             JsonArray planned = new JsonArray(), conflicts = new JsonArray();
+            Map<String, BlockState> defaults = new HashMap<>();
             boolean undoable = !physics;
             int already = 0;
             for (Edit edit : edits) {
@@ -132,15 +229,42 @@ public final class WorkbenchLive extends JavaPlugin {
                 }
                 Block block = world.getBlockAt(edit.x,edit.y,edit.z);
                 String before = block.getBlockData().getAsString(), after = edit.data.getAsString();
-                if (before.equals(after)) { already++; continue; }
+                BlockState current = block.getState();
+                JsonElement initialEntity = captureEntity(current);
+                if (before.equals(after) && (edit.afterEntity == null || sameEntity(initialEntity,edit.afterEntity))) {
+                    already++; continue;
+                }
                 if (edit.before != null && !edit.before.equals(before)) {
                     conflicts.add(conflict(edit.x,edit.y,edit.z,before,edit.before));
                     continue;
                 }
-                if (block.getState() instanceof TileState) undoable = false;
+                if (edit.beforeEntity != null && !sameEntity(initialEntity,edit.beforeEntity)) {
+                    conflicts.add(conflict(edit.x,edit.y,edit.z,"changed_block_entity_data",before));
+                    continue;
+                }
+                BlockState target = defaults.computeIfAbsent(after, ignored -> edit.data.createBlockState());
+                boolean unsupported = (current instanceof TileState && !reversibleEntity(current))
+                    || (target instanceof TileState && !reversibleEntity(target));
+                if (journal && unsupported) {
+                    conflicts.add(conflict(edit.x,edit.y,edit.z,"unsupported_block_entity",before));
+                    continue;
+                }
+                if (unsupported) undoable = false;
+                JsonElement targetEntity;
+                if (edit.afterEntity != null) {
+                    BlockState candidate = edit.data.createBlockState();
+                    restoreEntity(candidate,edit.afterEntity);
+                    targetEntity = captureEntity(candidate);
+                    if (!sameEntity(targetEntity,edit.afterEntity)) throw new IllegalArgumentException("Invalid block entity payload");
+                } else if (current.getType() == target.getType()) targetEntity = initialEntity;
+                else targetEntity = captureEntity(target);
                 JsonObject change = new JsonObject();
                 change.addProperty("x",edit.x); change.addProperty("y",edit.y); change.addProperty("z",edit.z);
                 change.addProperty("before",before); change.addProperty("after",after);
+                if (!initialEntity.isJsonNull() || !targetEntity.isJsonNull()) {
+                    change.add("before_entity",initialEntity);
+                    change.add("after_entity",targetEntity);
+                }
                 planned.add(change);
             }
             intent.addProperty("request_hash",digest);
@@ -159,12 +283,30 @@ public final class WorkbenchLive extends JavaPlugin {
             Block block=world.getBlockAt(x,y,z);
             String before=change.get("before").getAsString(), after=change.get("after").getAsString();
             String now=block.getBlockData().getAsString();
-            if (now.equals(before)) block.setBlockData(Bukkit.createBlockData(after),physics);
+            JsonElement target = entityField(change,"after");
+            if (target != null) {
+                BlockState current = block.getState();
+                JsonElement actual = captureEntity(current), expected = entityField(change,"before");
+                if (!(now.equals(after) && sameEntity(actual,target))) {
+                    if (!now.equals(before) || !sameEntity(actual,expected)) {
+                        conflicts.add(conflict(x,y,z,"changed_block_entity_data",before));
+                        continue;
+                    }
+                    try {
+                        applyEntity(block,current,Bukkit.createBlockData(after),target,physics);
+                    } catch (Exception failure) {
+                        // Restore the captured pre-state before yielding to other server tasks.
+                        try { applyEntity(block,block.getState(),Bukkit.createBlockData(before),expected,physics); }
+                        catch (Exception recovery) { failure.addSuppressed(recovery); }
+                        throw failure;
+                    }
+                }
+            } else if (now.equals(before)) block.setBlockData(Bukkit.createBlockData(after),physics);
             else if (!now.equals(after)) {
                 conflicts.add(conflict(x,y,z,now,before));
                 continue;
             }
-            if (block.getState() instanceof TileState) undoable=false;
+            if (target==null && block.getState() instanceof TileState) undoable=false;
             JsonObject delta=change.deepCopy();
             delta.addProperty("after", block.getBlockData().getAsString());
             applied.add(delta);
@@ -176,6 +318,17 @@ public final class WorkbenchLive extends JavaPlugin {
         result.add("conflicts",conflicts); result.add("changes",applied);
         result.addProperty("undoable",undoable); result.addProperty("physics",physics);
         return result;
+    }
+
+    private void applyEntity(Block block, BlockState current, BlockData next, JsonElement payload, boolean physics) throws Exception {
+        if (current.getType()!=next.getMaterial()) PaperBlockEntityCodec.clearBeforeReplacement(current);
+        if (!block.getBlockData().equals(next)) block.setBlockData(next,physics);
+        if (!payload.isJsonNull()) {
+            BlockState placed = block.getState();
+            restoreEntity(placed,payload);
+            if (!placed.update(false,false) || !sameEntity(captureEntity(block.getState()),payload))
+                throw new IllegalStateException("Block entity payload verification failed");
+        }
     }
 
     private Path firstRequest(String pattern) throws Exception {
@@ -213,6 +366,8 @@ public final class WorkbenchLive extends JavaPlugin {
                 journal=q.has("durable")&&q.get("durable").getAsBoolean();
                 result.addProperty("request_hash",digest);
                 if(q.has("world_uuid")&&!q.get("world_uuid").getAsString().equals(world.getUID().toString()))throw new IllegalArgumentException("World identity changed");
+                if(q.has("minecraft")&&!q.get("minecraft").getAsString().equals(Bukkit.getMinecraftVersion()))
+                    throw new IllegalArgumentException("Design Minecraft version differs from the target server");
                 result.add("result",execute(q,id,digest));
                 result.addProperty("ok",true);
             } catch(Exception error) {

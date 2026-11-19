@@ -1,5 +1,5 @@
 name: WorkbenchLive
-version: 1.0.0
+version: 1.1.0
 main: WorkbenchLive
 api-version: '1.20'
-description: Persistent test-world capture and creative editing for the desktop map workbench.
+description: Persistent world capture, design writes and reversible edits for TerraWeave.

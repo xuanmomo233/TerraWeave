@@ -15,9 +15,9 @@ export class ChunkRenderer {
     const cells=cellsInChunk(chunk,this.cap,this.min),group=new THREE.Group(),batches=new Map();
     staged.set(chunk.id,{group,count:cells.length});
     for(const cell of cells){
-     const key=[cell.s,cell.mask,cell.fluid_mask,cell.fluid_corners?.join(',')].join('|');
+     const key=JSON.stringify([cell.s,cell.mask,cell.fluid_mask,cell.fluid_corners,cell.block_entity]);
      if(!batches.has(key))batches.set(key,{
-      state:cell.s,options:{occlusionMask:cell.mask,fluidMask:cell.fluid_mask,fluidCorners:cell.fluid_corners},cells:[]
+      state:cell.s,options:{occlusionMask:cell.mask,fluidMask:cell.fluid_mask,fluidCorners:cell.fluid_corners,blockEntity:cell.block_entity},cells:[]
      });
      batches.get(key).cells.push(cell);
     }

@@ -2,11 +2,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {createHash} from 'node:crypto';
 import {worldIndex,readWorldChunk,materialColor} from './world-surface.mjs';
+import {completeAnvilChunk as supported} from '../minecraft-version.js';
 
 const air=name=>!name||/^minecraft:(air|cave_air|void_air|barrier|structure_void|light)$/.test(name);
 const digest=value=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
 function save(file,value){fs.mkdirSync(path.dirname(file),{recursive:true});const temp=file+'.pending-'+process.pid;fs.writeFileSync(temp,JSON.stringify(value));fs.renameSync(temp,file);}
-function supported(chunk){return chunk?.DataVersion===3465&&['full','minecraft:full'].includes(chunk.Status);}
 export function cachedVolumeSceneInfo(root,index){
  try{
   const old=JSON.parse(fs.readFileSync(path.join(root,'scene-index.json'),'utf8'));

@@ -12,7 +12,8 @@ $taskClasses = Join-Path $taskProject 'server-plugin\build'
 [IO.Directory]::CreateDirectory($taskClasses) | Out-Null
 $taskAdventure = @(Get-ChildItem -LiteralPath (Join-Path $taskServer 'libraries\net\kyori') -Recurse -File -Filter '*.jar' | ForEach-Object { $_.FullName })
 $taskClasspath = (@($taskApi, $taskGson) + $taskAdventure) -join ';'
-& (Get-Command javac.exe -ErrorAction Stop).Source -encoding UTF-8 --release 17 -cp $taskClasspath -d $taskClasses (Join-Path $taskProject 'server-plugin\WorkbenchLive.java')
+$sources = @('WorkbenchLive.java','PaperBlockEntityCodec.java') | ForEach-Object { Join-Path $taskProject ('server-plugin\' + $_) }
+& (Get-Command javac.exe -ErrorAction Stop).Source -encoding UTF-8 --release 17 -cp $taskClasspath -d $taskClasses $sources
 if ($LASTEXITCODE -ne 0) { throw 'Live plugin compilation failed.' }
 Copy-Item -LiteralPath (Join-Path $taskProject 'server-plugin\plugin.yml') -Destination (Join-Path $taskClasses 'plugin.yml')
 $taskJar = Join-Path $taskServer 'plugins\WorkbenchLive.jar'
