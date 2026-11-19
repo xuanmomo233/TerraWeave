@@ -43,18 +43,20 @@
   <button data-tool="plan-marker" title="标记规划地点"><svg class="icon"><use href="#i-pin"/></svg><span>标记</span></button>
   <button data-tool="box" title="标记方块范围" aria-label="标记方块范围"><svg class="icon"><use href="#i-grid"/></svg><span>范围</span></button><button data-tool="paint" title="方块画笔 P" aria-label="方块画笔"><svg class="icon"><use href="#i-brush"/></svg><span>画笔</span></button><button data-tool="erase" title="橡皮 E" aria-label="橡皮"><svg class="icon"><use href="#i-erase"/></svg><span>橡皮</span></button><button data-tool="orbit" title="旋转视图 R" aria-label="旋转视图"><svg class="icon"><use href="#i-orbit"/></svg><span>旋转</span></button></div><button id="focus-tool" title="聚焦 F" aria-label="聚焦"><svg class="icon"><use href="#i-cube"/></svg><span>聚焦</span></button></nav></details>
    <section id="planning-gesture" aria-labelledby="planning-gesture-title" hidden>
-    <div class="planning-gesture-heading">
-     <strong id="planning-gesture-title"></strong>
-     <label><input id="planning-snap" type="checkbox" checked>对齐方块</label>
-    </div>
-    <div class="planning-gesture-status">
-     <span id="planning-gesture-hint"></span>
-     <span id="planning-gesture-range"></span>
-    </div>
-    <div id="map-plan-height" hidden>
-     <label>最低 Y<input id="sketch-min-y" type="number" min="-64" max="319" step="1" aria-label="规划最低 Y"></label>
-     <label>最高 Y<input id="sketch-max-y" type="number" min="-64" max="319" step="1" aria-label="规划最高 Y"></label>
-     <span id="sketch-height-note">留空沿用当前地图高度</span>
+    <div class="planning-gesture-scroll">
+     <div class="planning-gesture-heading">
+      <strong id="planning-gesture-title"></strong>
+      <label><input id="planning-snap" type="checkbox" checked>对齐方块</label>
+     </div>
+     <div class="planning-gesture-status">
+      <span id="planning-gesture-hint"></span>
+      <span id="planning-gesture-range"></span>
+     </div>
+     <div id="map-plan-height" hidden>
+      <label>最低 Y<input id="sketch-min-y" type="number" min="-64" max="319" step="1" aria-label="规划最低 Y"></label>
+      <label>最高 Y<input id="sketch-max-y" type="number" min="-64" max="319" step="1" aria-label="规划最高 Y"></label>
+      <span id="sketch-height-note">留空沿用当前地图高度</span>
+     </div>
     </div>
     <div class="planning-gesture-actions">
      <button id="undo-planning-point" type="button">撤回一步</button>
@@ -70,8 +72,10 @@
      <div id="map-controls"><button id="map-fit">全图</button><button id="map-focus">聚焦规划</button><button id="map-north">归北</button><label>旋转 <input id="map-angle" type="number" value="0" step="1">°</label><button id="map-height" title="选择地图显示高度">Y · 地表</button><button id="map-refresh">刷新地形</button></div>
      <div id="detail-controls" hidden><div class="view-buttons"><button data-display-mode="scene" class="active">实景</button><button data-display-mode="editor">编辑</button><button id="isometric">透视</button><button id="top" title="俯视 7">俯视</button><button id="north" title="正视 1">北</button><button id="east" title="侧视 3">东</button><button id="south">南</button><button id="west">西</button><button id="fly-toggle">漫游</button></div></div>
      <span id="view-badge">地图总览</span>
-     <button id="locate-position" type="button" title="按世界坐标定位">定位坐标</button>
-     <div class="viewport-switches" id="detail-switches" hidden><label title="显示网格 G"><input id="grid" type="checkbox"><svg class="icon"><use href="#i-grid"/></svg></label><label title="区域边框"><input id="outline" type="checkbox"><svg class="icon"><use href="#i-box"/></svg></label></div>
+     <div class="viewport-actions">
+      <button id="locate-position" type="button" title="按世界坐标定位">定位坐标</button>
+      <div class="viewport-switches" id="detail-switches" hidden><label title="显示网格 G"><input id="grid" type="checkbox"><svg class="icon"><use href="#i-grid"/></svg></label><label title="区域边框"><input id="outline" type="checkbox"><svg class="icon"><use href="#i-box"/></svg></label></div>
+     </div>
     </div>
     <div id="view" tabindex="-1">
      <div id="map-host">
@@ -106,11 +110,32 @@
    <section class="bottom-dock"><div class="dock-bar"><div><button data-dock="history">编辑历史</button><button data-dock="gallery">预览图片</button><button data-dock="versions">区域版本</button></div><div class="dock-actions" id="dock-actions"></div></div><div class="dock-content" data-dock-pane="history" hidden><div class="history-actions"><span id="history-info">选择记录以撤销实际世界修改</span><button id="undo">撤销此操作</button><button id="redo">重做此操作</button></div><div id="history-list" class="history-rows"></div></div><div class="dock-content gallery-dock" data-dock-pane="gallery" hidden><div id="capture-strip" class="capture-strip"></div><div class="gallery-content"><span id="gallery-meta"></span><div id="gallery" class="gallery"></div></div></div><div class="dock-content" data-dock-pane="versions" hidden><div class="history-actions"><span>真实内容变化时才产生新版本</span><button id="checkpoint">保存检查点</button></div><div id="version-list" class="history-rows"></div></div></section>
   </section>
   <div class="splitter vertical" data-resize="right" role="separator" aria-label="调整属性面板宽度"></div>
-  <aside class="properties-panel"><div class="panel-title">属性<span id="object-kind"></span></div><div id="map-inspector"><section class="property-section"><h3 id="map-property-title">世界地图</h3><p id="map-world-info" class="property-summary"></p><div id="plan-fields" hidden><label>名称<input id="plan-name"></label><label>所属图层<select id="plan-layer"></select></label><label>颜色<input id="plan-color" type="color" value="#5b9cec"></label><label id="plan-width-label">道路宽度<input id="plan-width" type="number" min="0.5" max="512" value="4"></label><label>规划说明<textarea id="plan-notes" rows="5"></textarea></label><div class="coords"><label>最低 Y<input id="plan-min-y" type="number" min="-64" max="319" step="1" placeholder="地表"></label><label>最高 Y<input id="plan-max-y" type="number" min="-64" max="319" step="1" placeholder="同最低 Y"></label></div><p id="plan-geometry" class="property-summary"></p><label class="checkbox"><input id="plan-visible" type="checkbox" checked>显示规划</label><div class="pending-edits" id="plan-pending-edits" hidden><span>未保存修改已暂存</span><button id="discard-plan-edits" type="button">放弃修改</button></div><div class="property-actions"><button id="save-plan">保存规划</button><button id="delete-plan">删除规划</button></div><button id="plan-detail" class="accent">进入三维细化</button></div></section><section id="layer-settings" class="property-section"><h3>图层管理</h3><label>图层名称<input id="layer-name" value="区域规划"></label><div class="property-actions"><button id="rename-layer">重命名</button><button id="delete-layer">删除图层</button></div></section></div><div id="inspector" hidden>
+  <aside class="properties-panel"><div class="panel-title">属性<span id="object-kind"></span></div><div id="map-inspector"><section class="property-section"><h3 id="map-property-title">世界地图</h3><p id="map-world-info" class="property-summary"></p><div id="plan-fields" hidden><div class="plan-field-content"><label>名称<input id="plan-name"></label><label>所属图层<select id="plan-layer"></select></label><label>颜色<input id="plan-color" type="color" value="#5b9cec"></label><label id="plan-width-label">道路宽度<input id="plan-width" type="number" min="0.5" max="512" value="4"></label><label>规划说明<textarea id="plan-notes" rows="3"></textarea></label><div class="coords plan-height-range"><label>最低 Y<input id="plan-min-y" type="number" min="-64" max="319" step="1" aria-describedby="plan-height-help"></label><label>最高 Y<input id="plan-max-y" type="number" min="-64" max="319" step="1" aria-describedby="plan-height-help"></label></div><p class="hint" id="plan-height-help">两项都留空时使用地表高度。只填一项时，按该高度规划。</p><p id="plan-geometry" class="property-summary"></p><label class="checkbox"><input id="plan-visible" type="checkbox" checked>显示规划</label><div class="pending-edits" id="plan-pending-edits" hidden><span>未保存修改已暂存</span><button id="discard-plan-edits" type="button">放弃修改</button></div></div><div class="property-actions plan-actions">
+   <button id="save-plan" type="button">保存规划</button>
+   <button id="delete-plan" type="button">删除规划</button>
+   <button id="plan-detail" type="button">进入三维细化</button>
+  </div></div></section><section id="layer-settings" class="property-section"><h3>图层管理</h3><label>图层名称<input id="layer-name" value="区域规划"></label><div class="property-actions"><button id="rename-layer">重命名</button><button id="delete-layer">删除图层</button></div></section></div><div id="inspector" hidden>
    <section class="property-section"><h3>基本信息</h3><label>名称<input id="label" aria-label="对象名称"></label><div class="property-summary" id="object-summary">未选择对象</div><div class="pending-edits" id="detail-pending-edits" hidden><span>未保存修改已暂存</span><button id="discard-detail-edits" type="button">放弃修改</button></div><div class="property-actions"><button id="save-notes">保存属性</button><button id="archive-object">归档</button></div></section>
    <section class="property-section"><h3>区域范围</h3><div class="axis-labels"><span class="x">X</span><span class="y">Y</span><span class="z">Z</span></div><div class="coords"><input id="b0" type="number" aria-label="最小 X"><input id="b1" type="number" aria-label="最小 Y"><input id="b2" type="number" aria-label="最小 Z"></div><div class="coords"><input id="b3" type="number" aria-label="最大 X"><input id="b4" type="number" aria-label="最大 Y"><input id="b5" type="number" aria-label="最大 Z"></div><div class="bounds-captions"><span>上：最小坐标</span><span>下：最大坐标</span></div><button id="save">更新区域范围</button></section>
-   <section class="property-section"><h3>显示与切层</h3><label class="inline">最高显示 Y <input id="layer-number" type="number" aria-label="最高显示 Y"></label><input id="layer" type="range" disabled aria-label="Y 切层"><label class="checkbox"><input id="single-layer" type="checkbox">仅显示此层</label></section>
-   <section class="property-section"><h3>精确视角</h3><div class="coords camera-angle-fields"><label>方位 °<input id="camera-yaw" type="number" value="45" step="1"></label><label>俯仰 °<input id="camera-pitch" type="number" value="30" min="-89" max="89" step="1"></label></div><button id="set-camera-angle">设置视角</button></section>
+   <section class="property-section">
+    <h3>显示与切层</h3>
+    <label for="layer-number">最高显示 Y</label>
+    <div class="slice-controls">
+     <input id="layer" type="range" disabled aria-label="Y 切层">
+     <input id="layer-number" type="number">
+    </div>
+    <label class="checkbox"><input id="single-layer" type="checkbox">仅显示此层</label>
+   </section>
+   <section class="property-section camera-inspector">
+    <h3>精确视角</h3>
+    <div class="coords camera-position-fields">
+     <label>X<input id="camera-x" type="number" step="0.1" aria-label="相机 X 坐标"></label>
+     <label>Y<input id="camera-y" type="number" step="0.1" aria-label="相机 Y 坐标"></label>
+     <label>Z<input id="camera-z" type="number" step="0.1" aria-label="相机 Z 坐标"></label>
+    </div>
+    <div class="coords camera-angle-fields"><label>方位 °<input id="camera-yaw" type="number" value="45" step="1"></label><label>俯仰 °<input id="camera-pitch" type="number" value="30" min="-89" max="89" step="1"></label></div>
+    <button id="set-camera-angle">设置视角</button>
+   </section>
    <section class="property-section"><h3>规划笔记</h3><textarea id="notes" rows="3" placeholder="用途、风格、道路衔接、需要保留的内容……" aria-label="规划笔记"></textarea></section>
    <section class="property-section"><h3>当前方块</h3><div id="picked-block" class="property-summary">在视口中选择方块</div><label>画笔材质<input id="block-state" value="minecraft:stone_bricks" spellcheck="false" aria-label="画笔方块状态"></label><div id="material-palette" class="material-palette"></div></section>
    <section class="property-section" id="draft-properties" hidden><h3>草稿修改</h3><div id="draft-info" class="property-summary"></div><div class="segmented"><button id="draft-target">设计</button><button id="draft-base">原始</button><button id="draft-diff">差异</button></div><div class="legend"><span>● 新增</span><span>● 替换</span><span>● 删除</span></div><div class="coords"><input id="d0" type="number" aria-label="填充最小 X"><input id="d1" type="number" aria-label="填充最小 Y"><input id="d2" type="number" aria-label="填充最小 Z"></div><div class="coords"><input id="d3" type="number" aria-label="填充最大 X"><input id="d4" type="number" aria-label="填充最大 Y"><input id="d5" type="number" aria-label="填充最大 Z"></div><button id="draft-fill">填充到草稿</button><p class="hint">画笔放置相邻方块，Shift 替换；E 使用橡皮。应用前只修改草稿。</p></section>
@@ -122,7 +147,7 @@
 <div id="menu-popup" class="menu-popup" hidden></div>
 <dialog id="new-region-dialog"><form id="new-region-form"><h2>新增区域</h2><label>区域名称<input id="new-label" value="新区域" required></label><div class="axis-labels"><span>X</span><span>Y</span><span>Z</span></div><div class="coords"><input id="n0" type="number" required><input id="n1" type="number" required><input id="n2" type="number" required></div><div class="coords"><input id="n3" type="number" required><input id="n4" type="number" required><input id="n5" type="number" required></div><p class="hint">从当前工程的存档读取此坐标范围。</p><div class="dialog-actions"><button type="button" id="cancel-new">取消</button><button type="submit" class="accent">读取区域</button></div></form></dialog>
 <dialog id="image-dialog"><button id="close-image">关闭</button><img id="large-image" alt="工作台预览图片"></dialog>
-<dialog id="help-dialog"><h2>编辑器操作</h2><div id="shortcut-help"></div><div class="dialog-actions"><button id="close-help">关闭</button></div></dialog>
+<dialog id="help-dialog" aria-labelledby="help-title"><h2 id="help-title" tabindex="-1" autofocus>编辑器操作</h2><div id="shortcut-help" role="region" aria-label="快捷键与操作说明" tabindex="0"></div><div class="dialog-actions"><button id="close-help">关闭</button></div></dialog>
 <dialog id="render-settings-dialog">
  <h2>渲染设置</h2>
  <div class="render-pack-heading">
@@ -136,6 +161,10 @@
   <button id="open-shaderpacks" type="button"><svg class="icon" aria-hidden="true"><use href="#i-folder"/></svg>打开光影包文件夹</button>
  </div>
  <label>离线光影 <select id="render-shader"></select></label>
+ <details id="shader-compatibility" hidden>
+  <summary>查看不兼容光影包</summary>
+  <ul id="shader-compatibility-list"></ul>
+ </details>
  <p id="render-settings-error" role="status"></p>
  <div class="dialog-actions"><button id="render-settings-close">关闭</button><button id="render-settings-save" class="accent">应用</button></div>
 </dialog>

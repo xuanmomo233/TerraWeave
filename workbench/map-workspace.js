@@ -165,7 +165,7 @@ export function mountMapWorkspace(context){
   $('plan-width-label').hidden=selected.type!=='route';
   const b=planBounds(selected),format=n=>Math.round(n*100)/100;
   $('plan-geometry').textContent=selected.points.length+' 个控制点\n范围 X '+format(b[0])+'–'+format(b[2])+' / Z '+format(b[1])+'–'+format(b[3])+'\n跨度 '+format(b[2]-b[0])+' × '+format(b[3]-b[1])+' m'+
-   (selected.min_y==null?'\n高度沿用地表':'\n规划高度 Y '+selected.min_y+(selected.max_y===selected.min_y?'':'–'+(selected.max_y??selected.min_y)));
+   (selected.min_y==null?'':'\n规划高度 Y '+selected.min_y+(selected.max_y===selected.min_y?'':'–'+(selected.max_y??selected.min_y)));
   $('layer-name').value=state.layers.find(l=>l.id===selectedLayer)?.name??'';
  }
  function chooseLayer(name){

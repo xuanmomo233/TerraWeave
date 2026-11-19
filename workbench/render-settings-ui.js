@@ -3,21 +3,29 @@ import {callWorkbench} from './workbench-api.js';
 
 export function mountRenderSettings({selected,apply}){
  const $=id=>document.getElementById(id),dialog=$('render-settings-dialog'),list=$('render-pack-list');
- const shader=$('render-shader'),save=$('render-settings-save'),status=$('render-settings-error');
+ const shader=$('render-shader'),save=$('render-settings-save'),close=$('render-settings-close'),status=$('render-settings-error');
  let catalog,order,request=0,saving=false;
  function row(name){
-  const entry=document.createElement('li'),label=document.createElement('span');
-  label.textContent=name;entry.append(label);
+  const entry=document.createElement('li'), label=document.createElement('span'),actions=document.createElement('div');
+  label.textContent=name;label.className='render-pack-name';
+  actions.className='render-pack-actions';entry.append(label,actions);
   const index=order.indexOf(name);
   function button(text,action,disabled=false){
    const b=document.createElement('button');
-   b.type='button';b.textContent=text;b.disabled=disabled;b.onclick=()=>{action();draw();};
-   entry.append(b);
+   b.type='button';b.textContent=text;b.disabled=disabled||saving;
+   b.setAttribute('aria-label',text+' '+name);
+   b.onclick=()=>{
+    action();draw();
+    const updated=[...list.querySelectorAll('li')].find(item=>item.querySelector('.render-pack-name').textContent===name);
+    (updated?.querySelector('button[aria-label="'+CSS.escape(b.getAttribute('aria-label'))+'"]:not(:disabled)')??
+      updated?.querySelector('button:not(:disabled)'))?.focus();
+   };
+   actions.append(b);
   }
   button(index<0?'启用':'停用',()=>index<0?order.push(name):order.splice(index,1));
   if(index>=0){
-   button('↓ 提高',()=>[order[index],order[index+1]]=[order[index+1],order[index]],index===order.length-1);
-   button('↑ 降低',()=>[order[index],order[index-1]]=[order[index-1],order[index]],index===0);
+   button('上移',()=>[order[index],order[index-1]]=[order[index-1],order[index]],index===0);
+   button('下移',()=>[order[index],order[index+1]]=[order[index+1],order[index]],index===order.length-1);
   }
   return entry;
  }
@@ -32,9 +40,17 @@ export function mountRenderSettings({selected,apply}){
    catalog=next;
    draw();
    shader.replaceChildren(new Option('关闭光影','off'),...catalog.shaders.map(s=>{
-    const option=new Option(s.name+(s.supported?'':' · '+s.issues.join(' / ')),s.id);
+    const option=new Option(s.name+(s.supported?'':'（不兼容）'),s.id);
     option.disabled=!s.supported;
     return option;
+   }));
+   const unsupported=catalog.shaders.filter(s=>!s.supported);
+   $('shader-compatibility').hidden=!unsupported.length;
+   $('shader-compatibility-list').replaceChildren(...unsupported.map(s=>{
+    const row=document.createElement('li'),name=document.createElement('strong'),reason=document.createElement('span');
+    name.textContent=s.name;reason.textContent=s.issues.join('；');
+    row.append(name,reason);
+    return row;
    }));
    shader.value=selectedShader;
    if(!shader.value)shader.value='off';
@@ -48,6 +64,8 @@ export function mountRenderSettings({selected,apply}){
   list.replaceChildren();
   shader.replaceChildren(new Option('关闭光影','off'));
   status.textContent='';
+  $('shader-compatibility').hidden=true;
+  $('shader-compatibility').open=false;
   save.disabled=true;
   dialog.showModal();
   await refresh(true);
@@ -59,22 +77,27 @@ export function mountRenderSettings({selected,apply}){
   };
  }
  window.addEventListener('focus',()=>{if(dialog.open&&catalog&&!saving)void refresh(false);});
- $('render-settings-close').onclick=()=>dialog.close();
+ close.onclick=()=>{if(!saving)dialog.close();};
+ dialog.addEventListener('cancel',event=>{if(saving)event.preventDefault();});
  save.onclick=async()=>{
+  if(saving)return;
   saving=true;
-  save.disabled=true;
+  const controls=[...dialog.querySelectorAll('button,select')].filter(button=>!button.disabled);
+  const nextShader=shader.value,nextOrder=[...order];
+  for(const control of controls)control.disabled=true;
+  status.textContent='正在应用渲染设置…';
   try{
    const before=selected();
-   if(shader.value!=='off'){
+   if(nextShader!=='off'){
     status.textContent='正在校验原版光影…';
-    const pack=await callWorkbench('iris_pack_source',{shader:shader.value});
+    const pack=await callWorkbench('iris_pack_source',{shader:nextShader});
     await invoke('iris_check_pack',{pack});
    }
-   const settings=await callWorkbench('save_render_settings',{pack_order:order,shader:shader.value});
+   const settings=await callWorkbench('save_render_settings',{pack_order:nextOrder,shader:nextShader});
    dialog.close();
    await apply(settings,before);
   }catch(error){status.textContent=String(error);}
-  finally{saving=false;save.disabled=false;}
+  finally{saving=false;for(const control of controls)control.disabled=false;}
  };
  return open;
 }

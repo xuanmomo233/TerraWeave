@@ -8,8 +8,10 @@
 .render-pack-heading button:hover{background:#3c4b60}
 #render-shader{max-width:100%;border:1px solid #475365;border-radius:3px;background:#303b4b;padding:5px;color:#d7e1ef}
 #render-pack-list{padding:0;margin:12px 0;max-height:240px;overflow:auto}
-#render-pack-list li{display:flex;align-items:center;gap:5px;padding:4px 0;border-bottom:1px solid #394455}
-#render-pack-list li span{flex:1;overflow-wrap:anywhere}
+#render-pack-list li{display:grid;gap:8px;padding:9px 0;border-bottom:1px solid var(--line)}
+.render-pack-name {min-width:0;overflow-wrap:anywhere;}
+.render-pack-actions {display:flex;justify-content:flex-end;flex-wrap:wrap;gap:var(--panel-action-gap);}
+.render-pack-actions button {border:1px solid var(--line);background:var(--field);color:var(--text);}
 #render-settings-error{color:#ffb8a8}
 #draft-action-submit.danger{background:#913f49;color:white}
 .offline-iris-view{position:absolute;inset:0;width:100%;height:100%;z-index:2;pointer-events:none}

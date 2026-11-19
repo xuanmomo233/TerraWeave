@@ -93,7 +93,6 @@ panoramaButton.onclick=()=>{
 $('detail-controls').querySelector('.view-buttons').prepend(panoramaButton);
 const lod=new TexturedWorld(scene,api,parts,(done,total)=>{sceneLoading.hidden=macro.active||done>=total;sceneLoading.textContent='正在加载完整模型与贴图 '+done+' / '+total;if(region?.panorama)$('render-stats').textContent=done+' / '+total+' · 完整材质';}),planOverlay=new PlanningOverlay(view);let fly=true,lastFrame=performance.now(),flyLook=null,lastAngles=0;const heldKeys=new Set();
 const cameraDraft=new Map();let cameraDirty=false;const cameraFields=['camera-x','camera-y','camera-z','camera-yaw','camera-pitch'];
-const positionFields=document.createElement('div');positionFields.className='coords';positionFields.innerHTML=['X','Y','Z'].map(axis=>'<label>'+axis+'<input id="camera-'+axis.toLowerCase()+'" type="number" step="0.1" aria-label="相机 '+axis+' 坐标"></label>').join('');$('camera-yaw').closest('.property-section').querySelector('h3').after(positionFields);
 const speedField=document.createElement('label');speedField.innerHTML='移动速度 <input id="camera-speed" type="number" min="0.1" max="2048" value="20" aria-label="相机移动速度">';$('set-camera-angle').after(speedField);$('set-camera-angle').textContent='应用相机位置与朝向';
 const wheelField=document.createElement('label');wheelField.innerHTML='滚轮灵敏度（%）<input id="wheel-sensitivity" type="number" min="1" max="100" step="1" aria-label="滚轮灵敏度">';speedField.after(wheelField);$('wheel-sensitivity').value=String(readWheelSensitivity());$('wheel-sensitivity').onchange=()=>{$('wheel-sensitivity').value=String(saveWheelSensitivity($('wheel-sensitivity').value));};
 for(const id of cameraFields)$(id).addEventListener('input',()=>{cameraDirty=true;cameraDraft.set(id,$(id).value);});
@@ -157,7 +156,7 @@ function refreshPlanningControls(){
  $('planning-gesture').hidden=!sketch.active||!macro.active&&!region;
  $('map-plan-height').hidden=!macro.active;
  if(!sketch.active)return;
- $('sketch-height-note').textContent=problem||'留空沿用当前地图高度';
+ $('sketch-height-note').textContent=problem||'两项留空时沿用地图的显示高度。只填一项时，按该高度规划。';
  $('planning-gesture-title').textContent=planTitles[mode];
  const adjusting=geometry?'拖动控制点调整 · Enter 保存':sketch.points.length===1&&mode==='area'?'选择另一角点':startHints[mode];
  $('planning-gesture-hint').textContent=sketch.saving?'正在保存…':adjusting;
@@ -506,7 +505,7 @@ async function display(q){
  ui.rememberView();
  const saved=q.region.view_id?ui.storedView(q.region):null;
  const oldOrigin=snapshot?.bounds.slice(0,3),worldPosition=oldOrigin?camera.position.toArray().map((v,i)=>v+oldOrigin[i]):null,worldTarget=oldOrigin?controls.target.toArray().map((v,i)=>v+oldOrigin[i]):null;
- if(region?.snapshot_hash!==q.region.snapshot_hash&&blockOutline){
+ if(blockOutline&&(region?.snapshot_hash!==q.region.snapshot_hash||region?.view_id!==q.region.view_id||region?.draft_id!==q.region.draft_id)){
   scene.remove(blockOutline);blockOutline.geometry.dispose();blockOutline.material.dispose();blockOutline=null;
  }
  snapshot=q.snapshot;region=q.region;macro.showDetail();
@@ -603,6 +602,15 @@ async function captureViewport(q){
  });
 }
 const nonBlockingRequests=new Set(['scene_view','show','ui_diagnostics','planning_update']);
+function planningLayoutDiagnostics(){
+ const actionIds=['save-plan','delete-plan','plan-detail'];
+ const actions=Object.fromEntries(actionIds.map(id=>{
+  const button=$(id),rect=button.getBoundingClientRect();
+  return [id,{left:rect.left,right:rect.right,top:rect.top,bottom:rect.bottom,height:rect.height}];
+ }));
+ return {viewport:[innerWidth,innerHeight],scale:devicePixelRatio,actions,
+  heightHelp:$('plan-height-help').textContent,upperPlaceholder:$('plan-max-y').getAttribute('placeholder')};
+}
 let initialMapPending = !sessionStorage.getItem('terraweave-render-restore');
 function restoreEditorSession(activateLast){
  setTimeout(()=>ui.restoreSession(activateLast).catch(error=>ui.say(String(error))),0);
@@ -623,7 +631,9 @@ async function poll(){
   try{
    let result;
    if(q.kind==='map')result=await macro.open();
-   else if(q.kind==='ui_diagnostics'){const samples=[],pids=[];for(let i=0;i<6;i++){const start=performance.now(),data=await api('ui_snapshot');samples.push(performance.now()-start);pids.push(data.backend_pid);}result={samples_ms:samples,median_ms:[...samples].sort((a,b)=>a-b)[3],worker_processes:[...new Set(pids)]};}
+   else if(q.kind==='ui_diagnostics'){const samples=[],pids=[];for(let i=0;i<6;i++){const start=performance.now(),data=await api('ui_snapshot');samples.push(performance.now()-start);pids.push(data.backend_pid);}result={samples_ms:samples,median_ms:[...samples].sort((a,b)=>a-b)[3],worker_processes:[...new Set(pids)]};
+    if(q.inspect_layout)result.planning_layout=planningLayoutDiagnostics();
+   }
    else if(q.kind==='scene_view')result=sceneView();
    else if(q.kind==='world_scene')result=await openPanorama(q);
    else if(q.kind==='capture_scene')result=await capturePanorama(q);
@@ -783,10 +793,10 @@ renderer.domElement.addEventListener('dblclick',e=>{
  ui.run(()=>api('browse_world',{x,y,z,view_id:crypto.randomUUID(),plan_id:macro.getSelected()?.id,allow_saved:true}),'正在进入此位置的三维细化…');
 });
 document.addEventListener('keydown',e=>{
- if(document.querySelector('dialog[open]'))return;
+ if(e.defaultPrevented||document.querySelector('dialog[open]'))return;
  if(!e.target.closest('input,textarea,select,[contenteditable]')&&
   !e.ctrlKey&&!e.metaKey&&!e.altKey&&!capturing&&currentSketch().active&&['Enter','Escape'].includes(e.key)){
-  if(e.key==='Enter'&&e.target.closest('button')&&e.target.closest('#planning-gesture'))return;
+  if(e.key==='Enter'&&e.target.closest('button'))return;
   e.preventDefault();
   if(e.key==='Escape')cancelActiveSketch();
   else if(!e.repeat)void savePlanning();

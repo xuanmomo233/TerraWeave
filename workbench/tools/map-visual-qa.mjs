@@ -68,9 +68,10 @@ async function bridge(command,args){
  if(tool==='render_settings'){
   const settings=await callTool(tool,input);
   const newShader={id:'验收光影.zip',name:'验收光影.zip',format:'iris_zip',supported:true};
+  const unsupported={id:'不兼容验收.zip',name:'不兼容验收.zip',supported:false,issues:['缺少测试合成阶段']};
   return {...settings,shader:'off',
    packs:openedPackFolders.includes('resourcepacks')?[...settings.packs,'验收材质包.zip']:settings.packs,
-   shaders:openedPackFolders.includes('shaderpacks')?[...settings.shaders,newShader]:settings.shaders};
+   shaders:[...settings.shaders,unsupported,...(openedPackFolders.includes('shaderpacks')?[newShader]:[])]};
  }
  if(tool==='ui_snapshot'){const data=await callTool(tool,input);return {...data,drafts:[...draftFixture.values(),...data.drafts],planning:planner.execute('planning_state',{}),captures:[...captures,...data.captures]};}
  if(draftFixture.has(input.draft_id)){
@@ -130,7 +131,17 @@ try{
  assert.equal(await page.locator('#window-titlebar').getByText('已连接存档').count(),0);
  await page.locator('[data-menu="file"]').click();
  assert.ok(await page.getByRole('menuitem',{name:/关闭当前标签页/}).isDisabled());
- await page.getByRole('menuitem',{name:'在新工程打开存档…'}).click();
+ const fileCommands=await page.getByRole('menuitem').allTextContents();
+ assert.ok(fileCommands.every(label=>!/(?:…|\.\.\.)/.test(label)),'File menu commands should use plain labels');
+ await page.keyboard.press('Escape');
+ await page.locator('[data-menu="file"]').press('ArrowDown');
+ assert.equal(await page.locator(':focus').innerText(),'切换工程');
+ await page.keyboard.press('ArrowDown');
+ assert.equal(await page.locator(':focus').innerText(),'新建工程');
+ await page.keyboard.press('Escape');
+ assert.equal(await page.locator(':focus').getAttribute('data-menu'),'file');
+ await page.locator('[data-menu="file"]').click();
+ await page.getByRole('menuitem',{name:'在新工程打开存档'}).click();
  const projectDirectory=page.locator('#create-project-path');
  const browseDirectory=page.locator('#create-project-dialog').getByRole('button',{name:'浏览存档目录'});
  await browseDirectory.click();
@@ -138,6 +149,10 @@ try{
  await browseDirectory.click();
  await page.waitForFunction(()=>!document.querySelector('[data-world-folder-for="create-project-path"]').disabled);
  assert.equal(await projectDirectory.inputValue(),path.join(fixture,'带空格的 存档'));
+ await projectDirectory.click({button:'right'});
+ assert.ok(await page.locator('#create-project-dialog #menu-popup').isVisible());
+ await page.keyboard.press('Escape');
+ assert.ok(await page.locator('#create-project-dialog').isVisible());
  await page.locator('#create-project-cancel').click();
  for(const id of ['create-project-dialog','new-world-dialog','world-source-dialog','new-region-dialog',
   'render-settings-dialog','locate-position-dialog','draft-action-dialog','map-height-dialog','appearance-dialog']){
@@ -157,7 +172,7 @@ try{
  const center = page.locator('.center-workspace');
  const openAppearance = async () => {
   await page.locator('[data-menu="view"]').click();
-  await page.getByRole('menuitem',{name:'外观与主题…'}).click();
+  await page.getByRole('menuitem',{name:'外观与主题'}).click();
  };
  await openAppearance();
  await page.locator('[data-preset="paper"]').click();
@@ -175,7 +190,8 @@ try{
  await openAppearance();
  await page.locator('[data-preset="midnight"]').click();
  await page.keyboard.press('Escape');
- assert.equal(await page.evaluate(()=>getComputedStyle(document.documentElement).getPropertyValue('--accent').trim()),'#196b62');
+ await page.waitForFunction(()=>!document.querySelector('#appearance-dialog').open
+  && getComputedStyle(document.documentElement).getPropertyValue('--accent').trim()==='#196b62');
  await openAppearance();
  await page.locator('[data-preset="atlas"]').click();
  await page.locator('#appearance-reset').click();
@@ -236,7 +252,7 @@ try{
  assert.deepEqual((await send({kind:'scene_view'})).view,mapPose);
  assert.equal(await page.locator('#render-settings-button,#preview-lighting').count(),0);
  await page.locator('[data-menu="view"]').click();
- await page.getByRole('menuitem',{name:'渲染设置…',exact:true}).click();
+ await page.getByRole('menuitem',{name:'渲染设置',exact:true}).click();
  const renderDialog=page.locator('#render-settings-dialog');
  await renderDialog.waitFor({state:'visible'});
  await page.waitForFunction(()=>!document.querySelector('#render-settings-save').disabled);
@@ -255,6 +271,19 @@ try{
  assert.deepEqual(openedPackFolders,['resourcepacks','shaderpacks']);
  await page.evaluate(()=>window.dispatchEvent(new Event('focus')));
  await page.locator('#render-pack-list').getByText('验收材质包.zip',{exact:true}).waitFor();
+ const packRows=await page.locator('#render-pack-list li').evaluateAll(rows=>rows.map(row=>{
+  const name=row.querySelector('.render-pack-name').getBoundingClientRect();
+  const actions=row.querySelector('.render-pack-actions').getBoundingClientRect();
+  return actions.top>=name.bottom+7.9;
+ }));
+ assert.ok(packRows.length&&packRows.every(Boolean),'Pack names and actions should have separate rows');
+ const incompatibleOption=shaderSelect.locator('option[value="不兼容验收.zip"]');
+ assert.equal(await incompatibleOption.evaluate(option=>option.disabled),true);
+ assert.equal(await incompatibleOption.textContent(),'不兼容验收.zip（不兼容）');
+ await page.locator('#shader-compatibility summary').click();
+ assert.ok(await page.locator('#shader-compatibility').getByText('缺少测试合成阶段',{exact:true}).isVisible());
+ await page.locator('#shader-compatibility summary').click();
+ await renderDialog.screenshot({path:path.join(out,'render-pack-actions.png'),scale:'css'});
  assert.ok(await shaderSelect.locator('option[value="验收光影.zip"]').count());
  assert.equal(await shaderSelect.inputValue(),shaderIds[1]);
  await page.locator('#render-settings-close').click();
@@ -292,6 +321,19 @@ try{
  await page.locator('#fly-toggle').click();
  const photoPose=await send({kind:'scene_view'});
  await page.locator('#capture').click();await page.waitForFunction(()=>!document.querySelector('[data-dock-pane="gallery"]').hidden&&document.querySelector('#gallery img'));const currentImage=captures[0];assert.equal(currentImage.images[0].name,'当前完整实景');assert.deepEqual(currentImage.images[0].camera.position,photoPose.position);assert.equal(currentImage.view.includes_background,true);
+ const photoViewport=page.viewportSize();
+ const photoFont=await page.locator('html').evaluate(root=>root.style.getPropertyValue('--ui-size'));
+ await page.setViewportSize({width:1040,height:680});
+ await page.locator('html').evaluate(root=>root.style.setProperty('--ui-size','18px'));
+ await page.locator('#gallery button').first().click();
+ await page.waitForFunction(()=>document.querySelector('#large-image').naturalWidth>0);
+ assert.ok(await page.locator('#image-dialog').evaluate(dialog=>
+  dialog.scrollHeight<=dialog.clientHeight+1&&dialog.scrollWidth<=dialog.clientWidth+1));
+ await page.locator('#image-dialog').screenshot({path:path.join(out,'fitted-preview.png'),scale:'css'});
+ await page.locator('#close-image').click();
+ assert.equal(await page.locator(':focus').getAttribute('aria-label'),await page.locator('#gallery button').first().getAttribute('aria-label'));
+ await page.setViewportSize(photoViewport);
+ await page.locator('html').evaluate((root,font)=>root.style.setProperty('--ui-size',font),photoFont);
  const scene=await callTool('world_scene_info'),panorama=await send({kind:'capture_scene',scene,width:1280,height:800,angles:['isometric','south','top'],views:[],show_plans:false,planning_revision:planner.read().revision});assert.equal(reply.ok,true);assert.equal(panorama.images.length,3);assert.ok(panorama.scene_geometry.tiles.length);assert.equal(panorama.world_revision,scene.revision);assert.equal(panorama.scene_geometry.representation,'minecraft_block_models');assert.ok(Object.keys(panorama.scene_geometry.models).length>100);assert.ok(panorama.scene_geometry.atlas_png.startsWith('data:image/png;base64,'));assert.ok(panorama.scene_geometry.tiles.some(t=>t.groups.some(g=>g.state.includes('sugar_cane'))));
  const {PerspectiveCamera,Vector3}=await import('three');
  const lakePose={mode:'free',world_uuid:scene.world_uuid,position:[49,92,14],target:[49,59,14],up:[0,0,-1]};
@@ -431,6 +473,65 @@ try{
  await page.screenshot({path:path.join(out,'map-pending-planning.png')});
  await page.locator('#finish-planning-gesture').click();
  await page.waitForFunction(()=>!document.querySelector('#plan-fields').hidden);
+ const layoutProfiles=[];
+ const baselineViewport=page.viewportSize();
+ const originalStyle=await page.locator('html').getAttribute('style');
+ try{
+  for(const [width,height] of [[1040,680],[1280,800],[1600,1000]]){
+   await page.setViewportSize({width,height});
+   for(const fontSize of [12,14,16,18]){
+    const label=width+'×'+height+' @ '+fontSize+'px';
+    const failures=await page.evaluate(({fontSize,width})=>{
+     const root=document.documentElement,issues=[];
+     root.style.setProperty('--ui-size',fontSize+'px');
+     root.style.setProperty('--right',width===1040?'170px':'272px');
+     const rect=selector=>document.querySelector(selector).getBoundingClientRect();
+     const [save,remove,detail]=['#save-plan','#delete-plan','#plan-detail'].map(rect);
+     const stacked=Math.abs(save.left-remove.left)<1;
+     const separated=stacked?remove.top-save.bottom>=7.9&&Math.abs(save.right-remove.right)<1:
+      remove.left-save.right>=7.9&&Math.abs(save.top-remove.top)<1&&Math.abs(save.bottom-remove.bottom)<1;
+     const actionOverflow=[...document.querySelectorAll('.plan-actions button')].some(button=>button.scrollWidth>button.clientWidth+1);
+     if(!separated||actionOverflow||detail.top-Math.max(save.bottom,remove.bottom)<7.9||detail.height<32||
+       Math.abs(detail.left-save.left)>1||Math.abs(detail.right-remove.right)>1||
+       detail.bottom>rect('.properties-panel').bottom+1)issues.push('规划操作间距或可见性');
+     const [low,high]=['#plan-min-y','#plan-max-y'].map(rect);
+     if(low.right>=high.left||Math.abs(low.top-high.top)>1||Math.abs(low.width-high.width)>1||
+       Math.abs(high.right-rect('.plan-height-range').right)>1)issues.push('高度输入框对齐');
+     const hint=document.querySelector('#plan-height-help');
+     if(hint.scrollWidth>hint.clientWidth||!hint.textContent.includes('只填一项')||
+       document.querySelector('#plan-max-y').hasAttribute('placeholder'))issues.push('高度说明');
+     if(root.scrollWidth>innerWidth||rect('#view').right>rect('.properties-panel').left+1||
+       rect('.project-panel').right>rect('#view').left+1||rect('.status-bar').bottom>innerHeight+1)issues.push('主窗口边界');
+     for(const section of ['#map-tools','#detail-tools']){
+      if([...document.querySelectorAll(section+' button')].some(button=>button.offsetWidth&&button.scrollWidth>button.clientWidth+1))issues.push('侧栏工具文字');
+     }
+     for(const id of ['create-project-dialog','new-world-dialog','world-source-dialog','locate-position-dialog']){
+      const dialog=document.getElementById(id);
+      dialog.showModal();
+      const bounds=dialog.getBoundingClientRect();
+      if(bounds.left<0||bounds.top<0||bounds.right>innerWidth||bounds.bottom>innerHeight||dialog.scrollWidth>dialog.clientWidth+1)issues.push(id+' 边界');
+      const buttons=[...dialog.querySelectorAll('.dialog-actions > button')].map(button=>button.getBoundingClientRect());
+      if(buttons.some(button=>Math.abs(button.top-buttons[0].top)>1||Math.abs(button.height-buttons[0].height)>1))issues.push(id+' 按钮对齐');
+      dialog.close();
+     }
+     return issues;
+    },{fontSize,width});
+    assert.deepEqual(failures,[],label);
+    await page.locator('#plan-height-help').scrollIntoViewIfNeeded();
+    await page.locator('.properties-panel').screenshot({path:path.join(out,'layout-inspector-'+width+'-'+fontSize+'.png'),scale:'css'});
+    await page.locator('[data-menu="file"]').click();
+    const commands=await page.getByRole('menuitem').allTextContents();
+    assert.ok(commands.length>0&&commands.every(command=>!/(?:…|\.\.\.)/.test(command)),label+' 文件菜单');
+    await page.locator('#menu-popup').screenshot({path:path.join(out,'layout-menu-'+width+'-'+fontSize+'.png'),scale:'css'});
+    await page.keyboard.press('Escape');
+    layoutProfiles.push(label);
+   }
+  }
+ }finally{
+  await page.setViewportSize(baselineViewport);
+  await page.locator('html').evaluate((root,style)=>{if(style===null)root.removeAttribute('style');else root.setAttribute('style',style);},originalStyle);
+ }
+ console.log('通过 '+layoutProfiles.length+' 组布局检查 '+layoutProfiles.join('、'));
  const large=planner.read().objects.find(p=>p.id===planner.read().selected_id);assert.ok(Math.max(...large.points.map(p=>p[0]))-Math.min(...large.points.map(p=>p[0]))>128);
  await page.locator('#plan-name').fill('山谷城镇整体规划');await page.locator('#plan-notes').fill('主街连接港口；住宅区保留山体轮廓。');await page.locator('#save-plan').click();await page.waitForFunction(()=>[...document.querySelectorAll('.planning-object .name')].some(e=>e.textContent==='山谷城镇整体规划'));
  await page.waitForFunction(()=>!document.querySelector('#save-plan').disabled);
@@ -622,7 +723,9 @@ try{
  assert.notEqual(second.view_id,first.view_id);
  assert.equal(await page.locator('#grid').isChecked(),false);
  const tabFor=label=>page.locator('#document-tabs [role="tab"]').filter({has:page.getByText(label,{exact:true})});
- await tabFor(first.label).click();
+ await tabFor(second.label).press('ArrowLeft');
+ assert.equal(await page.locator(':focus').getAttribute('aria-label'),first.label);
+ await page.keyboard.press('Enter');
  await page.waitForFunction(label=>document.querySelector('#view-badge').textContent===label,first.label);
  const restoredFirst=await send({kind:'scene_view'});
  assert.equal(restoredFirst.view_id,first.view_id);
