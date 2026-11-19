@@ -1,0 +1,53 @@
+body { background:var(--background); color:var(--text); }
+.editor-shell { background:var(--background) var(--wallpaper) center / cover; }
+.project-panel,.properties-panel {
+  background-color:var(--panel);
+  background-image:linear-gradient(color-mix(in srgb,var(--panel) 86%,transparent),color-mix(in srgb,var(--panel) 92%,transparent)),var(--wallpaper);
+  background-size:cover; background-position:center;
+}
+.brand img { width:22px; height:22px; display:block; }
+.brand { color:var(--text); letter-spacing:-.025em; }
+.editor-shell :is(.project-title,.source-chip,.viewport-footer,#view-badge,.project-storage,.tree-row.draft,.tree-row small,.property-section summary,.property-section pre,.panel-title span,.planning-layer,.property-summary,.view-buttons button,#map-controls label,.capture-strip button,.history-row,.history-actions,.history-row .time,.tool-rail button,.mode-switch .mode-button) {color:var(--muted);}
+.editor-shell :is(.source-chip,.tree-search input,.document-tab,.map-document,.bottom-dock,.viewport-footer,.project-storage,.history-actions,.gallery-content,.dock-content) {background-color:var(--background);border-color:var(--line);}
+.editor-shell :is(.map-document.active,.document-tab.active,.tree-row.selected,.planning-layer.selected,.planning-object.selected,.mode-switch .mode-button.active,.tool-rail button.active,.history-row.selected,.capture-strip button.active,.view-buttons button.active) {
+  color:var(--text);background:var(--selected);border-color:var(--accent);
+}
+.tool-rail button.active,.mode-button.active {box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--accent) 55%,transparent);}
+.editor-shell :is(.property-section,.property-section h3,.panel-title,.center-workspace,.dock-bar,.tree-search,.planning-tools,.status-bar) {border-color:var(--line);}
+.editor-shell :is(.property-section h3,.panel-title,.tree-row,.planning-object,.map-document,.document-tab,.doc-tab,.dock-bar button.active) {color:var(--text);}
+.editor-shell :is(.property-section input,.property-section textarea,.property-section select,.property-actions button,.property-section>button,.segmented button,.coords input,#map-angle),dialog :is(input,select,textarea) {background-color:var(--field);color:var(--text);border-color:var(--line);}
+.editor-shell :is(.property-section label,.viewport-bar,.dock-bar button,.project-title,.planning-tools summary) {color:var(--muted);}
+.menu-popup,dialog {color:var(--text);background:var(--panel);border:1px solid var(--line);border-radius:10px;}
+.menu-popup {padding:5px;box-shadow:0 10px 30px #0004;}
+.menu-popup kbd,dialog p,dialog label {color:var(--muted);}
+dialog h2 {color:var(--text);font-weight:600;}
+.dialog-actions button,.theme-actions button,.theme-actions label {background:var(--field);color:var(--text);border:1px solid var(--line);}
+button:not(:disabled):hover,.menu-popup button:hover,.planning-object:hover {color:var(--text);background-color:color-mix(in srgb,var(--field) 80%,var(--accent));}
+#apply-draft:not(:disabled),#save-plan:not(:disabled),#finish-planning-gesture:not(:disabled),.dialog-actions button.accent,.property-section>button.accent {
+  background:var(--accent);color:var(--on-accent);border-color:transparent;
+}
+#apply-draft:not(:disabled):hover,#save-plan:not(:disabled):hover,#finish-planning-gesture:not(:disabled):hover {background:color-mix(in srgb,var(--accent) 90%,var(--text));}
+:is(.menu-bar,.status-bar,.dock-bar,.main-toolbar,.document-bar,.panel-title,.viewport-bar,.command-strip) {background-color:var(--chrome);}
+.viewport-shell,#view,.empty-view {background-color:var(--background);}
+.splitter {background-color:var(--background);}
+.splitter:hover {background:var(--accent);}
+.tree-search input::placeholder,textarea::placeholder {color:var(--muted);opacity:.82;}
+input[type=checkbox],input[type=range] {accent-color:var(--accent);}
+#appearance-dialog {width:min(550px,90vw);padding:22px;overflow:auto;}
+#appearance-dialog h2 {margin:0 0 16px;font-size:18px;}
+#appearance-dialog h3 {font-weight:550;font-size:12px;color:var(--muted);margin:16px 0 8px;}
+#appearance-presets {display:grid;grid-template-columns:repeat(4,1fr);gap:8px;}
+#appearance-presets button {display:grid;gap:6px;padding:7px;text-align:left;background:var(--field);color:var(--text);border:1px solid var(--line);border-radius:7px;}
+#appearance-presets button[aria-pressed=true] {border-color:var(--accent);}
+.theme-sample {display:block;border-radius:3px;height:33px;background:linear-gradient(to right,var(--sample-accent) 0 30%,transparent 30%) 6px 7px / 55% 3px no-repeat,linear-gradient(to right,var(--sample-field) 30%,var(--sample-border) 30% 32%,var(--sample-panel) 32% 78%,var(--sample-field) 78%);border:1px solid var(--sample-border);}
+#appearance-colors {display:grid;grid-template-columns:repeat(3,1fr);gap:5px 12px;}
+#appearance-colors label {margin:0;display:flex;justify-content:space-between;align-items:center;padding:4px 0;color:var(--text);}
+#appearance-colors input {padding:1px;width:30px;height:23px;cursor:pointer;}
+.theme-actions {display:flex;align-items:center;gap:6px;flex-wrap:wrap;}
+.theme-actions label {position:relative;overflow:hidden;margin:0;border-radius:4px;padding:5px 8px;cursor:pointer;}
+.theme-actions label:focus-within {outline:2px solid var(--accent);}
+.theme-actions input[type=file] {position:absolute;inset:0;width:100%;height:100%;margin:0;opacity:0;cursor:pointer;}
+#appearance-error:empty {display:none;}
+#appearance-error {color:var(--text);margin:10px 0;}
+#appearance-dialog .dialog-actions {border-top:1px solid var(--line);padding-top:12px;}
+

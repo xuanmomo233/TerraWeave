@@ -1,0 +1,61 @@
+#scene-loading{position:absolute;left:12px;top:12px;z-index:5;max-width:calc(100% - 24px);background:#132131dd;color:#b7d5f5;border:1px solid #385674;border-radius:4px;padding:7px 10px;pointer-events:none}
+#detail-controls{flex-shrink:1;overflow-x:auto;scrollbar-width:thin}
+#view:focus{outline:none}
+#render-settings-dialog{width:min(540px,90vw)}
+.render-pack-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:12px 0 4px}
+.render-pack-heading strong{font-weight:550}
+.render-pack-heading button{display:inline-flex;align-items:center;gap:6px;background:#303b4b}
+.render-pack-heading button:hover{background:#3c4b60}
+#render-shader{max-width:100%;border:1px solid #475365;border-radius:3px;background:#303b4b;padding:5px;color:#d7e1ef}
+#render-pack-list{padding:0;margin:12px 0;max-height:240px;overflow:auto}
+#render-pack-list li{display:flex;align-items:center;gap:5px;padding:4px 0;border-bottom:1px solid #394455}
+#render-pack-list li span{flex:1;overflow-wrap:anywhere}
+#render-settings-error{color:#ffb8a8}
+#draft-action-submit.danger{background:#913f49;color:white}
+.offline-iris-view{position:absolute;inset:0;width:100%;height:100%;z-index:2;pointer-events:none}
+#view.iris-active>canvas:first-child{opacity:0}
+#planning-preview,#map-planning-preview{position:absolute;inset:0;width:100%;height:100%;z-index:3;pointer-events:none}
+#planning-gesture{position:absolute;top:10px;left:10px;z-index:6;display:grid;gap:5px;max-width:calc(100% - 70px);padding:6px 8px 7px;background:#192433f3;border:1px solid #425c79;border-radius:5px;color:#d3e6ff}
+.planning-gesture-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.planning-gesture-row label{display:flex;align-items:center;gap:4px;white-space:nowrap}
+.map-plan-height input{width:64px;padding:3px 5px}
+.map-plan-height span{color:#a7bdd7;font-size:11px}
+#map-height.chosen{color:#b7dcff;background:#215481}
+.planning-gesture-status{color:#a7bdd7;font-size:11px}
+#planning-gesture-range{color:#adf0ff;font-variant-numeric:tabular-nums}
+#planning-gesture button{background:#30405a}
+#planning-gesture button:hover{background:#415a77}
+#planning-gesture #finish-planning-gesture:not(:disabled){background:#2465af;color:white}
+#view:has(#map-host:not([hidden])) #planning-preview{display:none}
+.offline-iris-error{position:absolute;z-index:3;top:10px;left:10px;max-width:80%;padding:6px 10px;border-radius:5px;background:#172434ee;color:#ffe4b1}
+#view:not(.iris-active)>:is(.offline-iris-view,.offline-iris-error){display:none}
+#view:has(#map-host:not([hidden])) :is(.offline-iris-view,.offline-iris-error){display:none}
+#detail-loading{position:absolute;inset:0;z-index:7;display:grid;place-items:center;background:#141a23}
+.detail-loading-card{display:grid;gap:12px;justify-items:center;color:#99aec8}
+.detail-loading-card strong{color:#d8e7fa;font-size:15px;font-weight:550}
+#cancel-detail{background:#27374b;color:#d4e4f7;padding:6px 12px}
+#cancel-detail:hover{background:#364d67}
+body.loading-detail .viewport-shell :is(.viewport-bar,.viewport-footer,#detail-axis,#hover){visibility:hidden}
+#preview-fullscreen {
+ position:absolute;
+ top:10px;
+ right:10px;
+ z-index:6;
+ width:32px;
+ height:32px;
+ color:#dce8f5;
+ background:#18212de6;
+ border:1px solid #526479;
+}
+#preview-fullscreen:hover{background:#31455c}
+body.fullscreen-preview .editor-shell,
+body.fullscreen-preview .center-workspace{grid-template-rows:minmax(0,1fr)}
+body.fullscreen-preview .editor-body{grid-template-columns:minmax(0,1fr)}
+body.fullscreen-preview .editor-shell > :not(.editor-body),
+body.fullscreen-preview .editor-body > :not(.center-workspace),
+body.fullscreen-preview .center-workspace > :not(.viewport-shell),
+body.fullscreen-preview .viewport-bar,
+body.fullscreen-preview .viewport-footer,
+body.fullscreen-preview #detail-axis,
+body.fullscreen-preview #hover{display:none}
+html{color-scheme:dark}body{-webkit-user-select:none;user-select:none}input,textarea,[contenteditable=true],pre,.property-summary{-webkit-user-select:text;user-select:text}img{-webkit-user-drag:none}button{touch-action:manipulation}button:active:not(:disabled){background:#405471}*{scrollbar-width:thin;scrollbar-color:#4a5260 #20242b}

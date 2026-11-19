@@ -1,0 +1,34 @@
+{
+  "name": "terraweave-workbench",
+  "version": "0.6.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:icons": "python tools/build-icons.py",
+    "build:sdk": "python tools/release-windows.py",
+    "build:mac": "node tools/build-macos.mjs",
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "tauri": "tauri",
+    "start": "node tools/creative-workbench.mjs show_workbench",
+    "mcp": "node tools/creative-workbench.mjs --stdio",
+    "mcp:writer": "node tools/writer-mcp.mjs --stdio",
+    "test": "node --test tools/creative-workbench.test.mjs tools/design-core.test.mjs tools/project-store.test.mjs tools/workspace-ui.test.mjs tools/planning.test.mjs tools/volume.test.mjs tools/fluid.test.mjs tools/textured-world.test.mjs tools/render-context.test.mjs tools/world-writer.test.mjs",
+    "test:integration": "npm run test:ui",
+    "test:design": "node --test tools/design-core.test.mjs tools/world-writer.test.mjs",
+    "test:storage": "node --test tools/project-store.test.mjs",
+    "test:map": "node --test tools/planning.test.mjs tools/volume.test.mjs tools/render-context.test.mjs",
+    "test:writer:live": "node tools/test-writer-live.mjs",
+    "test:ui": "node tools/map-visual-qa.mjs",
+    "build:desktop": "tools\\build-desktop.cmd"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2",
+    "three": "0.187.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "vite": "^7",
+    "typescript": "^5"
+  }
+}
