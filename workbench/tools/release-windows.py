@@ -68,7 +68,7 @@ if args.archive:
         archive.write(binary, "织境工坊.exe")
         for file in sorted(payload):
             archive.write(file, file.relative_to(stage).as_posix())
-        for name in ("package-lock.json", "index.html"):
+        for name in ("package-lock.json", "index.html", "server-plugin/WorkbenchLive.java", "server-plugin/plugin.yml"):
             archive.write(root / name, name)
         for pattern in ("*.css","*.js","src-tauri/*.*","src-tauri/src/*.rs","src-tauri/icons/*","src-tauri/capabilities/*.json","public/*","tools/*"):
             for file in root.glob(pattern):
