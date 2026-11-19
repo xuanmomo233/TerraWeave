@@ -3,6 +3,7 @@ import {invoke} from '@tauri-apps/api/core';
 import {documentKey,openDocument,closeDocument,editorShortcut} from './editor-state.js';
 import {callWorkbench} from './workbench-api.js';
 import {installDesktopChrome} from './desktop-chrome.js';
+import {editorPersistence} from './editor-persistence.js';
 
 const $=id=>document.getElementById(id),call=callWorkbench;
 const date=s=>new Date(s).toLocaleString('zh-CN',{hour12:false}),icon=name=>'<svg class="icon" aria-hidden="true"><use href="#i-'+name+'"/></svg>';
@@ -10,13 +11,45 @@ function bounds(prefix){return Array.from({length:6},(_,i)=>{const value=$(prefi
 function fields(prefix,b){b.forEach((n,i)=>$(prefix+i).value=String(n));}
 function text(tag,value,className){const e=document.createElement(tag);e.textContent=value;if(className)e.className=className;return e;}
 const names={north:'北向',south:'南向',east:'东向',west:'西向',top:'俯视',isometric:'透视',map:'地图总览'};
+function sessionRegion(region){
+ const keys=['id','label','view_id','world_uuid','draft_id','preview_mode','panorama','transient','entity_id',
+  'focus_position','loaded_bounds','detail_for_plan_id'];
+ return Object.fromEntries(keys.filter(key=>region[key]!==undefined).map(key=>[key,region[key]]));
+}
 
 export function mountWorkspaceUI(context){
  let regions=[],drafts=[],history=[],captures=[],documents=[],activeKey='',busy=false,activeTool='select',activeDock=null,selectedHistory='',selectedCapture='',galleryEpoch=0,picked=null,versionsEpoch=0,macro=null,paletteHash;
  const currentDraft=()=>drafts.find(d=>d.id===context.getRegion()?.draft_id);
  const say=message=>{$('status').textContent=message;$('status').title=message;};
- const windowAction=action=>invoke('workbench_window_action',{action}).catch(e=>say(String(e)));
- $('window-minimize').onclick=()=>windowAction('minimize');$('window-maximize').onclick=()=>windowAction('maximize');$('window-close').onclick=()=>windowAction('close');
+ let sessionRestored=false,sessionLoading=false;
+ const recovery=editorPersistence(call,say,()=>{
+  if(!sessionRestored||sessionLoading)return null;
+  rememberView();
+  return {tabs:documents.slice(-100).map(d=>({key:d.key,region:sessionRegion(d.region),camera:d.camera,view:d.view})),
+   active:macro?.active?null:activeKey};
+ });
+ function formValues(key,values){
+  const pending=recovery.fields(key);
+  for(const [id,value] of Object.entries(values))$(id).value=pending[id]??value;
+  return Object.keys(pending).length>0;
+ }
+ function editorFormKey(r=context.getRegion()){return r?'form:'+documentKey(r):null;}
+ const detailFields=['label','notes',...Array.from({length:6},(_,i)=>'b'+i)];
+ for(const id of detailFields)$(id).addEventListener('input',()=>{
+  const key=editorFormKey();
+  if(key){recovery.edit(key,id,$(id).value);$('detail-pending-edits').hidden=false;}
+ });
+ $('discard-detail-edits').onclick=()=>{
+  const region=context.getRegion();
+  if(!region)return;
+  recovery.clear(editorFormKey(region));fillRegionForm(region);
+ };
+ const windowAction=(action,title)=>invoke('workbench_window_action',{action,title}).catch(e=>say(String(e)));
+ $('window-minimize').onclick=()=>windowAction('minimize');$('window-maximize').onclick=()=>windowAction('maximize');
+ $('window-close').onclick=async()=>{
+  try{await recovery.flush();await windowAction('close');}
+  catch(error){say('工程会话保存失败 · '+String(error));}
+ };
  $('window-titlebar').addEventListener('mousedown',e=>{if(e.button!==0||e.target.closest('button,input,.menus,.window-controls'))return;windowAction(e.detail===2?'maximize':'drag');});
  const fullscreenButton=$('preview-fullscreen');
  let fullscreen=false, switchingFullscreen=false;
@@ -108,7 +141,8 @@ export function mountWorkspaceUI(context){
  dock(null);
  function renderTabs(){
   $('document-tabs').replaceChildren();
-  for(const d of documents){const selected=d.key===activeKey&&!macro?.active,tab=document.createElement('div');tab.className='document-tab'+(selected?' active':'');tab.setAttribute('role','tab');tab.setAttribute('aria-selected',String(selected));tab.innerHTML=icon(d.region.draft_id?'brush':'cube');tab.append(text('span',d.label,'name'));const close=document.createElement('button');close.className='close';close.title='关闭文档';close.innerHTML=icon('close');close.onclick=e=>{e.stopPropagation();closeTab(d.key);};tab.append(close);tab.onclick=()=>activate(d);$('document-tabs').append(tab);}
+  for(const d of documents){const selected=d.key===activeKey&&!macro?.active,tab=document.createElement('div');tab.className='document-tab'+(selected?' active':'');tab.setAttribute('role','tab');tab.setAttribute('aria-label',d.label);tab.setAttribute('aria-selected',String(selected));tab.innerHTML=icon(d.region.draft_id?'brush':'cube');tab.append(text('span',d.label,'name'));const close=document.createElement('button');close.className='close';close.title='关闭当前标签页';close.innerHTML=icon('close');close.onclick=e=>{e.stopPropagation();closeTab(d.key);};tab.append(close);tab.onclick=()=>activate(d);$('document-tabs').append(tab);}
+  if(sessionRestored&&!sessionLoading)recovery.schedule();
  }
  function rememberView(){
   const r=context.getRegion();
@@ -119,6 +153,22 @@ export function mountWorkspaceUI(context){
   documents=documents.map(d=>d.key===key?{...d,camera,view}:d);
  }
  const storedView=r=>documents.find(d=>d.key===documentKey(r));
+ async function restoreSession(activateLast=true){
+  if(sessionRestored||sessionLoading)return;
+  sessionLoading=true;
+  try{
+   const saved=await recovery.ready;
+   const matching=(saved.tabs??[]).filter(d=>d?.region&&d.key===documentKey(d.region)&&typeof d.region.label==='string')
+    .map(d=>({...d,label:d.region.label}));
+   documents=[...matching.filter(d=>!documents.some(open=>open.key===d.key)),...documents];
+   const last=activateLast&&documents.find(d=>d.key===saved.active);
+   renderTabs();
+   await refresh();
+   if(last&&(!last.region.world_uuid||last.region.world_uuid===currentSource?.world_uuid)&&!busy)await activate(last);
+   else if(last)say('上次的标签已恢复。关联存档后可继续预览。');
+   if(recovery.hasEdits()&&!last)say('工程中有暂存的属性修改。选中对应对象后可继续编辑。');
+  }finally{sessionLoading=false;sessionRestored=true;}
+ }
  let panoramaCount=0;
  function newPanorama(){
   return run(()=>call('open_world_scene',{view_id:crypto.randomUUID(),label:'全景三维 '+(++panoramaCount)}),'正在打开三维视图…');
@@ -247,19 +297,30 @@ export function mountWorkspaceUI(context){
   regions=rr;drafts=dd;history=hh;captures=cc;if(!history.some(h=>h.id===selectedHistory))selectedHistory=history[0]?.id??'';
   const labels=new Map(dd.map(d=>[d.id,d.label]));
   documents=documents.map(d=>labels.has(d.region.draft_id)?{...d,label:labels.get(d.region.draft_id)}:d);
-  $('project-name').textContent=ww.label==='TerraWeave 世界工程'?'织境工坊':ww.label;$('server-state').textContent=ss.source&&!ss.source.error?'● 已连接存档':'○ 请选择存档';
+  currentSource=ss.source;
+  currentProjectId=data.project?.id??'primary';
+  const name=data.project?.name??ww.label;
+  if($('project-name-label').textContent!==name){
+   $('project-name-label').textContent=name;
+   $('project-name').title='切换工程 · '+name;
+   windowAction('title','织境工坊 — '+name);
+  }
   const bytes=Object.values(ww.files).reduce((n,x)=>n+x.bytes,0);$('storage-summary').dataset.bytes=String(bytes);$('storage-summary').textContent=ww.region_items+' 个区域 · '+(bytes/1048576).toFixed(1)+' MB';$('storage-summary').title='实际工程数据及有限地形缓存；相同方块内容按哈希复用';
   renderTree();renderTabs();renderHistory();sync();if(macro)macro.refresh(data).catch(e=>say(String(e)));if(activeDock==='gallery')renderCaptureStrip();if(activeDock==='versions')showVersions();
  }
  function setRegion(r){
   macro?.showDetail();
   activeKey=documentKey(r);documents=openDocument(documents,r);$('empty-view').hidden=true;
-  fields('b',r.bounds);$('label').value=r.label;$('notes').value=r.notes??'';
+  fillRegionForm(r);
   const draft=r.source==='design_draft',saved=r.source==='saved_anvil_detail';
-  $('source-state').textContent=draft?'草稿 r'+r.draft_revision:saved?'存档三维':r.is_current_revision===false?'历史版本':r.transient?'实机三维':'实机区域';$('object-kind').textContent=draft?'设计草稿':r.transient?'场景':'区域';
+  $('source-state').textContent=draft?'草稿 r'+r.draft_revision:Number.isInteger(r.construction_y)?'虚空世界':saved?'存档三维':r.is_current_revision===false?'历史版本':r.transient?'实机三维':'实机区域';$('object-kind').textContent=draft?'设计草稿':r.transient?'场景':'区域';
   $('view-badge').textContent=r.label+(draft?' / '+({target:'设计',base:'原始',diff:'差异'}[r.preview_mode]):'');$('source-status').textContent=draft?'设计预览 · 尚未写入实机':saved?'存档数据 · F5 读取实机':'实机数据';
   $('object-summary').textContent=r.transient?(draft?'地图级设计 · 编辑时更新预览':saved?'从配置的存档读取方块，按 F5 重新读取。':'局部存档 · 视角移动不重建地图')+(r.unknown_chunks?.length?'\n周边 '+r.unknown_chunks.length+' 个未知区域未当作空气':''):(r.bounds[3]-r.bounds[0]+1)+' × '+(r.bounds[4]-r.bounds[1]+1)+' × '+(r.bounds[5]-r.bounds[2]+1)+' 方块'+(draft?'\n版本 r'+r.draft_revision:'\n最近核对 '+date(r.last_verified_at??r.captured_at));$('archive-object').textContent=r.draft_id?'删除方案':'返回地图';$('b0').closest('.property-section').hidden=!!r.transient;$('notes').closest('.property-section').hidden=!!r.transient&&!draft;$('label').readOnly=!!r.transient&&!draft;
   $('selection').textContent='区域 '+r.id+'\n世界 '+r.world_uuid+'\n内容 '+r.snapshot_hash;
+  if(Number.isInteger(r.construction_y)&&!draft){
+   $('source-status').textContent='虚空世界 · 建造网格 Y '+r.construction_y;
+   $('object-summary').textContent='选择画笔，在 Y '+r.construction_y+' 的网格上放置第一块方块。';
+  }
   if(draft)fields('d',r.bounds);$('layer').min=r.loaded_bounds[1];$('layer').max=r.loaded_bounds[4];$('layer').value=r.loaded_bounds[4];$('layer-number').value=r.loaded_bounds[4];$('single-layer').checked=false;
   if(!r.snapshot_hash||paletteHash!==r.snapshot_hash){
    paletteHash=r.snapshot_hash;
@@ -275,7 +336,28 @@ export function mountWorkspaceUI(context){
   }
   renderTree();renderTabs();sync();if(!busy)say('已打开「'+r.label+'」');
  }
- async function save(){const r=context.getRegion();if(!r||r.transient&&!r.draft_id)return call('save_workspace');const label=$('label').value,notes=$('notes').value,selected=bounds('b');if(r.draft_id){const d=await call('update_draft',{draft_id:r.draft_id,label,notes});await call('preview_draft',{draft_id:d.id,mode:r.preview_mode??'target',keep_camera:true});await call('save_workspace');return d;}let saved=await call('set_selection',{region_id:r.id,bounds:selected,label});saved=await call('update_region',{region_id:saved.id,label,notes});await call('save_workspace');return saved;}
+ function fillRegionForm(r){
+  const values={label:r.label,notes:r.notes??'',...Object.fromEntries(r.bounds.map((value,i)=>['b'+i,value]))};
+  $('detail-pending-edits').hidden=!formValues(editorFormKey(r),values);
+ }
+ async function save(){
+  const r=context.getRegion();
+  if(!r||r.transient&&!r.draft_id)return call('save_workspace');
+  const label=$('label').value,notes=$('notes').value;
+  let saved;
+  if(r.draft_id){
+   saved=await call('update_draft',{draft_id:r.draft_id,label,notes});
+   recovery.clear(editorFormKey(r));
+   await call('preview_draft',{draft_id:r.draft_id,mode:r.preview_mode??'target',keep_camera:true});
+  }else{
+   saved=await call('set_selection',{region_id:r.id,bounds:bounds('b'),label});
+   saved=await call('update_region',{region_id:saved.id,label,notes});
+   recovery.clear(editorFormKey(r));
+  }
+  $('detail-pending-edits').hidden=true;
+  await call('save_workspace');
+  return saved;
+ }
  async function draftFromView(r,label){
   const focus=r.bounds.slice(0,3).map((n,i)=>(n+r.bounds[i+3])/2);
   const args={region_id:r.id,label};
@@ -292,7 +374,7 @@ export function mountWorkspaceUI(context){
  function toolChanged(name){if(context.setTool(name)===false)return;activeTool=name;document.querySelectorAll('[data-tool]').forEach(e=>{e.classList.toggle('active',e.dataset.tool===name);e.setAttribute('aria-pressed',String(e.dataset.tool===name));});$('control-hint').textContent={select:'左键选择 · 右键旋转 · 中键平移 · Alt+左键旋转','plan-area':'拖动或点击两个角点 · Enter 保存','plan-polygon':'逐点圈出边界 · Enter 保存','plan-route':'逐点绘制路线 · Enter 保存','plan-marker':'点击定位标记 · Enter 保存',box:'左键选择两个角点 · 右键旋转 · Esc 退出',paint:'左键放置相邻方块 · Shift 替换 · Ctrl+Z 撤销草稿',erase:'左键删除草稿中的方块 · Ctrl+Z 撤销',orbit:'左键或右键旋转 · 中键平移 · 滚轮缩放'}[name];}
  document.querySelectorAll('[data-tool]').forEach(e=>e.onclick=()=>chooseTool(e.dataset.tool));
  const saveBounds=b=>run(()=>call('set_selection',{region_id:context.getRegion().id,bounds:b,label:$('label').value||'区域'}));
- async function paintAt(hit,erase,replace){return run(async()=>{const d=await ensureDraft(),p=[...hit.coordinate];if(!erase&&!replace){const axis=hit.normal.reduce((best,v,i,a)=>Math.abs(v)>Math.abs(a[best])?i:best,0);p[axis]+=Math.sign(hit.normal[axis]);}return call('edit_draft',{draft_id:d.id,blocks:[{x:p[0],y:p[1],z:p[2],state:erase?'minecraft:air':$('block-state').value}],preview:{mode:editedPreviewMode(),keep_camera:true}});});}
+ async function paintAt(hit,erase,replace){return run(async()=>{const d=await ensureDraft(),p=[...hit.coordinate];if(!erase&&!replace&&hit.source!=='construction_grid'){const axis=hit.normal.reduce((best,v,i,a)=>Math.abs(v)>Math.abs(a[best])?i:best,0);p[axis]+=Math.sign(hit.normal[axis]);}return call('edit_draft',{draft_id:d.id,blocks:[{x:p[0],y:p[1],z:p[2],state:erase?'minecraft:air':$('block-state').value}],preview:{mode:editedPreviewMode(),keep_camera:true}});});}
  async function undoContext(redo=false){if(macro?.active||activeTool.startsWith('plan-')){if(context.undoSketch?.(redo))return;return macro.undo(redo);}return run(()=>{const d=currentDraft();if(d)return call(redo?'redo_draft':'undo_draft',{draft_id:d.id,preview:{mode:context.getRegion()?.preview_mode??'target',keep_camera:true}});return {message:'当前没有可撤销的草稿改动'};});}
  function newRegionDialog(){fields('n',context.getRegion()?.loaded_bounds??[0,48,0,31,79,31]);$('new-label').value='新区域 '+(regions.length+1);$('new-region-dialog').showModal();$('new-label').focus();$('new-label').select();}
  $('new-region').onclick=()=>{
@@ -342,32 +424,227 @@ export function mountWorkspaceUI(context){
  installDesktopChrome(popup,say);
  function help(){$('shortcut-help').textContent='地图规划\nV 选择与移动　B 框选　O 多边形　P 路线　M 标记　H 平移\n右键拖动旋转，滚轮缩放；双击位置进入三维\n先在光标处核对坐标，拖动控制点调整，Enter 保存，Esc 取消\n选中规划后拖动控制点调整边界；眼睛按钮隐藏／显示\nDelete 删除规划；Ctrl+Z / Ctrl+Y 撤销／重做规划\n\n三维细化\nB 框选规划　O 逐点圈定区域　M 地点标记\n拖动控制点调整，Enter 保存，Esc 取消\n右键旋转，中键平移，滚轮缩放；可输入方位角与俯仰角\n漫游：WASD 移动，空格上升，C 下降，Shift 加速，右键转向\nP 画笔　E 橡皮；左键放置相邻方块，Shift+左键替换\nCtrl+Z / Ctrl+Y 撤销／重做草稿，Ctrl+Enter 应用设计\nF 聚焦　7 俯视　1 北向　3 东向　G 网格\n\nCtrl+S 保存　F5 刷新实机　Ctrl+Shift+P 保存预览图片';$('help-dialog').showModal();}
  $('close-help').onclick=()=>$('help-dialog').close();
- const commands={save:()=>macro?.active?macro.save():run(save),checkpoint:()=>$('checkpoint').click(),undo:()=>undoContext(),redo:()=>undoContext(true),'new-region':()=>macro?choosePlanningTool('area'):newRegionDialog(),close:()=>closeTab(activeKey),apply:()=>$('apply-draft').onclick(),capture:captureVisible,select:()=>chooseTool('select'),'plan-area':()=>choosePlanningTool('area'),'plan-polygon':()=>choosePlanningTool('polygon'),'plan-route':()=>choosePlanningTool('route'),'plan-marker':()=>choosePlanningTool('marker'),paint:()=>chooseTool('paint'),erase:()=>chooseTool('erase'),orbit:()=>chooseTool('orbit'),focus:()=>macro?.active?macro.fit():context.frame('isometric'),grid:()=>{if(macro?.active)return;$('grid').checked=!$('grid').checked;cut();},top:()=>macro?.active?macro.north():context.frame('top'),north:()=>macro?.active?macro.north():context.frame('north'),east:()=>context.frame('east'),refresh:()=>$('refresh').onclick(),help,'delete-block':()=>{if(picked)paintAt({coordinate:picked,normal:[0,1,0]},true,true);}};
+ const commands={save:()=>macro?.active?macro.save():run(save),checkpoint:()=>$('checkpoint').click(),undo:()=>undoContext(),redo:()=>undoContext(true),'new-region':()=>macro?choosePlanningTool('area'):newRegionDialog(),close:()=>{if(!macro?.active&&activeKey)return closeTab(activeKey);},apply:()=>$('apply-draft').onclick(),capture:captureVisible,select:()=>chooseTool('select'),'plan-area':()=>choosePlanningTool('area'),'plan-polygon':()=>choosePlanningTool('polygon'),'plan-route':()=>choosePlanningTool('route'),'plan-marker':()=>choosePlanningTool('marker'),paint:()=>chooseTool('paint'),erase:()=>chooseTool('erase'),orbit:()=>chooseTool('orbit'),focus:()=>macro?.active?macro.fit():context.frame('isometric'),grid:()=>{if(macro?.active)return;$('grid').checked=!$('grid').checked;cut();},top:()=>macro?.active?macro.north():context.frame('top'),north:()=>macro?.active?macro.north():context.frame('north'),east:()=>context.frame('east'),refresh:()=>$('refresh').onclick(),help,'delete-block':()=>{if(picked)paintAt({coordinate:picked,normal:[0,1,0]},true,true);}};
+ let currentSource=null,currentProjectId='primary',projectBusy=false;
+ for(const button of document.querySelectorAll('[data-world-folder-for]')){
+  button.onclick=async()=>{
+   const input=$(button.dataset.worldFolderFor),dialog=button.closest('dialog');
+   const errorField=dialog.querySelector('[role="alert"]');
+   button.disabled=true;
+   try{
+    const directory=await invoke('pick_world_directory',{initialPath:input.value});
+    if(directory&&dialog.open){
+     input.value=directory;
+     errorField.textContent='';
+    }
+   }catch(error){if(dialog.open)errorField.textContent='无法打开文件夹选择器。'+String(error);}
+   finally{button.disabled=false;}
+  };
+ }
+ const projectsDialog=$('projects-dialog'),projectForm=$('create-project-dialog');
+ async function openProjectFolder(id,kind){
+  try{await invoke('open_project_folder',{id,kind});}
+  catch(error){
+   if(projectsDialog.open)$('projects-error').textContent=String(error);
+   else say(String(error));
+  }
+ }
+ function askProjectRename(project){
+  openNamedAction({action:'rename',name:project.name,kind:'工程',confirm:async name=>{
+   try{
+    await call('rename_project',{id:project.id,name});
+    await refresh();
+    if(projectsDialog.open)await openProjects();
+    say('工程已重命名为「'+name+'」');
+   }catch(error){
+    if(projectsDialog.open)$('projects-error').textContent=String(error);
+    else say(String(error));
+   }
+  }});
+ }
+ async function focusProject(id,minimize){
+  return call('open_project',{id}).then(result=>{
+   if(!result?.shown)throw Error('工程窗口未就绪');
+   if(minimize)windowAction('minimize');
+   return result;
+  });
+ }
+ function projectAction(label,handler,primary=false){
+  const button=text('button',label,primary?'accent':'');
+  button.type='button';button.onclick=handler;return button;
+ }
+ async function openProjects(){
+  if(projectBusy)return;
+  const list=$('project-list');
+  $('projects-error').textContent='';
+  list.replaceChildren(text('li','正在读取工程…','project-list-message'));
+  if(!projectsDialog.open)projectsDialog.showModal();
+  try{
+   const projects=await call('list_projects');
+   list.replaceChildren();
+   for(const project of projects){
+    const row=text('li','','project-entry');
+    const detail=text('div','','project-entry-detail');
+    const name=text('strong',project.name);
+    const source=text('span',project.error?'存档不可读取':project.source_kind==='project-world'?'工程内存档 · '+project.world:
+     project.world?'关联存档 · '+project.world:'空白规划');
+    if(project.directory)source.title=project.directory;
+    const location=text('span',project.directory??project.project_directory,'project-entry-path');
+    location.title=location.textContent;
+    detail.append(name,source,location);row.append(detail);
+    const actions=text('div','','project-entry-actions');
+    if(project.current){
+     row.classList.add('current-project');
+     detail.append(text('span','当前工程','project-indicator'));
+    }else{
+     const activate=minimize=>async()=>{
+      if(projectBusy)return;
+      projectBusy=true;
+      for(const button of list.querySelectorAll('button'))button.disabled=true;
+      $('projects-error').textContent='';
+      try{await focusProject(project.id,minimize);projectsDialog.close();}
+      catch(error){$('projects-error').textContent=String(error);}
+      finally{projectBusy=false;for(const button of list.querySelectorAll('button'))button.disabled=false;}
+     };
+     actions.append(projectAction(project.running?'显示窗口':'新窗口打开',activate(false)),
+      projectAction('切换到此工程',activate(true),true));
+    }
+    actions.append(projectAction('重命名',()=>askProjectRename(project)),
+     projectAction('打开工程目录',()=>openProjectFolder(project.id,'project')));
+    if(project.directory&&!project.error)actions.append(projectAction('打开存档目录',()=>openProjectFolder(project.id,'save')));
+    row.append(actions);list.append(row);
+   }
+  }catch(error){list.replaceChildren();$('projects-error').textContent=String(error);}
+ }
+ function projectSourceChanged(){
+  const saved=$('create-project-type').value==='save';
+  $('create-project-path-field').hidden=!saved;
+  $('create-project-path').required=saved;
+ }
+ function openProjectForm(type='blank',directory=''){
+  if(projectBusy)return;
+  if(projectsDialog.open)projectsDialog.close();
+  $('create-project-name').value=type==='void'?'虚空世界':type==='save'&&directory?directory.split(/[\\/]/).filter(Boolean).at(-1)?.slice(0,64)??'':'';
+  $('create-project-type').value=type;
+  $('create-project-path').value=directory;
+  $('create-project-error').textContent='';
+  projectSourceChanged();
+  projectForm.showModal();
+  $('create-project-name').select();
+ }
+ $('project-name').onclick=openProjects;
+ $('projects-close').onclick=()=>projectsDialog.close();
+ $('start-project-form').onclick=()=>openProjectForm();
+ $('create-project-cancel').onclick=()=>{if(!projectBusy)projectForm.close();};
+ projectForm.addEventListener('cancel',event=>{if(projectBusy)event.preventDefault();});
+ $('create-project-type').onchange=projectSourceChanged;
+ $('create-project-form').onsubmit=async event=>{
+  event.preventDefault();
+  if(projectBusy)return;
+  const type=$('create-project-type').value;
+  const args={name:$('create-project-name').value,type};
+  if(type==='save')args.directory=$('create-project-path').value;
+  const submit=$('create-project-submit');
+  const errorField=$('create-project-error');
+  let created,openError;
+  projectBusy=true;submit.disabled=true;errorField.textContent='';
+  try{
+   created=await call('create_project',args);
+   await focusProject(created.id,false);
+   projectForm.close();
+  }catch(error){
+   if(created){openError=error;projectForm.close();}
+   else errorField.textContent=String(error);
+  }finally{projectBusy=false;submit.disabled=false;}
+  if(openError){
+   await openProjects();
+   $('projects-error').textContent='工程已保存，可从列表重试打开。'+String(openError);
+  }
+ };
  async function openWorldSource(){
   const source=await call('world_source');
   $('world-source-path').value=source?.directory??'';
   $('world-source-error').textContent=source?.error??'';
+  $('world-source-relocate').checked=false;
+  $('world-source-relocate-label').hidden=!source?.directory;
   $('world-source-dialog').showModal();
  }
+ function openNewWorld(){
+  if(currentSource&&!currentSource.error){openProjectForm('void');return;}
+  $('new-world-name').value='虚空世界';
+  $('new-world-error').textContent='';
+  $('new-world-dialog').showModal();
+  $('new-world-name').select();
+ }
+ $('new-world-start').onclick=openNewWorld;
+ $('open-world-start').onclick=()=>openWorldSource().catch(error=>say(String(error)));
+ $('cancel-new-world').onclick=()=>$('new-world-dialog').close();
+ $('new-world-form').onsubmit=async event=>{
+  event.preventDefault();
+  if(busy)return;
+  $('new-world-error').textContent='';
+  $('create-new-world').disabled=true;
+  try {
+   await run(async()=>{
+    let world;
+    try{world=await call('create_void_world',{name:$('new-world-name').value});}
+    catch(error){$('new-world-error').textContent=String(error);throw error;}
+    $('new-world-dialog').close();
+    await macro.open();
+    const [x,y,z]=world.void_world.spawn;
+    await call('browse_world',{x,y,z,view_id:crypto.randomUUID(),label:world.world,plan_id:world.plan_id});
+    return {message:'已创建「'+world.world+'」 · 选择画笔，在网格上放置方块'};
+   },'正在创建虚空世界…');
+  }finally{$('create-new-world').disabled=false;}
+ };
  $('world-source-cancel').onclick=()=>$('world-source-dialog').close();
+ $('world-source-new-project').onclick=()=>{
+  const directory=$('world-source-path').value;
+  $('world-source-dialog').close();
+  openProjectForm('save',directory);
+ };
  $('world-source-form').onsubmit=async event=>{
   event.preventDefault();
   if(busy)return;
   setBusy(true);
   try{
-   await call('save_world_source',{directory:$('world-source-path').value});
+   const directory=$('world-source-path').value;
+   if($('world-source-relocate').checked)await call('relocate_world_source',{directory,confirm_legacy:true});
+   else await call('save_world_source',{directory});
    $('world-source-dialog').close();
    await macro.open();
    await refresh();
   }catch(error){$('world-source-error').textContent=String(error);say(String(error));}
   finally{setBusy(false);}
  };
- const menus={file:[['世界存档来源…',openWorldSource],['建立区域规划','new-region','Ctrl+N'],['保存工作区','save','Ctrl+S'],['保存检查点','checkpoint','Ctrl+Shift+S'],null,['刷新存档','refresh','F5'],['关闭文档','close','Ctrl+W']],edit:[['撤销当前编辑','undo','Ctrl+Z'],['重做当前编辑','redo','Ctrl+Y'],null,['导出方案','apply','Ctrl+Enter']],view:[['聚焦当前规划','focus','F'],['俯视','top','7'],['北向','north','1'],['东向','east','3'],null,['网格开关','grid','G'],['重置布局',()=>{localStorage.removeItem('terraweave-layout');location.reload();}]],tools:[['选择',()=>macro?.active?macro.chooseTool('select'):chooseTool('select'),'V'],['框选规划','plan-area','B'],['多边形规划','plan-polygon','O'],['绘制路线','plan-route'],['地点标记','plan-marker','M'],null,['方块画笔','paint','P'],['方块橡皮','erase','E'],['保存预览图片','capture','Ctrl+Shift+P'],['整理未引用缓存',()=>run(()=>call('compact_storage'))]],help:[['快捷键与操作','help','F1']]};
+ async function backupCurrentProject(){
+  const directory=await invoke('pick_world_directory',{initialPath:'',title:'选择工程备份的保存位置'});
+  if(directory)await run(async()=>{
+   await recovery.flush();
+   const backup=await call('backup_project',{directory});
+   return {message:'工程备份已校验 · '+backup.directory};
+  },'正在备份工程…');
+ }
+ async function restoreBackup(){
+  const directory=await invoke('pick_world_directory',{initialPath:'',title:'选择织境工程备份文件夹'});
+  if(directory)await run(async()=>{
+   const project=await call('restore_project_backup',{directory});
+   try{await focusProject(project.id,false);}
+   catch(error){return {message:'恢复完成，可从工程列表打开「'+project.name+'」 · '+String(error)};}
+   return {message:'已恢复为新工程「'+project.name+'」'};
+  },'正在校验并恢复工程…');
+ }
+ const menus={file:[['世界存档来源…',openWorldSource],['建立区域规划','new-region','Ctrl+N'],['保存工作区','save','Ctrl+S'],['保存检查点','checkpoint','Ctrl+Shift+S'],null,['刷新存档','refresh','F5'],['关闭当前标签页','close','Ctrl+W']],edit:[['撤销当前编辑','undo','Ctrl+Z'],['重做当前编辑','redo','Ctrl+Y'],null,['导出方案','apply','Ctrl+Enter']],view:[['聚焦当前规划','focus','F'],['俯视','top','7'],['北向','north','1'],['东向','east','3'],null,['网格开关','grid','G'],['重置布局',()=>{localStorage.removeItem('terraweave-layout');location.reload();}]],tools:[['选择',()=>macro?.active?macro.chooseTool('select'):chooseTool('select'),'V'],['框选规划','plan-area','B'],['多边形规划','plan-polygon','O'],['绘制路线','plan-route'],['地点标记','plan-marker','M'],null,['方块画笔','paint','P'],['方块橡皮','erase','E'],['保存预览图片','capture','Ctrl+Shift+P'],['整理未引用缓存',()=>run(()=>call('compact_storage'))]],help:[['快捷键与操作','help','F1']]};
+ menus.file.unshift(['切换工程…',openProjects],['新建工程…',()=>openProjectForm()],
+  ['在新工程打开存档…',()=>openProjectForm('save')],
+  ['重命名当前工程…',()=>askProjectRename({id:currentProjectId,name:$('project-name-label').textContent})],
+  ['打开工程目录',()=>openProjectFolder(currentProjectId,'project')],
+  ['备份当前工程…',backupCurrentProject],['恢复工程备份…',restoreBackup],null,['新建世界…',openNewWorld]);
  menus.view.unshift(['全屏预览',toggleFullscreen,'F11'],['新建三维视图',newPanorama]);
  menus.view.push(['外观与主题…',openAppearance],['渲染设置…',context.openRenderSettings]);
- document.querySelectorAll('[data-menu]').forEach(e=>{const open=event=>{event.stopPropagation();const rect=e.getBoundingClientRect();popup(menus[e.dataset.menu].map(item=>item?{label:item[0],key:item[2],action:typeof item[1]==='function'?item[1]:commands[item[1]]}:null),rect.left,rect.bottom);};e.onpointerdown=event=>{if(event.button===0){event.preventDefault();open(event);}};e.onkeydown=event=>{if(['Enter',' '].includes(event.key)){event.preventDefault();open(event);}};});
+ document.querySelectorAll('[data-menu]').forEach(e=>{const open=event=>{event.stopPropagation();const rect=e.getBoundingClientRect();popup(menus[e.dataset.menu].map(item=>item?{label:item[0],key:item[2],disabled:item[1]==='close'&&(macro?.active||!activeKey),action:typeof item[1]==='function'?item[1]:commands[item[1]]}:null),rect.left,rect.bottom);};e.onpointerdown=event=>{if(event.button===0){event.preventDefault();open(event);}};e.onkeydown=event=>{if(['Enter',' '].includes(event.key)){event.preventDefault();open(event);}};});
  document.addEventListener('pointerdown',e=>{if(!e.target.closest('#menu-popup')&&!e.target.closest('[data-menu]'))$('menu-popup').hidden=true;});
- document.addEventListener('keydown',e=>{if(e.key==='Escape'){$('menu-popup').hidden=true;return;}const editing=!!e.target.closest('input,textarea,select,[contenteditable=true]');if(macro?.active&&!editing&&!e.ctrlKey&&!e.metaKey){const keys={v:'select',b:'area',o:'polygon',p:'route',m:'marker',h:'pan'};if(keys[e.key.toLowerCase()]){e.preventDefault();macro.chooseTool(keys[e.key.toLowerCase()]);return;}if(e.key==='Delete'){e.preventDefault();macro.deleteSelected();return;}if(e.key.toLowerCase()==='f'){macro.fit();return;}if(e.key==='7'||e.key==='1'){macro.north();return;}}const key=editorShortcut(e,editing);if(key&&commands[key]){e.preventDefault();if(macro?.active&&key==='new-region')macro.chooseTool('area');else if(key==='capture')captureVisible();else if(macro?.active&&key==='save')macro.save();else commands[key]();}});
+ document.addEventListener('keydown',e=>{if(e.key==='Escape'){$('menu-popup').hidden=true;return;}if(document.querySelector('dialog[open]'))return;const editing=!!e.target.closest('input,textarea,select,[contenteditable=true]');if(macro?.active&&!editing&&!e.ctrlKey&&!e.metaKey){const keys={v:'select',b:'area',o:'polygon',p:'route',m:'marker',h:'pan'};if(keys[e.key.toLowerCase()]){e.preventDefault();macro.chooseTool(keys[e.key.toLowerCase()]);return;}if(e.key==='Delete'){e.preventDefault();macro.deleteSelected();return;}if(e.key.toLowerCase()==='f'){macro.fit();return;}if(e.key==='7'||e.key==='1'){macro.north();return;}}const key=editorShortcut(e,editing);if(key&&commands[key]){e.preventDefault();if(macro?.active&&key==='new-region')macro.chooseTool('area');else if(key==='capture')captureVisible();else if(macro?.active&&key==='save')macro.save();else commands[key]();}});
  $('enter-3d').onclick = () => {
   if (!macro?.active) return;
   if (macro.getSelected()) macro.enterDetail();
@@ -380,5 +657,5 @@ export function mountWorkspaceUI(context){
  document.querySelectorAll('[data-resize]').forEach(e=>e.onpointerdown=event=>{event.preventDefault();const name=e.dataset.resize,start=name==='bottom'?event.clientY:event.clientX,initial=parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--'+name));document.body.classList.add('resizing');const move=ev=>{const delta=(name==='bottom'?ev.clientY:ev.clientX)-start,size=Math.max(name==='bottom'?100:170,Math.min(name==='bottom'?360:420,initial+(name==='left'?delta:-delta)));document.documentElement.style.setProperty('--'+name,size+'px');};const up=()=>{document.removeEventListener('pointermove',move);document.removeEventListener('pointerup',up);document.body.classList.remove('resizing');const layout={};for(const key of ['left','right','bottom'])layout[key]=parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--'+key));localStorage.setItem('terraweave-layout',JSON.stringify(layout));};document.addEventListener('pointermove',move);document.addEventListener('pointerup',up);});
  function planningHistory(state){$('history-list').replaceChildren();for(const entry of [...(state.history??[])].reverse()){const row=document.createElement('div');row.className='history-row';row.append(text('span',String(entry.id+1)),text('span',entry.label,'title'),text('span','规划'),text('span',entry.at?date(entry.at):'','time'));$('history-list').append(row);}$('history-info').textContent='地图规划 · 可撤销 '+state.undo_count+' / 可重做 '+state.redo_count;$('undo').disabled=busy||!state.undo_count;$('redo').disabled=busy||!state.redo_count;$('undo-context').disabled=busy||!state.undo_count;$('redo-context').disabled=busy||!state.redo_count;$('undo').textContent='撤销规划';$('redo').textContent='重做规划';}
  refresh().then(()=>{if(!context.getRegion())say('准备就绪 · 在地图总览中选区规划');}).catch(e=>say(String(e)));
- return {setRegion,draftDeleted,openDraftAction,openNamedAction,rememberView,storedView,refresh:()=>refresh().catch(e=>say(String(e))),showMenu:popup,say,saveBounds,paintAt,toolChanged,run,planningHistory,bindMap(map){macro=map;},mapActive(){renderTabs();sync();},markDone(){},picked(p,state){picked=p;fields('d',[...p,...p]);$('picked-block').textContent=p.join(', ')+'\n'+state;$('coordinate-status').textContent=p.join(' / ');},stats(n){$('render-stats').textContent=n.toLocaleString()+' 方块';},setViewFields(view){$('layer').value=view.max_y;$('layer-number').value=view.max_y;$('single-layer').checked=view.min_y===view.max_y;$('outline').checked=view.show_selection;$('grid').checked=view.show_grid??false;$('planning-overlay').checked=view.show_plans??false;$('invisible-blocks').checked=view.show_invisible??false;document.querySelectorAll('[data-display-mode]').forEach(e=>e.classList.toggle('active',e.dataset.displayMode===(view.display_mode??'scene')));},setLimits(value){$('limits').textContent=value;}};
+ return {recovery,restoreSession,formValues,setRegion,draftDeleted,openDraftAction,openNamedAction,rememberView,storedView,refresh:()=>refresh().catch(e=>say(String(e))),showMenu:popup,say,saveBounds,paintAt,toolChanged,run,planningHistory,bindMap(map){macro=map;},mapActive(){renderTabs();sync();},markDone(){},picked(p,state){picked=p;fields('d',[...p,...p]);$('picked-block').textContent=p.join(', ')+'\n'+state;$('coordinate-status').textContent=p.join(' / ');},stats(n){$('render-stats').textContent=n.toLocaleString()+' 方块';},setViewFields(view){$('layer').value=view.max_y;$('layer-number').value=view.max_y;$('single-layer').checked=view.min_y===view.max_y;$('outline').checked=view.show_selection;$('grid').checked=view.show_grid??false;$('planning-overlay').checked=view.show_plans??false;$('invisible-blocks').checked=view.show_invisible??false;document.querySelectorAll('[data-display-mode]').forEach(e=>e.classList.toggle('active',e.dataset.displayMode===(view.display_mode??'scene')));if(sessionRestored&&!sessionLoading)recovery.schedule();},setLimits(value){$('limits').textContent=value;}};
 }

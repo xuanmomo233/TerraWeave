@@ -7,9 +7,15 @@ import {sectionIndices} from './world-volume.mjs';
 import {fluidCornerHeights} from './fluid-shape.mjs';
 import {assetRoots} from './render-packs.mjs';
 const assets=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../assets/minecraft'),jsonCache=new Map(),solidCache=new Map();
-const overlays=assetRoots(path.dirname(assets));
-const packRevision=fs.existsSync(path.join(path.dirname(assets),'render-settings.json'))
- ?fs.readFileSync(path.join(path.dirname(assets),'render-settings.json'),'utf8'):'';
+const settings=path.join(path.dirname(assets),'render-settings.json');
+let overlays=[],packRevision;
+function refreshModelAssets(){
+ const revision=fs.existsSync(settings)?fs.readFileSync(settings,'utf8'):'';
+ if(packRevision===revision)return;
+ overlays=assetRoots(path.dirname(assets));packRevision=revision;
+ jsonCache.clear();solidCache.clear();
+}
+refreshModelAssets();
 const faces=[[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]],isAir=s=>/^minecraft:(air|cave_air|void_air|structure_void|light)(\[|$)/.test(s),invisible=s=>/^minecraft:(barrier|structure_void|light)(\[|$)/.test(s);
 const stateName=p=>p.Name+(p.Properties?'['+Object.entries(p.Properties).sort().map(([k,v])=>k+'='+v).join(',')+']':'');
 function json(name){if(!jsonCache.has(name)){const candidates=overlays.map(root=>path.join(root,'minecraft',name));const file=candidates.find(f=>fs.existsSync(f))??path.join(assets,name);jsonCache.set(name,JSON.parse(fs.readFileSync(file,'utf8')));}return jsonCache.get(name);}
@@ -24,6 +30,7 @@ export function fluidCorners(x,y,z,kind,get){
  return fluidCornerHeights(x,y,z,kind,get,fullCubeOccluder);
 }
 export function modelTile(tx,tz,root,index=worldIndex()){
+ refreshModelAssets();
  if(![tx,tz].every(Number.isSafeInteger)||Math.abs(tx)>1000000||Math.abs(tz)>1000000)throw Error('Invalid model tile');const minX=tx*32,minZ=tz*32,regions=index.regions.filter(r=>r.x*512<minX+33&&(r.x+1)*512>minX-1&&r.z*512<minZ+33&&(r.z+1)*512>minZ-1),revision=createHash('sha256').update(JSON.stringify(regions.map(r=>[r.x,r.z,r.mtime,r.size]))).update(packRevision).digest('hex'),file=path.join(root,`models-${tx}-${tz}.json`);
  try{const old=JSON.parse(fs.readFileSync(file,'utf8'));if(old.version===3&&old.revision===revision)return old;}catch{}
  const names=['minecraft:air'],ids=new Map([[names[0],0]]),chunks=new Map(),unknown=new Set(),idFor=s=>{if(!ids.has(s)){ids.set(s,names.length);names.push(s);}return ids.get(s);};

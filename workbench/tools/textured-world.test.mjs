@@ -38,3 +38,12 @@ test('a large world keeps the camera neighborhood and caps resident tile count',
  assert.ok(start.some(t=>t.x===0));assert.ok(end.some(t=>t.x===749));
  assert.equal(start.some(t=>t.x===749),false);
 });
+test('initial preview only reads the nearest requested tiles even when the target is far away',async()=>{
+ const calls=[];
+ const world=new Harness(async(name,{x,z})=>{calls.push([x,z]);return {...tile,x,z};});
+ await world.initialize({revision:'preview',occupied_chunks:[[250,0],[8,0],[4,0],[0,0],[2,0]],helper_chunks:[]});
+ world.enabled=true;
+ await world.update(4000,16,4000,[0,0,0],null,[4,80,16],undefined,null,10000,2);
+ assert.deepEqual(calls,[[0,0],[1,0]]);
+ assert.equal(world.meshes.size,2);
+});

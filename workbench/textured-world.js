@@ -12,30 +12,34 @@ const MAX_RESIDENT_VERTICES=5_200_000;
 const helper=s=>/^minecraft:(barrier|structure_void|light)(\[|$)/.test(s),keyFor=g=>JSON.stringify([g.state,g.mask,g.fluid_mask,g.fluid_corners]);
 export class TexturedWorld{
  constructor(scene,call,parts,progress=()=>{}){this.scene=scene;this.call=call;this.parts=parts;this.progress=progress;this.meshes=new Map();this.cache=new Map();this.prepared=new Map();this.lookups=new Map();this.enabled=false;this.showInvisible=false;this.info=null;this.signature='';this.generation=0;this.loading=null;this.atlas=null;this.materials=new Map();this.markerMaterial=new THREE.PointsMaterial({size:1.1,transparent:true,alphaTest:.1,depthWrite:false});this.uniforms={active:{value:false},min:{value:new THREE.Vector3()},max:{value:new THREE.Vector3()}};}
- async initialize(info){const generation=this.generation;if(!info){if(!this.infoRequest)this.infoRequest=this.call('world_scene_info').finally(()=>this.infoRequest=null);info=await this.infoRequest;if(generation!==this.generation&&this.info)return this.info;}if(this.info?.revision!==info.revision){this.generation++;this.cache.clear();this.signature='';}this.info=info;return this.info;}
+ async initialize(info){const generation=this.generation;if(!info){if(!this.infoRequest)this.infoRequest=this.call('world_scene_info',{preview:true}).finally(()=>this.infoRequest=null);info=await this.infoRequest;if(generation!==this.generation&&this.info)return this.info;}if(this.info?.revision!==info.revision){this.generation++;this.cache.clear();this.signature='';}else if(this.info?.preview_index&&!info.preview_index)this.generation++;this.info=info;this.tiles=this.indexTiles(info);return this.info;}
  setShowInvisible(value,map){this.showInvisible=value;if(map&&this.markerMaterial.map!==map){this.markerMaterial.map=map;this.markerMaterial.needsUpdate=true;}for(const group of this.meshes.values())for(const child of group.children)if(child.isPoints)child.visible=value;}
  dispose(group){for(const child of group.children)child.geometry.dispose();}
  clear(){this.generation++;for(const group of this.meshes.values()){this.scene.remove(group);this.dispose(group);}this.meshes.clear();this.lookups.clear();for(const mat of this.materials.values())mat.dispose();this.materials.clear();this.atlas?.texture.dispose();this.atlas=null;this.signature='';this.loadedVertices=0;this.omittedTiles=0;}
  rebase(origin,bounds){this.origin=[...origin];this.cutBounds=bounds;for(const group of this.meshes.values())group.position.set(...group.userData.origin.map((n,i)=>n-origin[i]));this.uniforms.active.value=!!bounds;if(bounds){this.uniforms.min.value.set(...bounds.slice(0,3).map((n,i)=>n-origin[i]));this.uniforms.max.value.set(...bounds.slice(3).map((n,i)=>n+1-origin[i]));}}
- wanted(eye,target,frustum,origin){
-  const result=new Map(),world=this.info.bounds??[-64,-64,-64,63,319,63];
-  for(const [cx,cz,y0,y1] of [...this.info.occupied_chunks,...(this.info.helper_chunks??[])]){
+ indexTiles(info){
+  const result=new Map(),world=info.bounds??[-64,-64,-64,63,319,63];
+  for(const [cx,cz,y0,y1] of [...info.occupied_chunks,...(info.helper_chunks??[])]){
    const x=Math.floor(cx/2),z=Math.floor(cz/2),key=x+','+z,old=result.get(key);
    result.set(key,{x,z,key,min_y:Math.min(old?.min_y??Infinity,y0??world[1]),max_y:Math.max(old?.max_y??-Infinity,y1??world[4])});
   }
-  const all=[...result.values()];
-  this.totalTiles=all.length;
-  if(all.length<=MAX_RESIDENT_TILES)return all;
-  for(const tile of all){
+  return [...result.values()];
+ }
+ wanted(eye,target,frustum,origin,limit=MAX_RESIDENT_TILES){
+  const tiles=this.tiles??this.indexTiles(this.info);
+  this.totalTiles=tiles.length;
+  const ranked=tiles.map(tile=>{
    const x=tile.x*32,z=tile.z*32;
-   const box=new THREE.Box3(new THREE.Vector3(x-origin[0],tile.min_y-origin[1],z-origin[2]),
-    new THREE.Vector3(x+32-origin[0],tile.max_y+1-origin[1],z+32-origin[2]));
    const distance=(p)=>Math.hypot(Math.max(0,x-p[0],p[0]-x-32),Math.max(0,z-p[2],p[2]-z-32));
-   const near=Math.min(distance(eye),distance(target));
+   const near=distance(eye);
    // Keep off-screen nearby terrain for the light's shadow map.
-   tile.score=(near<=128||frustum?.intersectsBox(box)?0:100000)+near;
-  }
-  return all.sort((a,b)=>a.score-b.score||a.x-b.x||a.z-b.z).slice(0,MAX_RESIDENT_TILES);
+   if(near<=128)return {tile,score:near};
+   const visible=frustum?.intersectsBox(new THREE.Box3(
+    new THREE.Vector3(x-origin[0],tile.min_y-origin[1],z-origin[2]),
+    new THREE.Vector3(x+32-origin[0],tile.max_y+1-origin[1],z+32-origin[2])));
+   return {tile,score:(visible?1000:100000)+Math.min(near,distance(target))};
+  });
+  return ranked.sort((a,b)=>a.score-b.score||a.tile.x-b.tile.x||a.tile.z-b.tile.z).slice(0,limit).map(entry=>entry.tile);
  }
  vertexCount(tile){
   return tile.groups.reduce((sum,g)=>sum+g.positions.length*(this.prepared.get(keyFor(g))??[])
@@ -64,12 +68,12 @@ export class TexturedWorld{
   }
   if(markers.length){const geometry=new THREE.BufferGeometry();geometry.setAttribute('position',new THREE.Float32BufferAttribute(markers,3));const points=new THREE.Points(geometry,this.markerMaterial);points.visible=this.showInvisible;group.add(points);}return group;
  }
- async update(x,z,distance,origin,bounds,eye=[x,0,z],_scale,frustum,budget=MAX_RESIDENT_VERTICES){
+ async update(x,z,distance,origin,bounds,eye=[x,0,z],_scale,frustum,budget=MAX_RESIDENT_VERTICES,tileLimit=MAX_RESIDENT_TILES){
   if(!this.enabled)return;
   if(!this.info)await this.initialize();
   if(!this.enabled)return;
   this.rebase(origin,bounds);
-  const wanted=this.wanted(eye,[x,0,z],frustum,origin);
+  const wanted=this.wanted(eye,[x,0,z],frustum,origin,tileLimit);
   const signature=[this.info.revision,budget,...wanted.map(t=>t.key).sort()].join(':');
   if(this.loading&&this.loadingSignature===signature)return this.loading;
   if(this.signature===signature&&!this.loading)return;

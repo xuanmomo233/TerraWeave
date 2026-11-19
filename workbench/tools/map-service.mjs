@@ -2,9 +2,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {createHash} from 'node:crypto';
-import {worldIndex,surfaceTile,sampleSurface} from './world-surface.mjs';
+import {worldIndex,surfaceTile,sampleSurface,savedWorldCamera} from './world-surface.mjs';
 import {planBounds,planningFocusY} from './planning-core.mjs';
-import {volumeSceneInfo,volumeTile} from './world-volume.mjs';
+import {cachedVolumeSceneInfo,volumeSceneInfo,volumeTile} from './world-volume.mjs';
 import {modelTile} from './world-models.mjs';
 import {savedDetailSnapshot} from './render-context.mjs';
 
@@ -14,7 +14,7 @@ export const MAP_TOOLS=[
  {name:'world_map_info',description:'Read generated world extent and terrain source for the whole map, independent of local block windows.',inputSchema:schema({}),annotations:{readOnlyHint:true}},
  {name:'world_map_tile',description:'Read a saved-world surface tile or an exact horizontal Y slice. Missing terrain is explicit.',inputSchema:schema({x:i,z:i,level:i,slice_y:i},['x','z','level']),annotations:{readOnlyHint:true}},
  {name:'world_surface_at',description:'Read the actual saved top block and height at a world X/Z coordinate.',inputSchema:schema({x:i,z:i},['x','z']),annotations:{readOnlyHint:true}},
- {name:'world_scene_info',description:'Read the whole-world volumetric scene extent, occupied chunks and source revision, including floating structures.',inputSchema:schema({}),annotations:{readOnlyHint:true}},
+ {name:'world_scene_info',description:'Read the whole-world volumetric extent and source revision. Preview mode uses chunk headers to start rendering large saves without a full scan.',inputSchema:schema({preview:{type:'boolean'}}),annotations:{readOnlyHint:true}},
  {name:'get_scene_view',description:'Read the actual current camera position, viewing direction, navigation mode and source identity shown to the user.',inputSchema:schema({}),annotations:{readOnlyHint:true}},
  {name:'world_model_tile',description:'Read complete saved block states and exposed faces for rendering their actual Minecraft models and textures; no LOD replacement.',inputSchema:schema({x:i,z:i,world_revision:id},['x','z']),annotations:{readOnlyHint:true}},
  {name:'world_volume_tile',description:'Read a bounded 3D voxel LOD mesh containing exterior, side and underside faces, without generating world chunks.',inputSchema:schema({x:i,z:i,level:i,world_revision:id},['x','z','level']),annotations:{readOnlyHint:true}},
@@ -32,7 +32,21 @@ export function mapService(ctx){
  const {root,planning,desktopRequest,saveSnapshot,savePreview,displayRegion}=ctx;
  const viewFile=path.join(root,'map-view.json');
  const info=()=>{const index=worldIndex();const {regions,chunks,directory,...publicIndex}=index;let view=null;try{view=JSON.parse(fs.readFileSync(viewFile,'utf8'));}catch{}return {...publicIndex,view};};
- const sceneInfo=()=>{const index=worldIndex(),data=volumeSceneInfo(path.join(root,'volume-cache'),index);return {...data,environment_revision:index.environment_revision,representation:'minecraft_block_models',limits:'Actual saved block states rendered with their models and textures. Occluded faces are culled; visible blocks are not replaced with coarse colored voxels. Game lighting, animation, entities and some block-entity effects remain separate limitations.',unreadable_chunks:undefined,unreadable_chunk_count:data.unreadable_chunks.length};};
+ function sceneInfo(index=worldIndex(),preview=false){
+  const volumeCache=path.join(root,'volume-cache');
+  const common={environment_revision:index.environment_revision,representation:'minecraft_block_models',
+   limits:'Actual saved block states and textures; lighting, animation, entities and some block entities have separate limitations.'};
+  const progressive_loading=preview&&index.chunk_count>256;
+  const cached=progressive_loading?cachedVolumeSceneInfo(volumeCache,index):null;
+  if(progressive_loading&&!cached){
+   const [x,z,maxX,maxZ]=index.bounds;
+   return {...common,world:index.world,world_uuid:index.world_uuid,revision:index.revision,
+    bounds:[x,-64,z,maxX,319,maxZ],generated_bounds:index.bounds,chunk_count:index.chunk_count,
+    occupied_chunks:index.chunks,helper_chunks:[],preview_index:true,progressive_loading,source:'saved_anvil_volume'};
+  }
+  const data=cached??volumeSceneInfo(volumeCache,index);
+  return {...data,...common,progressive_loading,unreadable_chunks:undefined,unreadable_chunk_count:data.unreadable_chunks.length};
+ }
  function validateView(view){
   if(!view||!['x','z','scale','rotation'].every(k=>Number.isFinite(view[k]))||view.scale<.025||view.scale>2048||Math.abs(view.x)>30000000||Math.abs(view.z)>30000000)throw Error('Invalid map view');
   if(view.slice_y!=null&&(!Number.isInteger(view.slice_y)||view.slice_y< -64||view.slice_y>319))throw Error('地图切片高度须在 Y -64 至 319 内');
@@ -48,14 +62,15 @@ export function mapService(ctx){
   const {x,z}=args;if(!Number.isSafeInteger(x)||!Number.isSafeInteger(z)||Math.abs(x)>30000000||Math.abs(z)>30000000)throw Error('Invalid world position');
   const tab=sceneTab(args);
   if(args.y!==undefined&&(!Number.isFinite(args.y)||args.y< -64||args.y>319))throw Error('三维取点高度须在 Y -64 至 319 内');
-  const index=worldIndex(),cx=Math.floor(x/16),cz=Math.floor(z/16),region=index.regions.find(r=>r.x===Math.floor(cx/32)&&r.z===Math.floor(cz/32));if(!region)throw Error('该位置尚无已保存地形；可以规划，但不能把未知数据当实况预览');
-  const surface=sampleSurface(x,z,true,index.directory);if(!surface)throw Error('该位置的方块数据不可读取，请选择已生成区域');
-  const focus=Number.isFinite(args.y)?args.y:surface.y??64,minY=Math.max(-64,Math.min(256,Math.floor(focus)-32));
+  const index=worldIndex(),cx=Math.floor(x/16),cz=Math.floor(z/16),region=index.regions.find(r=>r.x===Math.floor(cx/32)&&r.z===Math.floor(cz/32));if(!region&&!index.void_world)throw Error('该位置尚无已保存地形；可以规划，但不能把未知数据当实况预览');
+  const surface=sampleSurface(x,z,true,index.directory,index.void_world);if(!surface)throw Error('该位置的方块数据不可读取，请选择已生成区域');
+  const focus=Number.isFinite(args.y)?args.y:surface.y??index.void_world?.spawn[1]??64,minY=Math.max(-64,Math.min(256,Math.floor(focus)-32));
   const bounds=[cx*16-16,minY,cz*16-16,cx*16+31,minY+63,cz*16+31];
   const snapshot=savedDetailSnapshot(bounds,index);
   const pins=saveSnapshot(snapshot);
   const label=tab.label??(tab.view_id?'三维 '+x+' / '+Math.floor(focus)+' / '+z:'三维场景');
   const r={id:'world-view-'+randomUUID(),view_id:tab.view_id,label,bounds,loaded_bounds:bounds,world:snapshot.world,world_uuid:snapshot.uuid,minecraft:snapshot.minecraft,source:snapshot.source,world_revision:index.revision,environment_revision:index.environment_revision,transient:true,surface_y:surface.y,focus_position:[x+.5,focus,z+.5],unknown_chunks:snapshot.unknown_chunks??[],block_entity_count:snapshot.block_entity_count,block_entity_positions:snapshot.block_entity_positions,detail_for_plan_id:args.plan_id,keep_camera:args.keep_camera??false,captured_at:new Date().toISOString(),...pins};
+  if(index.void_world) Object.assign(r,{construction_y:Math.floor(focus),pristine_void:index.pristine_void});
   savePreview(r);
   return args.capture_only?r:displayRegion(r,'display',args.navigation_id);
  }
@@ -63,10 +78,16 @@ export function mapService(ctx){
   if(name==='world_map_info')return info();
   if(name==='get_scene_view')return desktopRequest({kind:'scene_view'});
   if(name==='inspect_captured_scene'){if(!/^[a-zA-Z0-9-]{1,99}$/.test(args.capture_id))throw Error('Invalid scene capture ID');const folder=path.join(root,'captures',args.capture_id),metadata=JSON.parse(fs.readFileSync(path.join(folder,'capture.json'))),bytes=fs.readFileSync(path.join(folder,'scene-geometry.json'));if(createHash('sha256').update(bytes).digest('hex')!==metadata.scene_geometry_sha256)throw Error('Saved scene geometry changed');const scene=JSON.parse(bytes);return {...scene,models:undefined,atlas_png:undefined,model_count:Object.keys(scene.models??{}).length,tiles:scene.tiles.map(t=>({...t,groups:undefined,quads:undefined,quad_count:t.quads?.length,visible_blocks:t.visible_blocks})),scope:scene.representation?.startsWith('minecraft_block_models')?'Frozen actual block models, exposed faces, texture atlas and world coordinates used for this image.':'Historical voxel LOD capture.'};}
-  if(name==='world_scene_info')return sceneInfo();
+  if(name==='world_scene_info')return sceneInfo(worldIndex(),args.preview===true);
   if(name==='world_model_tile'){const index=worldIndex();if(args.world_revision&&index.revision!==args.world_revision)throw Error('世界存档已变化，请刷新实景');return modelTile(args.x,args.z,path.join(root,'model-cache'),index);}
   if(name==='world_volume_tile'){const index=worldIndex();if(args.world_revision&&index.revision!==args.world_revision)throw Error('世界存档已变化，请刷新全景三维');return volumeTile(args.x,args.z,args.level,path.join(root,'volume-cache'),index);}
-  if(name==='open_world_scene'){const tab=sceneTab(args);return desktopRequest({kind:'world_scene',scene:sceneInfo(),...tab});}
+  if(name==='open_world_scene'){
+   const tab=sceneTab(args),index=worldIndex();
+   if(index.pristine_void){const [x,y,z]=index.void_world.spawn;return browse({x,y,z,...tab,label:tab.label??index.world});}
+   const scene=sceneInfo(index,true),initial_camera=savedWorldCamera(index);
+   if(scene.progressive_loading)delete scene.occupied_chunks;
+   return desktopRequest({kind:'world_scene',scene:{...scene,initial_camera},...tab});
+  }
   if(name==='capture_world_scene'){
    const width=args.width??1280,height=args.height??800,angles=args.angles??[],views=args.views??[],current_view=args.angles===undefined&&args.views===undefined;
    if(![width,height].every(v=>Number.isInteger(v)&&v>=256&&v<=1920))throw Error('3D PNG dimensions must be 256..1920');

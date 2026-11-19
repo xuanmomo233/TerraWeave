@@ -23,7 +23,7 @@ pub fn node_program()->std::ffi::OsString {
  }
  if cfg!(windows) {"node.exe".into()} else {"node".into()}
 }
-fn root()->PathBuf{
+pub(crate) fn root()->PathBuf{
  let project=project();
  std::env::var_os("TERRAWEAVE_STATE").map(|p|project.join(p)).unwrap_or_else(||project.join("project-state/workbench"))
 }
@@ -47,9 +47,22 @@ pub fn claim_instance()->Result<fs::File,String>{
 pub fn show_existing(){
  let id=format!("{}-{}",ms(),std::process::id());let _=fs::create_dir_all(root().join("requests"));
  let _=write(&root().join("requests").join(format!("{id}.json")),&json!({"id":id,"kind":"show","reply":false,"expires_at_ms":ms()+10000}));
+ let _=fs::write(root().join("wake-window"),[]);
+}
+pub fn monitor_window(window:tauri::WebviewWindow){
+ let wake=root().join("wake-window");
+ std::thread::spawn(move||loop{
+  let _=workbench_heartbeat();
+  if fs::remove_file(&wake).is_ok(){
+   let _=window.show();
+   let _=window.unminimize();
+   let _=window.set_focus();
+  }
+  std::thread::sleep(std::time::Duration::from_millis(300));
+ });
 }
 #[tauri::command]
-pub fn workbench_heartbeat()->Result<(),String>{let now=ms() as u64;if now.saturating_sub(LAST_HEARTBEAT.load(Ordering::Relaxed))<1000{return Ok(())}LAST_HEARTBEAT.store(now,Ordering::Relaxed);write(&root().join("heartbeat.json"),&json!({"pid":std::process::id(),"at_ms":now.to_string(),"version":2}))}
+pub fn workbench_heartbeat()->Result<(),String>{let now=ms() as u64;if LAST_HEARTBEAT.fetch_update(Ordering::Relaxed,Ordering::Relaxed,|last|(now.saturating_sub(last)>=1000).then_some(now)).is_err(){return Ok(())}write(&root().join("heartbeat.json"),&json!({"pid":std::process::id(),"at_ms":now.to_string(),"version":2}))}
 fn read(path:&Path,max:u64)->Result<Value,String>{
  if fs::metadata(path).map_err(|e|e.to_string())?.len()>max{return Err("Workbench data exceeds limit".into())}
  serde_json::from_slice(&fs::read(path).map_err(|e|e.to_string())?).map_err(|e|e.to_string())
@@ -215,8 +228,9 @@ pub fn workbench_complete(id:String,mut result:Value)->Result<(),String>{
 #[tauri::command]
 pub async fn workbench_call(tool:String,args:Value)->Result<Value,String>{
  tauri::async_runtime::spawn_blocking(move||{
-  if crate::ui_worker::handles(&tool){return crate::ui_worker::request(&tool,args)}
+  if crate::ui_worker::handles(&tool)&&!(tool=="world_scene_info"&&args["preview"]!=true){return crate::ui_worker::request(&tool,args)}
   let mut command=Command::new(node_program());command.arg(project().join("tools/creative-workbench.mjs")).arg("--json").current_dir(project()).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+  command.env("TERRAWEAVE_DESKTOP_EXE",std::env::current_exe().map_err(|e|e.to_string())?);
   #[cfg(windows)]{use std::os::windows::process::CommandExt;command.creation_flags(0x08000000);}
   let mut child=command.spawn().map_err(|e|e.to_string())?;
   child.stdin.take().ok_or("Missing tool stdin")?.write_all(serde_json::to_string(&json!({"tool":tool,"args":args})).unwrap().as_bytes()).map_err(|e|e.to_string())?;
@@ -225,12 +239,17 @@ pub async fn workbench_call(tool:String,args:Value)->Result<Value,String>{
  }).await.map_err(|e|e.to_string())?
 }
 #[tauri::command]
-pub fn workbench_show(window:tauri::Window)->Result<(),String>{window.unminimize().map_err(|e|e.to_string())?;window.show().map_err(|e|e.to_string())}
+pub fn workbench_show(window:tauri::Window)->Result<(),String>{
+ window.show().map_err(|e|e.to_string())?;
+ window.unminimize().map_err(|e|e.to_string())?;
+ window.set_focus().map_err(|e|e.to_string())
+}
 #[tauri::command]
-pub fn workbench_window_action(window:tauri::Window,action:String)->Result<Value,String>{
+pub fn workbench_window_action(window:tauri::Window,action:String,title:Option<String>)->Result<Value,String>{
  match action.as_str(){
   "drag"=>{window.start_dragging().map_err(|e|e.to_string())?;return Ok(Value::Null)},
   "minimize"=>{window.minimize().map_err(|e|e.to_string())?;return Ok(json!({"minimized":true}))},
+  "title"=>{let title=title.filter(|name|!name.is_empty()&&name.chars().count()<=120).ok_or("Invalid window title")?;window.set_title(&title).map_err(|e|e.to_string())?;return Ok(Value::Null)},
   "maximize"=>{if window.is_maximized().map_err(|e|e.to_string())?{window.unmaximize().map_err(|e|e.to_string())?;}else{window.maximize().map_err(|e|e.to_string())?;}},
   "enter-fullscreen" | "exit-fullscreen" => {
    window.set_fullscreen(action == "enter-fullscreen").map_err(|e| e.to_string())?;

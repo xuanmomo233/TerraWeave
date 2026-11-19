@@ -7,8 +7,16 @@ const air=name=>!name||/^minecraft:(air|cave_air|void_air|barrier|structure_void
 const digest=value=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
 function save(file,value){fs.mkdirSync(path.dirname(file),{recursive:true});const temp=file+'.pending-'+process.pid;fs.writeFileSync(temp,JSON.stringify(value));fs.renameSync(temp,file);}
 function supported(chunk){return chunk?.DataVersion===3465&&['full','minecraft:full'].includes(chunk.Status);}
+export function cachedVolumeSceneInfo(root,index){
+ try{
+  const old=JSON.parse(fs.readFileSync(path.join(root,'scene-index.json'),'utf8'));
+  if(old.version===2&&old.revision===index.revision)return old;
+ }catch{}
+ return null;
+}
 export function volumeSceneInfo(root,index=worldIndex()){
- const file=path.join(root,'scene-index.json');try{const old=JSON.parse(fs.readFileSync(file,'utf8'));if(old.version===2&&old.revision===index.revision)return old;}catch{}
+ const file=path.join(root,'scene-index.json'),cached=cachedVolumeSceneInfo(root,index);
+ if(cached)return cached;
  const occupied=[],unreadable=[],helpers=[];let bounds=[Infinity,Infinity,Infinity,-Infinity,-Infinity,-Infinity];
  for(const [x,z]of index.chunks){let chunk;try{chunk=readWorldChunk(x,z,index.directory);}catch{}if(!supported(chunk)){unreadable.push([x,z]);continue;}
   const helperSections=(chunk.sections??[]).filter(s=>s.block_states?.palette?.some(p=>p.Name==='minecraft:barrier'));if(helperSections.length)helpers.push([x,z,Math.min(...helperSections.map(s=>s.Y))*16,Math.max(...helperSections.map(s=>s.Y))*16+15]);const sections=(chunk.sections??[]).filter(s=>s.Y>=-4&&s.Y<20&&s.block_states?.palette?.some(p=>!air(p.Name)));if(!sections.length)continue;

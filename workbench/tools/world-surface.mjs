@@ -18,20 +18,55 @@ export function parseNbt(bytes){
  }}
  if(u8()!==10)throw Error('NBT root is not a compound');str();return value(10);
 }
+let lastIndex;
 export function worldIndex(){
  const source=worldSource();
  const directory=source?.error?undefined:source?.directory;
  const regions=[],chunks=[];
- for(const file of directory?fs.readdirSync(path.join(directory,'region')).sort():[]){const match=/^r\.(-?\d+)\.(-?\d+)\.mca$/.exec(file);if(!match)continue;const name=path.join(directory,'region',file),stat=fs.statSync(name);if(stat.size<8192)continue;
+ const regionFiles=directory?fs.readdirSync(path.join(directory,'region')).filter(name=>/^r\.-?\d+\.-?\d+\.mca$/.test(name)).sort():[];
+ const files=regionFiles.map(file=>{const name=path.join(directory,'region',file);return {file,name,stat:fs.statSync(name)};});
+ const level=directory?fs.statSync(path.join(directory,'level.dat')):null;
+ const stamp=JSON.stringify([source,level?.mtimeMs,level?.size,files.map(({file,stat})=>[file,stat.size,stat.mtimeMs])]);
+ if(lastIndex?.stamp===stamp)return lastIndex.index;
+ for(const {file,name,stat} of files){const match=/^r\.(-?\d+)\.(-?\d+)\.mca$/.exec(file);if(stat.size<8192)continue;
   const header=Buffer.alloc(4096),fd=fs.openSync(name,'r');try{fs.readSync(fd,header,0,4096,0);}finally{fs.closeSync(fd);}
   const rx=Number(match[1]),rz=Number(match[2]);let count=0;
   for(let i=0;i<1024;i++){const entry=header.readUInt32BE(i*4),sector=entry>>>8;if(sector<2||!(entry&255)||sector*4096+5>stat.size)continue;chunks.push([rx*32+i%32,rz*32+Math.floor(i/32)]);count++;}
   if(count)regions.push({x:rx,z:rz,file:name,size:stat.size,mtime:stat.mtimeMs,chunks:count});
  }
- const bounds=chunks.reduce((b,[x,z])=>[Math.min(b[0],x*16),Math.min(b[1],z*16),Math.max(b[2],x*16+15),Math.max(b[3],z*16+15)],[Infinity,Infinity,-Infinity,-Infinity]);
+ const void_world=source?.void_world;
+ const [x,,z]=void_world?.spawn??[0,0,0];
+ const initial=void_world?[x-48,z-48,x+47,z+47]:[Infinity,Infinity,-Infinity,-Infinity];
+ const bounds=chunks.reduce((b,[x,z])=>[Math.min(b[0],x*16),Math.min(b[1],z*16),Math.max(b[2],x*16+15),Math.max(b[3],z*16+15)],initial);
  const revision=createHash('sha256').update(JSON.stringify([source?.world_uuid,regions.map(r=>[r.x,r.z,r.size,r.mtime])])).digest('hex');
- const level=directory?fs.statSync(path.join(directory,'level.dat')):null;
- return {directory,world:source?.world,world_uuid:source?.world_uuid,dimension:'minecraft:overworld',minecraft:'1.20.1',bounds:chunks.length?bounds:null,chunk_count:chunks.length,region_count:regions.length,regions,chunks,revision,environment_revision:level?revision+':'+level.mtimeMs+':'+level.size:null,source:'saved_anvil_surface',limits:'Existing generated overworld only. Unknown or incomplete data stays unknown. Surface colors are a material approximation, not client lighting.'};
+ const index={directory,world:source?.world,world_uuid:source?.world_uuid,void_world,pristine_void:!!void_world&&!regionFiles.length,dimension:'minecraft:overworld',minecraft:'1.20.1',bounds:chunks.length||void_world?bounds:null,chunk_count:chunks.length,region_count:regions.length,regions,chunks,revision,environment_revision:level?revision+':'+level.mtimeMs+':'+level.size:null,source:'saved_anvil_surface',limits:'Existing generated overworld only. Unknown or incomplete data stays unknown. Surface colors are a material approximation, not client lighting.'};
+ lastIndex={stamp,index};return index;
+}
+function readLevelNbt(file){
+ try{return parseNbt(gunzipSync(fs.readFileSync(file),{maxOutputLength:4_000_000}));}
+ catch{return null;}
+}
+export function savedWorldCamera(index){
+ if(!index.directory||!index.bounds)return null;
+ const usable=pos=>Array.isArray(pos)&&pos.length===3&&pos.every(Number.isFinite)&&
+  pos[0]>=index.bounds[0]&&pos[0]<=index.bounds[2]+1&&pos[2]>=index.bounds[1]&&pos[2]<=index.bounds[3]+1;
+ const camera=player=>{
+  if(!player||!usable(player.Pos)||(player.Dimension!==undefined&&player.Dimension!=='minecraft:overworld'&&player.Dimension!==0))return null;
+  const position=[player.Pos[0],player.Pos[1]+1.62,player.Pos[2]];
+  const [yaw=0,pitch=0]=(Array.isArray(player.Rotation)?player.Rotation:[]).map(n=>Number.isFinite(n)?n*Math.PI/180:0);
+  return {mode:'free',world_uuid:index.world_uuid,position,target:[position[0]-Math.sin(yaw)*Math.cos(pitch)*24,position[1]-Math.sin(pitch)*24,position[2]+Math.cos(yaw)*Math.cos(pitch)*24]};
+ };
+ const data=readLevelNbt(path.join(index.directory,'level.dat'))?.Data;
+ const single=camera(data?.Player);if(single)return single;
+ const directory=path.join(index.directory,'playerdata');
+ if(fs.existsSync(directory)){
+  const recent=fs.readdirSync(directory).filter(name=>/^[a-f0-9-]{36}\.dat$/i.test(name))
+   .map(name=>{const file=path.join(directory,name);return {file,mtime:fs.statSync(file,{throwIfNoEntry:false})?.mtimeMs??0};})
+   .sort((a,b)=>b.mtime-a.mtime).slice(0,8);
+  for(const {file} of recent){const pose=camera(readLevelNbt(file));if(pose)return pose;}
+ }
+ const spawn=[data?.SpawnX,data?.SpawnY,data?.SpawnZ];
+ return usable(spawn)?{position:[spawn[0]+12,spawn[1]+12,spawn[2]-12],target:spawn,mode:'free',world_uuid:index.world_uuid}:null;
 }
 function packed(data,index,bits){const per=Math.floor(64/bits),value=data?.[Math.floor(index/per)];return value===undefined?null:Number((BigInt.asUintN(64,value)>>BigInt(index%per*bits))&((1n<<BigInt(bits))-1n));}
 function stateName(palette){const name=palette?.Name;if(typeof name!=='string')return null;const properties=palette.Properties?Object.entries(palette.Properties).sort().map(([k,v])=>k+'='+v):[];return name+(properties.length?'['+properties.join(',')+']':'');}
@@ -44,20 +79,27 @@ export function decodeSurfaceChunk(nbt){
  }
  return {block,surface};
 }
-export function readWorldChunk(cx,cz,directory){
+const voidAirChunk=Object.freeze({DataVersion:3465,Status:'minecraft:full',sections:Object.freeze([])});
+export function readWorldChunk(cx,cz,directory,voidWorld){
  if(directory===undefined){
   const source=worldSource();
   directory=source?.error?null:source?.directory;
+  voidWorld=source?.void_world;
  }
  if(!directory)return null;
- const file=path.join(directory,'region','r.'+Math.floor(cx/32)+'.'+Math.floor(cz/32)+'.mca');if(!fs.existsSync(file))return null;const fd=fs.openSync(file,'r');
- try{const stat=fs.fstatSync(fd);if(stat.size<8192)return null;const location=Buffer.alloc(4);fs.readSync(fd,location,0,4,((cz%32+32)%32*32+(cx%32+32)%32)*4);const entry=location.readUInt32BE(),sector=entry>>>8;if(sector<2||!(entry&255))return null;
+ const missing=voidWorld?voidAirChunk:null;
+ const file=path.join(directory,'region','r.'+Math.floor(cx/32)+'.'+Math.floor(cz/32)+'.mca');if(!fs.existsSync(file))return missing;const fd=fs.openSync(file,'r');
+ try{const stat=fs.fstatSync(fd);if(stat.size<8192)return null;const location=Buffer.alloc(4);fs.readSync(fd,location,0,4,((cz%32+32)%32*32+(cx%32+32)%32)*4);const entry=location.readUInt32BE(),sector=entry>>>8;if(!entry)return missing;if(sector<2||!(entry&255))return null;
   const prefix=Buffer.alloc(5);if(fs.readSync(fd,prefix,0,5,sector*4096)!==5)return null;const length=prefix.readUInt32BE(),compression=prefix[4];if(length<1||length>16*1024*1024||sector*4096+4+length>stat.size||compression&128)return null;const payload=Buffer.alloc(length-1);fs.readSync(fd,payload,0,payload.length,sector*4096+5);
   const bytes=compression===1?gunzipSync(payload,{maxOutputLength:16*1024*1024}):compression===2?inflateSync(payload,{maxOutputLength:16*1024*1024}):compression===3?payload:null;if(!bytes)return null;return parseNbt(bytes);
  }finally{fs.closeSync(fd);}
 }
-export function readSurfaceChunk(cx,cz,directory){const nbt=readWorldChunk(cx,cz,directory);return nbt?decodeSurfaceChunk(nbt):null;}
-export function sampleSurface(x,z,visibleOnly=false,directory){if(!Number.isSafeInteger(x)||!Number.isSafeInteger(z)||Math.abs(x)>30000000||Math.abs(z)>30000000)throw Error('Invalid world coordinate');const chunk=readSurfaceChunk(Math.floor(x/16),Math.floor(z/16),directory);return chunk?.surface((x%16+16)%16,(z%16+16)%16,visibleOnly)??null;}
+export function readSurfaceChunk(cx,cz,directory,voidWorld){
+ const nbt=readWorldChunk(cx,cz,directory,voidWorld);
+ if(nbt===voidAirChunk)return {block:()=>'minecraft:air',surface:()=>({y:null,state:'minecraft:air',empty:true})};
+ return nbt?decodeSurfaceChunk(nbt):null;
+}
+export function sampleSurface(x,z,visibleOnly=false,directory,voidWorld){if(!Number.isSafeInteger(x)||!Number.isSafeInteger(z)||Math.abs(x)>30000000||Math.abs(z)>30000000)throw Error('Invalid world coordinate');const chunk=readSurfaceChunk(Math.floor(x/16),Math.floor(z/16),directory,voidWorld);return chunk?.surface((x%16+16)%16,(z%16+16)%16,visibleOnly)??null;}
 export function materialColor(state){const id=state.replace('minecraft:','').split('[')[0];
  if(/water|bubble_column/.test(id))return 0x397ba8;if(/lava|fire/.test(id))return 0xd65b25;if(/snow|quartz|white_concrete|white_wool/.test(id))return 0xdce4e3;if(/sand|sandstone|end_stone/.test(id))return 0xc9bd88;if(/grass|moss/.test(id))return 0x738a4b;if(/leaves|vine|fern/.test(id))return 0x405f3b;if(/log|wood|planks|stairs|slab/.test(id)&&/oak|spruce|birch|jungle|acacia|mangrove|cherry/.test(id))return /dark_oak|spruce/.test(id)?0x69533b:0xa08658;if(/dirt|mud|farmland/.test(id))return 0x7f6950;if(/terracotta|bricks/.test(id))return 0xa77963;if(/glass/.test(id))return 0x99c2c2;if(/ice/.test(id))return 0x97bdcf;if(/deepslate|blackstone|basalt/.test(id))return 0x4f5357;return 0x8a8c85;
 }
@@ -67,12 +109,12 @@ export function surfaceTile(tx,tz,level,cacheRoot,index=worldIndex(),sliceY=null
  const file=sliceY===null?path.join(cacheRoot,`tile-${level}-${tx}-${tz}.json`):null;
  const step=2**level,size=64,span=step*size,minX=tx*span,minZ=tz*span;
  const parts=index.regions.filter(r=>r.x*512<minX+span&&(r.x+1)*512>minX&&r.z*512<minZ+span&&(r.z+1)*512>minZ);
- const revision=createHash('sha256').update(JSON.stringify(parts.map(r=>[r.x,r.z,r.mtime,r.size]))+(sliceY===null?'':'/Y='+sliceY)).digest('hex');
+ const revision=createHash('sha256').update(JSON.stringify([index.world_uuid,index.void_world,parts.map(r=>[r.x,r.z,r.mtime,r.size])])+(sliceY===null?'':'/Y='+sliceY)).digest('hex');
  if(file&&fs.existsSync(file)){try{const old=JSON.parse(fs.readFileSync(file,'utf8'));if(old.version===3&&old.revision===revision)return old;}catch{}}
  const chunks=new Map(),colors=Array(size*size).fill(0),heights=Array(size*size).fill(null),availability=Array(size*size).fill(0);let known=0;
  for(let py=0;py<size;py++)for(let px=0;px<size;px++){
   const x=minX+px*step+Math.floor(step/2),z=minZ+py*step+Math.floor(step/2),cx=Math.floor(x/16),cz=Math.floor(z/16),key=cx+','+cz;
-  if(!chunks.has(key)){try{chunks.set(key,readSurfaceChunk(cx,cz,index.directory));}catch{chunks.set(key,null);}}
+  if(!chunks.has(key)){try{chunks.set(key,readSurfaceChunk(cx,cz,index.directory,index.void_world));}catch{chunks.set(key,null);}}
   const chunk=chunks.get(key),lx=(x%16+16)%16,lz=(z%16+16)%16;
   let s;
   if(sliceY===null)s=chunk?.surface(lx,lz,true);

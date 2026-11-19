@@ -5,7 +5,11 @@ import {createHash,randomUUID} from 'node:crypto';
 import {spawn} from 'node:child_process';
 import {AsyncLocalStorage} from 'node:async_hooks';
 import {PROJECT,ROOT} from './workspace-paths.mjs';
-import {worldSource,saveWorldSource} from './world-source.mjs';
+import {worldSource,saveWorldSource,relocateWorldSource,worldLinkForBackup} from './world-source.mjs';
+import {backupProject,restoreProjectBackup} from './project-backup.mjs';
+import {createProject,currentProject,listProjects,primaryRoot,primaryWorld,projectFor,projectLocations,renameProject} from './project-catalog.mjs';
+import {writeVoidWorld} from './void-world.mjs';
+import {planBounds,planningFocusY} from './planning-core.mjs';
 import {savedDetailSnapshot,savedBlocks} from './render-context.mjs';
 import {normalizeBlockState} from './block-states.mjs';
 import {DESIGN_TOOLS,designService} from './design-service.mjs';
@@ -20,9 +24,9 @@ import {snapshotDelta} from '../snapshot-delta.js';
 
 export {PROJECT,ROOT};
 const store=projectStore(ROOT);
-const planning=planningService(ROOT,()=>store.listRegions(),()=>worldIndex().world_uuid);
+const planning=planningService(ROOT,()=>store.listRegions(),()=>worldSource()?.world_uuid);
 const invocation=new AsyncLocalStorage();
-const metadataWrites=new Set([...PLANNING_TOOLS.filter(t=>!t.annotations?.readOnlyHint).map(t=>t.name),'save_map_view','save_workspace','update_draft']);
+const metadataWrites=new Set([...PLANNING_TOOLS.filter(t=>!t.annotations?.readOnlyHint).map(t=>t.name),'save_map_view','save_workspace','update_draft','backup_project','relocate_world_source']);
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
 const valid=id=>typeof id==='string'&&/^[a-zA-Z0-9-]{1,99}$/.test(id);
@@ -51,8 +55,8 @@ export function loadRegionData(id){
  const s=JSON.parse(bytes);validateBounds(r.bounds);if(!inside(s.bounds,r.bounds.slice(0,3))||!inside(s.bounds,r.bounds.slice(3)))throw Error('Selection outside snapshot');
  return {region:r,snapshot:s};
 }
-function desktopStatus(){
- let app=null;try{app=read(path.join(ROOT,'heartbeat.json'));}catch{}
+function desktopStatus(root=ROOT){
+ let app=null;try{app=read(path.join(root,'heartbeat.json'));}catch{}
  let alive=false;if(app?.pid){try{process.kill(app.pid,0);alive=true;}catch{}}
  return {running:alive&&Date.now()-Number(app.at_ms)<10000,...(app?{pid:app.pid}:{})};
 }
@@ -60,27 +64,38 @@ function workbenchStatus(){
  let current=null;try{current=region();}catch{}
  const state=planning.read(),selected=state.objects.find(p=>p.id===state.selected_id);return {desktop:desktopStatus(),source:worldSource(),planning_context:{world_uuid:state.world_uuid,revision:state.revision,selected_plan:selected??null,layer:selected?state.layers.find(l=>l.id===selected.layer_id):null},current_region:current?publicRegion(current):null};
 }
-async function ensureWorkbench(){
- if(desktopStatus().running)return;
+async function ensureWorkbench(root){
+ if(desktopStatus(root).running)return;
  const candidates=process.platform==='darwin'
-  ? ['bin/TerraWeave.app/Contents/MacOS/terraweave','native-build/release/terraweave','native-build/debug/terraweave']
+  ? ['bin/织境工坊.app/Contents/MacOS/terraweave','bin/TerraWeave.app/Contents/MacOS/terraweave','native-build/release/terraweave','native-build/debug/terraweave']
   : ['织境工坊.exe','../织境工坊.exe','bin/TerraWeave.exe','native-build/debug/terraweave.exe'];
- const app=candidates.map(file=>path.join(PROJECT,file)).find(file=>fs.existsSync(file));
+ const app=[process.env.TERRAWEAVE_DESKTOP_EXE,...candidates.map(file=>path.join(PROJECT,file))]
+  .find(file=>file&&fs.existsSync(file));
  if(!app)throw Error('Build the desktop workbench first');
- fs.mkdirSync(ROOT,{recursive:true});
- const log=fs.openSync(path.join(ROOT,'desktop.log'),'a');
- const child=spawn(app,[],{cwd:PROJECT,env:{...process.env,MAP_WORKBENCH_TEST_HIDDEN:'1'},stdio:['ignore',log,log],windowsHide:true,detached:true});
- await new Promise((resolve,reject)=>{child.once('spawn',resolve);child.once('error',reject);});fs.closeSync(log);child.unref();
- for(const deadline=Date.now()+60000;Date.now()<deadline;){await sleep(100);if(desktopStatus().running)return;}
- throw Error('Workbench did not become ready; inspect project-state/workbench/desktop.log');
+ fs.mkdirSync(root,{recursive:true});
+ const env={...process.env,TERRAWEAVE_STATE:root,TERRAWEAVE_PRIMARY_STATE:primaryRoot,MAP_WORKBENCH_TEST_HIDDEN:'1'};
+ if(primaryWorld)env.TERRAWEAVE_PRIMARY_WORLD=primaryWorld;
+ if(root!==ROOT){
+  delete env.TERRAWEAVE_WORLD;
+  if(root===primaryRoot&&primaryWorld)env.TERRAWEAVE_WORLD=primaryWorld;
+ }
+ const log=fs.openSync(path.join(root,'desktop.log'),'a');
+ try{
+  const child=spawn(app,[],{cwd:PROJECT,env,stdio:['ignore',log,log],windowsHide:true,detached:true});
+  await new Promise((resolve,reject)=>{child.once('spawn',resolve);child.once('error',reject);});
+  child.unref();
+ }finally{fs.closeSync(log);}
+ for(const deadline=Date.now()+60000;Date.now()<deadline;){await sleep(100);if(desktopStatus(root).running)return;}
+ throw Error('工程窗口未能启动，请查看该工程的 desktop.log');
 }
-export async function desktopRequest(request,{start=true,timeout=120000}={}){
- if(start)await ensureWorkbench();
- else if(!desktopStatus().running)return null;
+export async function desktopRequest(request,{start=true,timeout=120000,root=ROOT}={}){
+ if(start)await ensureWorkbench(root);
+ else if(!desktopStatus(root).running)return null;
  const id=Date.now()+'-'+randomUUID();
- const queued=path.join(folder('requests'),id+'.json'),deadline=Date.now()+timeout;
+ const queued=path.join(root,'requests',id+'.json'),deadline=Date.now()+timeout;
  atomic(queued,{...request,id,expires_at_ms:deadline});
- const response=path.join(folder('responses'),id+'.json');
+ if(request.kind==='show')fs.writeFileSync(path.join(root,'wake-window'),'');
+ const response=path.join(root,'responses',id+'.json');
  while(Date.now()<deadline){
   if(fs.existsSync(response)){const r=read(response);fs.unlinkSync(response);if(!r.ok)throw Error(r.error??'Desktop operation failed');return {...r.result,desktop_acknowledged:true,request_id:id};}
   await sleep(25);
@@ -180,7 +195,24 @@ function readSavedPositions(uuid,keys){
 const designs=designService({folder,atomic,read,readRegion:loadRegionData,readRegionMetadata:region,currentRegion:()=>{try{return region();}catch{return null;}},saveSnapshot,savePreview:store.savePreview,displayRegion,readSavedPositions,normalizeState:normalizeBlockState,validateBounds,validateEdits,planning,captureDetail:args=>maps.browse(args)});
 const maps=mapService({root:ROOT,planning,desktopRequest,saveSnapshot,savePreview:store.savePreview,displayRegion});
 TOOLS.push({name:'world_source',description:'Read the configured local Anvil save.',inputSchema:schema({}),annotations:{readOnlyHint:true}});
+TOOLS.push(
+ {name:'read_editor_state',description:'Read the workspace session and pending form edits.',inputSchema:schema({}),annotations:{readOnlyHint:true}},
+ {name:'save_editor_state',description:'Store a recoverable workspace session separately from saved designs.',inputSchema:schema({state:{type:'object'}},['state'])}
+);
+TOOLS.push(
+ {name:'list_projects',description:'List separate workbench projects and their running windows.',inputSchema:schema({}),annotations:{readOnlyHint:true}},
+ {name:'create_project',description:'Create a separate project with a blank map, a void world, or a selected save.',inputSchema:schema({name:{type:'string'},type:{type:'string'},directory:{type:'string'}},['name','type'])},
+ {name:'project_locations',description:'Read the project folder and its separately linked world folder.',inputSchema:schema({id:{type:'string'}},['id']),annotations:{readOnlyHint:true}},
+ {name:'rename_project',description:'Rename a project while preserving its identity and data.',inputSchema:schema({id:{type:'string'},name:{type:'string'}},['id','name'])},
+ {name:'open_project',description:'Show the desktop window for a project.',inputSchema:schema({id:{type:'string'}},['id'])}
+);
 TOOLS.push({name:'save_world_source',description:'Set the local read-only Anvil save directory for this project.',inputSchema:schema({directory:{type:'string'}},['directory'])});
+TOOLS.push(
+ {name:'backup_project',description:'Copy the current project to a verified backup folder.',inputSchema:schema({directory:{type:'string'}},['directory'])},
+ {name:'restore_project_backup',description:'Restore a verified backup as an independent project.',inputSchema:schema({directory:{type:'string'}},['directory'])},
+ {name:'relocate_world_source',description:'Reconnect the same world at a new path while preserving its existing project identity.',inputSchema:schema({directory:{type:'string'},confirm_legacy:{type:'boolean'}},['directory'])}
+);
+TOOLS.push({name:'create_void_world',description:'Create a local empty world for a project without a linked world, retaining its planning overlays.',inputSchema:schema({name:{type:'string'}},['name'])});
 TOOLS.push({name:'ui_snapshot',description:'Read editor panels in one consistent lightweight response.',inputSchema:schema({}),annotations:{readOnlyHint:true}});
 TOOLS.push({name:'render_settings',description:'List the offline workbench resource pack stack and available shader profiles.',inputSchema:schema({}),annotations:{readOnlyHint:true}});
 TOOLS.push({name:'save_render_settings',description:'Set the workbench resource pack stack from low to high priority and choose an offline shader profile.',inputSchema:schema({pack_order:{type:'array',items:{type:'string'}},shader:{type:'string'}},['pack_order','shader'])});
@@ -190,17 +222,68 @@ TOOLS.push({name:'capture_current_view',description:'Capture exactly the current
 function captureRecord(id){if(!valid(id))throw Error('Invalid capture identity');const dir=path.join(folder('captures'),id),r=read(path.join(dir,'capture.json'));return {...r,capture_id:id,images:r.images.map((img,i)=>({...img,path:path.join(dir,'view-'+i+'.png')}))};}
 function captureWithOwner(r){if(r.source==='minecraft_client_stream')return {...r,document_title:'客户端光影'};if(r.source==='workbench_composite_render'&&!r.region_id)return {...r,document_title:'当前完整实景'};if(['saved_anvil_volume_render','saved_anvil_textured_render'].includes(r.source))return {...r,document_title:'全景三维'};if(['saved_world_surface_and_planning','saved_world_slice_and_planning'].includes(r.source))return {...r,document_title:'地图总览'};let owner;try{owner=region(r.region_id);}catch{}return {...r,document_title:owner?.label,entity_id:owner?.entity_id};}
 const needsVanilla = new Set(['load_region','open_region','browse_world','open_plan_detail','open_world_scene','capture_world_scene','capture_views','preview_draft','world_model_tile']);
+const emptySceneTools = new Set(['browse_world','open_plan_detail','open_world_scene']);
+async function projectWorlds(){
+ const plan=fs.existsSync(path.join(ROOT,'planning.json'))?planning.read():null;
+ return new Set([...store.listRegions(true).map(r=>r.world_uuid),
+  ...(await designs.execute('list_drafts',{include_archived:true})).map(d=>d.world_uuid),
+  ...(plan?.objects.length?[plan.world_uuid]:[])].filter(Boolean));
+}
 async function execute(name,args){
- if(needsVanilla.has(name))await ensureVanillaAssets();
+ if(name==='read_editor_state'){
+  let state=null;
+  try{state=read(path.join(ROOT,'editor-state.json'));}catch(error){if(error.code!=='ENOENT')throw error;}
+  return {key:hash(ROOT).slice(0,24),state};
+ }
+ if(name==='save_editor_state'){
+  const state=args.state,file=path.join(ROOT,'editor-state.json');
+  if(!state||state.version!==1||!Number.isSafeInteger(state.updated_at)||!Array.isArray(state.tabs)||
+   !state.forms||typeof state.forms!=='object'||Array.isArray(state.forms)||
+   state.tabs.length>100||Buffer.byteLength(JSON.stringify(state))>1_500_000)throw Error('工程会话数据无效或过大');
+  if(fs.existsSync(file)&&read(file).updated_at>state.updated_at)return {saved:false};
+  atomic(file,state);
+  return {saved:true};
+ }
+ if(name==='list_projects')return listProjects(desktopStatus);
+ if(name==='project_locations')return projectLocations(args.id);
+ if(name==='rename_project')return renameProject(args.id,args.name);
+ if(name==='create_project')return createProject(args);
+ if(name==='open_project'){
+  const project=projectFor(args.id);
+  return {...await desktopRequest({kind:'show'},{root:project.root}),id:project.id,name:project.name};
+ }
+ if(needsVanilla.has(name)&&!(emptySceneTools.has(name)&&worldIndex().pristine_void))await ensureVanillaAssets();
  if(name==='world_source')return worldSource();
+ if(name==='restore_project_backup')return restoreProjectBackup(args.directory);
+ if(name==='backup_project'){
+  let identity;
+  if(worldSource()?.error){
+   const worlds=await projectWorlds().catch(()=>new Set());
+   if(worlds.size===1)[identity]=worlds;
+  }
+  return backupProject(currentProject(),args.directory,worldLinkForBackup(identity));
+ }
+ if(name==='relocate_world_source'){
+  const worlds=await projectWorlds();
+  if(worlds.size>1)throw Error('工程内有多个存档身份，请先拆分工程数据');
+  const [identity]=worlds;
+  return relocateWorldSource(args.directory,identity,args.confirm_legacy);
+ }
  if(name==='save_world_source'){
-  const metadata=path.join(ROOT,'planning.json');
-  const plan=fs.existsSync(metadata)?planning.read():null;
-  const worlds=new Set([...store.listRegions(true).map(r=>r.world_uuid),
-   ...(await designs.execute('list_drafts',{include_archived:true})).map(d=>d.world_uuid),
-   ...(plan?.objects.length?[plan.world_uuid]:[])].filter(Boolean));
+  const worlds=await projectWorlds();
   if(worlds.size>1)throw Error('工程内有多个存档身份，请先拆分工程数据');
   return saveWorldSource(args.directory,[...worlds][0]);
+ }
+ if(name==='create_void_world'){
+  const label=typeof args.name==='string'?args.name.trim():'';
+  if(!label||label.length>64||/[\u0000-\u001f\u007f]/u.test(label))throw Error('世界名称须为 1 至 64 个字，且不能含控制符');
+  const source=worldSource();
+  if((source&&!source.error)||(await projectWorlds()).size)throw Error('当前工程已关联世界，原有世界不会被替换');
+  const state=planning.read();
+  const plan=state.objects.find(p=>p.id===state.selected_id)??state.objects[0];
+  const bounds=plan?planBounds(plan):[0,0,0,0];
+  const spawn=[Math.floor((bounds[0]+bounds[2])/2),Math.floor(plan?planningFocusY(plan)??64:64),Math.floor((bounds[1]+bounds[3])/2)];
+  return {...saveWorldSource(writeVoidWorld(ROOT,label,spawn)),plan_id:plan?.id};
  }
  if(name==='render_settings')return readRenderSettings(path.join(PROJECT,'assets'));
  if(name==='save_render_settings')return saveRenderSettings(path.join(PROJECT,'assets'),args);
@@ -219,7 +302,10 @@ async function execute(name,args){
   delete r.scene_geometry;delete r.planning_snapshot;r.scene_geometry_sha256=hash(geometry);r.planning_snapshot_hash=hash(plans);
   fs.writeFileSync(path.join(dir,'capture.json'),JSON.stringify(r));return r;
  }
- if(name==='ui_snapshot')return {backend_pid:process.pid,regions:store.listRegions(true).map(publicRegion),drafts:await designs.execute('list_drafts',{include_archived:true}),history:await designs.execute('list_history',{}),captures:await execute('list_captures',{}),status:workbenchStatus(),workspace:store.summary(),planning:planning.execute('planning_state',{})};
+ if(name==='ui_snapshot'){
+  const {id,name:projectName}=currentProject();
+  return {project:{id,name:projectName},backend_pid:process.pid,regions:store.listRegions(true).map(publicRegion),drafts:await designs.execute('list_drafts',{include_archived:true}),history:await designs.execute('list_history',{}),captures:await execute('list_captures',{}),status:workbenchStatus(),workspace:store.summary(),planning:planning.execute('planning_state',{})};
+ }
  if(MAP_TOOLS.some(t=>t.name===name))return maps.execute(name,args);
  if(PLANNING_TOOLS.some(t=>t.name===name)){const result=planning.execute(name,args);if(name==='inspect_plan')result.designs=(await designs.execute('list_drafts',{})).filter(d=>d.plan_id===result.plan.id||!d.plan_id&&result.plan.detail_entity_id&&d.base_entity_id===result.plan.detail_entity_id);if(!PLANNING_TOOLS.find(t=>t.name===name).annotations?.readOnlyHint&&invocation.getStore()?.origin!=='desktop'){await desktopRequest({kind:'planning_update'});}return result;}
  if(name==='workspace_status')return store.summary();
@@ -299,6 +385,7 @@ async function invokeTool(name,args={}){
  if(args.physics!==undefined&&typeof args.physics!=='boolean')throw Error('Physics must be true or false');
  if(name==='load_region'){validateBounds(args.bounds);if(args.bounds.some((v,i)=>i<3&&args.bounds[i+3]-v>=128))throw Error('Preview spans at most 128 blocks along each axis');}
  if(tool.annotations?.readOnlyHint)return execute(name,args);
+ if(['create_project','open_project','rename_project','save_editor_state','restore_project_backup'].includes(name))return execute(name,args);
  fs.mkdirSync(ROOT,{recursive:true});const lock=path.join(ROOT,'operation.lock');let fd;
  const deadline=Date.now()+170000;
  while(fd===undefined){try{fd=fs.openSync(lock,'wx');}catch(error){if(error.code!=='EEXIST')throw error;let owner;try{owner=fs.readFileSync(lock,'utf8');}catch{}if(/^\d+$/.test(owner??'')){let alive=true;try{process.kill(Number(owner),0);}catch(e){if(e.code==='ESRCH')alive=false;}if(!alive){try{if(fs.readFileSync(lock,'utf8')===owner)fs.unlinkSync(lock);}catch{}continue;}}if(Date.now()>deadline)throw Error('工作台操作仍未结束，请稍后重试');await sleep(100);}}
@@ -306,7 +393,7 @@ async function invokeTool(name,args={}){
 }
 async function handle(q){
  if(q.id===undefined)return null;const ok=result=>({jsonrpc:'2.0',id:q.id,result});
- if(q.method==='initialize')return ok({protocolVersion:'2025-06-18',capabilities:{tools:{}},serverInfo:{name:'TerraWeave',version:'0.6.0'},instructions:'TerraWeave offline map planning and saved-world preview. Use export_draft to hand off an immutable revision to the separate world writer MCP. open_world_scene renders complete block models and textures with a free camera; do not replace visible scenery with colored voxels. get_scene_view reads the actual user camera. capture_world_scene defaults to that observed view and freezes block states, model geometry and texture atlas; explicit angles/custom cameras remain available. inspect_captured_scene verifies its exact source. show_invisible reveals barrier glyphs without changing world blocks. planning_state and inspect_plan provide selected map geometry and notes; save_plan supports areas/routes/markers independent of chunk size. Hide/show is separate from deletion. capture_map freezes map planning geometry. browse_world/open_plan_detail enter a saved-world detail view; create_draft with plan_id supports sparse world-scale designs. capture_views supports precise cameras and cutaways. Distinguish saved-world renders, live blocks, planning and drafts; workbench lighting/animation differs from Minecraft-client screenshots. Repeated navigation reuses bounded caches.'});
+ if(q.method==='initialize')return ok({protocolVersion:'2025-06-18',capabilities:{tools:{}},serverInfo:{name:'TerraWeave',version:'0.7.0'},instructions:'TerraWeave offline map planning and saved-world preview. Use export_draft to hand off an immutable revision to the separate world writer MCP. open_world_scene renders complete block models and textures with a free camera; do not replace visible scenery with colored voxels. get_scene_view reads the actual user camera. capture_world_scene defaults to that observed view and freezes block states, model geometry and texture atlas; explicit angles/custom cameras remain available. inspect_captured_scene verifies its exact source. show_invisible reveals barrier glyphs without changing world blocks. planning_state and inspect_plan provide selected map geometry and notes; save_plan supports areas/routes/markers independent of chunk size. Hide/show is separate from deletion. capture_map freezes map planning geometry. browse_world/open_plan_detail enter a saved-world detail view; create_draft with plan_id supports sparse world-scale designs. capture_views supports precise cameras and cutaways. Distinguish saved-world renders, live blocks, planning and drafts; workbench lighting/animation differs from Minecraft-client screenshots. Repeated navigation reuses bounded caches.'});
  if(q.method==='ping')return ok({});if(q.method==='tools/list')return ok({tools:TOOLS});
  if(q.method==='tools/call')try{
   const r=await callTool(q.params.name,q.params.arguments??{}),content=[{type:'text',text:JSON.stringify(r)}];

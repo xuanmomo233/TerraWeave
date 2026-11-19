@@ -7,6 +7,18 @@ import {snapshotDelta,applySnapshotDelta,affectedChunkColumns} from '../snapshot
 import {ChunkRenderer} from '../chunk-renderer.js';
 import {snapshotBytes} from './project-store.mjs';
 import {TexturedWorld} from '../textured-world.js';
+import {buildState} from '../model-terrain.js';
+test('a conduit supplies shaded geometry and keeps its water geometry when submerged',async()=>{
+ const options={makeMaterial:(name,id)=>{const material=new THREE.MeshLambertMaterial();material.name=name;material.userData.water=id==='water';return material;}};
+ const [conduit]=await buildState('minecraft:conduit[waterlogged=false]',options);
+ conduit.geometry.computeBoundingBox();
+ assert.equal(conduit.material.name,'block/conduit');
+ assert.ok(!conduit.material.wireframe);
+ assert.deepEqual(conduit.geometry.boundingBox.getSize(new THREE.Vector3()).toArray(),[.375,.375,.375]);
+ const wet=await buildState('minecraft:conduit[waterlogged=true]',options);
+ assert.ok(wet.some(part=>part.material.userData.water));
+ assert.ok(wet.some(part=>part.material.name==='block/conduit'));
+});
 const water='minecraft:water[level=0]',grass='minecraft:grass_block[snowy=false]',air='minecraft:air';
 test('draft delta preserves exact snapshot identity including removed cells and changed halo',()=>{
  const before={uuid:'test',world:'world',minecraft:'1.20.1',bounds:[0,59,0,1,60,1],

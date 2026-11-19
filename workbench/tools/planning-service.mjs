@@ -19,7 +19,12 @@ export const PLANNING_TOOLS=[
 export function planningService(root,listRegions,worldIdentity){
  const file=path.join(root,'planning.json');
  function initial(){const regions=listRegions();return {schema:1,revision:1,world_uuid:worldIdentity(),layers:[{id:'buildings',name:'区域规划',color:'#5b9cec',visible:true},{id:'roads',name:'道路与连接',color:'#e2ad63',visible:true},{id:'markers',name:'地点标注',color:'#a58ade',visible:true}],objects:regions.map(r=>({id:'plan-'+(r.entity_id??r.id),layer_id:'buildings',type:'area',name:r.label,notes:r.notes??'',points:[[r.bounds[0],r.bounds[2]],[r.bounds[3]+1,r.bounds[2]],[r.bounds[3]+1,r.bounds[5]+1],[r.bounds[0],r.bounds[5]+1]],color:'#5b9cec',width:4,visible:true,min_y:r.bounds[1],max_y:r.bounds[4],detail_entity_id:r.entity_id})),selected_id:null,undo:[],redo:[]};}
- const read=()=>fs.existsSync(file)?JSON.parse(fs.readFileSync(file,'utf8')):initial();
+ function read(){
+  if(!fs.existsSync(file))return initial();
+  const state=JSON.parse(fs.readFileSync(file,'utf8'));
+  state.world_uuid??=worldIdentity();
+  return state;
+ }
  function write(state){fs.mkdirSync(root,{recursive:true});const temp=file+'.pending-'+process.pid;fs.writeFileSync(temp,JSON.stringify(state));fs.renameSync(temp,file);return publicState(state);}
  function publicState(state){return {...state,undo:undefined,redo:undefined,undo_count:state.undo.length,redo_count:state.redo.length,history:state.undo.map((entry,index)=>({id:index,label:entry.label??'规划修改',at:entry.at}))};}
  function mutate(change,description='规划修改'){const s=read(),before={layers:s.layers,objects:s.objects,selected_id:s.selected_id},next=change(structuredClone(s));const after={layers:next.layers,objects:next.objects,selected_id:next.selected_id};if(JSON.stringify(before)===JSON.stringify(after))return publicState(s);next.undo=[...s.undo,{before,after,label:description,at:new Date().toISOString()}].slice(-40);next.redo=[];next.revision++;next.updated_at=new Date().toISOString();return write(next);}

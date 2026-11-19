@@ -36,20 +36,20 @@ Windows 开发构建需要 Visual Studio C++ 工具和 Windows SDK。macOS 开�
 
 ## 主题格式
 
-在「视图 → 外观与主题」选取预设，修改颜色或上传面板背景。调整即时预览，保存后在当前桌面用户配置内生效。导出的 JSON 可用于导入、备份或交付主题。自定义图片随主题以 data URL 保存。
+在「视图 → 外观与主题」选择预设、设置界面字号和文字颜色，或展开「面板与控件颜色」调整配色。设置可即时预览，点击保存后同步到同一用户的工程窗口。导出的 JSON 可用于备份或分享主题。
 
 ```json
 {
-  "version": 1,
+  "version": 2,
+  "fontSize": 14,
   "preset": "atlas",
   "colors": {
-    "background": "#102028", "chrome": "#12232a", "panel": "#1a2c33",
-    "field": "#21363c", "text": "#e5f1f0", "muted": "#adc3c4",
-    "accent": "#7bd4c5", "selected": "#25504e", "line": "#35494e"
-  },
-  "image": ""
+    "background": "#16181d", "chrome": "#1b1e24", "panel": "#23262d",
+    "field": "#2b2f38", "text": "#e2e4ea", "muted": "#b0b5c2", "heading": "#f4f5f8",
+    "accent": "#aab9fa", "selected": "#363e56", "line": "#424751"
+  }
 }
 ```
 
-预设标识支持 `atlas`、`graphite`、`midnight`、`paper`。使用六位十六进制颜色。`image` 可为空或包含本地导出的 PNG、JPEG、WebP。
+预设标识支持 `atlas`、`graphite`、`midnight`、`paper`。颜色使用六位十六进制值，字号支持 12–18 的整数。导入旧版主题时会迁移自定义颜色并移除背景图片数据。
 

@@ -15,13 +15,13 @@ export function draftContext(context,baseCells,changes,showTarget){
 }
 import {readWorldChunk} from './world-surface.mjs';
 import {sectionIndices} from './world-volume.mjs';
-function savedChunkReader(directory){
+function savedChunkReader(directory,voidWorld){
  const chunks=new Map();
  function chunk(cx,cz){
   const key=cx+','+cz;
   if(chunks.has(key))return chunks.get(key);
   let data;
-  try{data=readWorldChunk(cx,cz,directory);}catch{}
+  try{data=readWorldChunk(cx,cz,directory,voidWorld);}catch{}
   let result=null;
   if(data?.DataVersion===3465&&['full','minecraft:full'].includes(data.Status)){
    const sections=new Map();
@@ -54,7 +54,10 @@ export function savedRenderContext(bounds,{block}=savedChunkReader()){
  return result;
 }
 export function savedDetailSnapshot(bounds,index){
- const reader=savedChunkReader(index.directory),blocks={},unknown_chunks=[],block_entity_positions=[];
+ const identity={schema:1,world:index.world,minecraft:index.minecraft,uuid:index.world_uuid,world_revision:index.revision,
+  environment_revision:index.environment_revision,bounds,context_source:'saved_anvil_neighbors',source:'saved_anvil_detail'};
+ if(index.pristine_void) return {...identity,blocks:{},context_blocks:{},block_entity_count:0,block_entity_positions:[],unknown_chunks:[]};
+ const reader=savedChunkReader(index.directory,index.void_world),blocks={},unknown_chunks=[],block_entity_positions=[];
  for(let cz=Math.floor(bounds[2]/16);cz<=Math.floor(bounds[5]/16);cz++){
   for(let cx=Math.floor(bounds[0]/16);cx<=Math.floor(bounds[3]/16);cx++){
    const chunk=reader.chunk(cx,cz);
@@ -73,13 +76,12 @@ export function savedDetailSnapshot(bounds,index){
  }
  if(!Object.keys(blocks).length)throw Error('此范围没有可读取的存档区块，请选择已生成区域');
  return {
-  schema:1,world:index.world,minecraft:index.minecraft,uuid:index.world_uuid,world_revision:index.revision,environment_revision:index.environment_revision,bounds,blocks,
-  context_blocks:savedRenderContext(bounds,reader),context_source:'saved_anvil_neighbors',
-  block_entity_count:block_entity_positions.length,block_entity_positions,unknown_chunks,source:'saved_anvil_detail'
+  ...identity,blocks,context_blocks:savedRenderContext(bounds,reader),
+  block_entity_count:block_entity_positions.length,block_entity_positions,unknown_chunks
  };
 }
 export function savedBlocks(keys,index){
- const {block}=savedChunkReader(index.directory),result={};
+ const {block}=savedChunkReader(index.directory,index.void_world),result={};
  for(const key of keys){
   const state=block(...key.split(',').map(Number));
   if(state===undefined)throw Error('此设计含未知存档位置 '+key);

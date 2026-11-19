@@ -41,8 +41,10 @@ const fixtureMap=mapService({
  displayRegion:(region,kind,navigation_id)=>send({kind,region,navigation_id,snapshot:viewSnapshots.get(region.snapshot_id)})
 });
 let job={id:'qa-map',kind:'map'},completion,reply,view,sequence=0,barrierWait=null,modelReads=0,clipboardText='',selectionDelay=0,browseReads=0,fullscreen=false,sceneAckHold,detailWait;const captures=[],openedPackFolders=[];
+const pickedDirectories=[path.join(fixture,'带空格的 存档'),null];
 async function send(request){job={id:'qa-'+(++sequence),...request};return new Promise(resolve=>completion=resolve);}
 async function bridge(command,args){
+ if(command==='pick_world_directory')return pickedDirectories.shift()??null;
  if(command==='workbench_poll')return job;
  if(command==='workbench_heartbeat'||command==='workbench_show')return null;
  if(command==='workbench_window_action'){
@@ -125,6 +127,33 @@ try{
  browser=await chromium.launch({headless:true,executablePath:'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',args:['--use-angle=swiftshader','--enable-unsafe-swiftshader','--disable-background-networking']});
  const deviceScaleFactor=Number(process.env.TERRAWEAVE_QA_DPR??1.5),page=await browser.newPage({viewport:{width:1600,height:1000},deviceScaleFactor}),errors=[];page.on('pageerror',e=>errors.push(e.message));await page.goto('http://127.0.0.1:'+server.address().port);await page.waitForFunction(()=>window.__qaComplete>=1,{},{timeout:60000});if(reply?.ok!==true)throw Error(reply?.error??'Map failed to open');
  await page.waitForFunction(()=>document.querySelector('#map-loading').hidden,{},{timeout:90000});
+ assert.equal(await page.locator('#window-titlebar').getByText('已连接存档').count(),0);
+ await page.locator('[data-menu="file"]').click();
+ assert.ok(await page.getByRole('menuitem',{name:/关闭当前标签页/}).isDisabled());
+ await page.getByRole('menuitem',{name:'在新工程打开存档…'}).click();
+ const projectDirectory=page.locator('#create-project-path');
+ const browseDirectory=page.locator('#create-project-dialog').getByRole('button',{name:'浏览存档目录'});
+ await browseDirectory.click();
+ await page.waitForFunction(()=>document.querySelector('#create-project-path').value.endsWith('带空格的 存档'));
+ await browseDirectory.click();
+ await page.waitForFunction(()=>!document.querySelector('[data-world-folder-for="create-project-path"]').disabled);
+ assert.equal(await projectDirectory.inputValue(),path.join(fixture,'带空格的 存档'));
+ await page.locator('#create-project-cancel').click();
+ for(const id of ['create-project-dialog','new-world-dialog','world-source-dialog','new-region-dialog',
+  'render-settings-dialog','locate-position-dialog','draft-action-dialog','map-height-dialog','appearance-dialog']){
+  const dialog=page.locator('#'+id);
+  await dialog.evaluate(element=>element.showModal());
+  const bounds=await dialog.locator('.dialog-actions > button:visible').evaluateAll(buttons=>buttons.map(button=>{
+   const {top,bottom}=button.getBoundingClientRect();
+   return {label:button.textContent,top,bottom};
+  }));
+  assert.ok(bounds.length>1);
+  for(const {top,bottom,label} of bounds.slice(1)){
+   assert.ok(Math.abs(top-bounds[0].top)<.1&&Math.abs(bottom-bounds[0].bottom)<.1,
+    id+' · '+label+' 与 '+bounds[0].label+' 的边缘应对齐');
+  }
+  await dialog.evaluate(element=>element.close());
+ }
  const center = page.locator('.center-workspace');
  const openAppearance = async () => {
   await page.locator('[data-menu="view"]').click();
@@ -132,20 +161,24 @@ try{
  };
  await openAppearance();
  await page.locator('[data-preset="paper"]').click();
+ await page.locator('.theme-surfaces summary').click();
  await page.locator('[data-color="accent"]').fill('#196b62');
- await page.locator('#appearance-image').setInputFiles(path.join(PROJECT,'public/terraweave.png'));
- await page.waitForFunction(()=>!document.querySelector('#appearance-remove').disabled);
+ await page.locator('#appearance-size').press('End');
+ await page.locator('#appearance-size').press('ArrowLeft');
+ await page.locator('[data-hex="text"]').fill('#242a31');
  await page.locator('#appearance-save').click();
- const storedAppearance = await page.evaluate(()=>JSON.parse(localStorage.getItem('terraweave.appearance.v1')));
+ const storedAppearance = await page.evaluate(()=>JSON.parse(localStorage.getItem('terraweave.appearance.v2')));
  assert.equal(storedAppearance.colors.accent,'#196b62');
- assert.ok(storedAppearance.image.startsWith('data:image/'));
+ assert.equal(storedAppearance.fontSize,17);
+ assert.equal(storedAppearance.colors.text,'#242a31');
+ assert.ok(!Object.hasOwn(storedAppearance,'image'));
  await openAppearance();
  await page.locator('[data-preset="midnight"]').click();
  await page.keyboard.press('Escape');
  assert.equal(await page.evaluate(()=>getComputedStyle(document.documentElement).getPropertyValue('--accent').trim()),'#196b62');
  await openAppearance();
  await page.locator('[data-preset="atlas"]').click();
- await page.locator('#appearance-remove').click();
+ await page.locator('#appearance-reset').click();
  await page.locator('#appearance-save').click();
  const lookCanvas=page.locator('#map-canvas'), mapLookBox=await lookCanvas.boundingBox();
  await page.mouse.move(mapLookBox.x+mapLookBox.width/2,mapLookBox.y+mapLookBox.height/2);
@@ -378,7 +411,17 @@ try{
  assert.equal(mapPin.x,39);assert.equal(mapPin.z,10);
  await page.locator('#map-planning-preview').waitFor({state:'visible'});
  await page.locator('#map-fit').click();
+ const searchTop=(await page.locator('.tree-search').boundingBox()).y;
+ const canvasBeforeGesture=await page.locator('#map-canvas').boundingBox();
  await page.locator('[data-map-tool="area"]').click();
+ const sidebarGesture=page.locator('.project-panel #planning-gesture');
+ await sidebarGesture.waitFor();
+ assert.ok((await page.locator('.tree-search').boundingBox()).y>searchTop,'Planning controls should move the search and tree down');
+ assert.deepEqual(await page.locator('#map-canvas').boundingBox(),canvasBeforeGesture);
+ assert.ok(await page.locator('#map-canvas').evaluate(canvas=>{
+  const {left,top}=canvas.getBoundingClientRect();
+  return document.elementFromPoint(left+18,top+18)===canvas;
+ }),'The upper-left map must remain available for selection');
  const box=await page.locator('#map-canvas').boundingBox(),beforeMapDraft=planner.read().revision;
  await page.mouse.move(box.x+box.width*.2,box.y+box.height*.25);
  await page.locator('#map-planning-preview').waitFor({state:'visible'});

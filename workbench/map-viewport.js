@@ -1,3 +1,4 @@
+import {inkFor} from './theme-model.js';
 import {installViewportLook} from './viewport-look.js';
 import {mapToScreen,screenToMap,pointInPolygon,planBounds} from './tools/planning-core.mjs';
 import {wheelSteps,wheelZoomFactor,readWheelSensitivity} from './viewport-wheel.js';
@@ -8,6 +9,13 @@ export class MapViewport{
  constructor(canvas,call,events={},offscreen=false){
   this.canvas=canvas;this.ctx=canvas.getContext('2d');this.call=call;this.events=events;this.view={x:0,z:0,scale:4,rotation:0};this.tiles=new Map();this.pending=new Set();this.queue=[];this.running=0;this.tool='select';this.sketch=new PlanningSketch();this.drag=null;this.width=1;this.height=1;this.active=true;
   if(offscreen)return;
+  const readAppearance=()=>{
+   const style=getComputedStyle(document.documentElement);
+   const token=key=>style.getPropertyValue('--'+key).trim();
+   this.appearance={font:parseFloat(style.fontSize),text:token('text'),muted:token('muted'),background:token('background'),accent:token('accent'),outline:inkFor(token('text'))};
+  };
+  readAppearance();
+  window.addEventListener('workbench-appearance',()=>{readAppearance();if(this.ctx&&this.active)this.draw();});
   this.sketchCanvas=document.createElement('canvas');
   this.sketchCanvas.id='map-planning-preview';
   this.sketchCanvas.setAttribute('aria-hidden','true');
@@ -100,7 +108,7 @@ export class MapViewport{
  pump(){while(this.running<2&&this.queue.length){const t=this.queue.shift();if(!this.wanted?.has(t.key)){this.pending.delete(t.key);continue;}this.running++;this.call('world_map_tile',{x:t.x,z:t.z,level:t.level,slice_y:t.slice_y}).then(data=>{this.tiles.set(t.key,{data,image:this.image(data)});while(this.tiles.size>256)this.tiles.delete(this.tiles.keys().next().value);}).catch(e=>this.events.error?.(String(e))).finally(()=>{this.running--;this.pending.delete(t.key);if(!this.pending.size&&this.autoFocus&&!this.userMoved&&!this.capturing){this.autoFocus=false;this.fitContent();}this.draw();this.events.progress?.(this.pending.size);this.pump();});}}
  fitContent(){const b=[Infinity,Infinity,-Infinity,-Infinity];let count=0;for(const tile of this.tiles.values())for(let i=0;i<tile.data.heights.length;i++)if(tile.data.heights[i]!==null){const x=tile.data.bounds[0]+i%64*tile.data.step,z=tile.data.bounds[1]+Math.floor(i/64)*tile.data.step;b[0]=Math.min(b[0],x);b[1]=Math.min(b[1],z);b[2]=Math.max(b[2],x+tile.data.step);b[3]=Math.max(b[3],z+tile.data.step);count++;}if(count){const padding=Math.max(80,(b[2]-b[0])*.12,(b[3]-b[1])*.12);this.fit([b[0]-padding,b[1]-padding,b[2]+padding,b[3]+padding]);}}
  image(tile){const canvas=document.createElement('canvas');canvas.width=canvas.height=tile.size;const data=new Uint8ClampedArray(tile.size*tile.size*4);for(let i=0;i<tile.colors.length;i++){const color=tile.colors[i],known=tile.availability?.[i]??(tile.heights[i]===null?0:2);if(!known)continue;const y=tile.heights[i],left=tile.heights[i%tile.size?i-1:i],up=tile.heights[i>=tile.size?i-tile.size:i],shade=y===null?1:clamp(1+(y-(left??y))*.018+(y-(up??y))*.018,.55,1.3);data[i*4]=known===1?24:Math.min(255,(color>>16&255)*shade);data[i*4+1]=known===1?32:Math.min(255,(color>>8&255)*shade);data[i*4+2]=known===1?42:Math.min(255,(color&255)*shade);data[i*4+3]=255;}canvas.getContext('2d').putImageData(new ImageData(data,tile.size,tile.size),0,0);return canvas;}
- draw(capture=false){const c=this.ctx,w=this.width,h=this.height;if(!w||!h)return;c.save();c.setTransform(this.canvas.width/w,0,0,this.canvas.height/h,0,0);c.clearRect(0,0,w,h);c.fillStyle='#1a2532';c.fillRect(0,0,w,h);
+ draw(capture=false){const c=this.ctx,w=this.width,h=this.height;if(!w||!h)return;c.save();c.setTransform(this.canvas.width/w,0,0,this.canvas.height/h,0,0);c.clearRect(0,0,w,h);const theme=capture?null:this.appearance;c.fillStyle=theme?.background??'#1a2532';c.fillRect(0,0,w,h);
   c.strokeStyle='#263342';c.lineWidth=1;for(let x=-h;x<w+h;x+=22){c.beginPath();c.moveTo(x,0);c.lineTo(x+h,h);c.stroke();}
   c.save();c.translate(w/2,h/2);c.rotate(this.view.rotation*Math.PI/180);c.scale(1/this.view.scale,1/this.view.scale);c.translate(-this.view.x,-this.view.z);c.imageSmoothingEnabled=false;
   for(const t of this.visibleKeys()){const tile=this.tiles.get(t.key);if(tile){const b=tile.data.bounds;c.drawImage(tile.image,b[0],b[1],b[2]-b[0],b[3]-b[1]);}}
@@ -108,12 +116,12 @@ export class MapViewport{
   for(const p of this.planning?.objects??[]){const layer=this.planning.layers.find(l=>l.id===p.layer_id);if(p.visible===false||layer?.visible===false)continue;const points=p.points.map(point=>mapToScreen(point,this.view,w,h)),selected=p.id===this.planning.selected_id;
    c.beginPath();points.forEach((point,i)=>i?c.lineTo(...point):c.moveTo(...point));if(p.type==='area')c.closePath();c.strokeStyle=selected?'#e6f2ff':p.color;c.lineWidth=p.type==='route'?Math.max(2,p.width/this.view.scale):selected?2.5:1.5;if(p.type==='area'){c.fillStyle=p.color+'30';c.fill();}if(p.type==='marker'){c.fillStyle=p.color;c.arc(points[0][0],points[0][1],6,0,Math.PI*2);c.fill();}c.stroke();
    if(selected&&!capture&&this.tool==='select'){c.fillStyle='#e6f2ff';c.strokeStyle='#4d8bd4';c.lineWidth=1.5;for(const [x,y]of points){c.fillRect(x-4,y-4,8,8);c.strokeRect(x-4,y-4,8,8);}}
-   const b=planBounds(p),label=mapToScreen([(b[0]+b[2])/2,(b[1]+b[3])/2],this.view,w,h);c.font='12px Segoe UI,Microsoft YaHei';c.textAlign='center';c.lineWidth=4;c.strokeStyle='#111a24';c.strokeText(p.name,label[0],label[1]-10);c.fillStyle=selected?'#e7f2ff':'#b9cce3';c.fillText(p.name,label[0],label[1]-10);
+   const b=planBounds(p),label=mapToScreen([(b[0]+b[2])/2,(b[1]+b[3])/2],this.view,w,h);c.font=(theme?.font??12)+'px Segoe UI,Microsoft YaHei';c.textAlign='center';c.lineWidth=4;c.strokeStyle=theme?.outline??'#111a24';c.strokeText(p.name,label[0],label[1]-10);c.fillStyle=(selected?theme?.text:theme?.muted)??(selected?'#e7f2ff':'#b9cce3');c.fillText(p.name,label[0],label[1]-10);
   }
   // Leave room for the fullscreen button in the interactive viewport.
   const compassInset=capture?38:66;
-  c.save();c.translate(w-compassInset,40);c.rotate(this.view.rotation*Math.PI/180);c.fillStyle='#8fbfff';c.beginPath();c.moveTo(0,-15);c.lineTo(-5,7);c.lineTo(5,7);c.closePath();c.fill();c.rotate(-this.view.rotation*Math.PI/180);c.font='12px Segoe UI';c.textAlign='center';c.fillText('N',0,-22);c.restore();
-  const length=2**Math.floor(Math.log2(this.view.scale*90)),pixels=length/this.view.scale;c.strokeStyle='#c1d2e7';c.lineWidth=2;c.beginPath();c.moveTo(18,h-22);c.lineTo(18+pixels,h-22);c.stroke();c.fillStyle='#a0b4cc';c.font='11px Segoe UI';c.textAlign='left';c.fillText(length>=1000?(length/1000).toFixed(1)+' km':length+' m',18,h-30);c.restore();
+  c.save();c.translate(w-compassInset,40);c.rotate(this.view.rotation*Math.PI/180);c.fillStyle='#8fbfff';c.beginPath();c.moveTo(0,-15);c.lineTo(-5,7);c.lineTo(5,7);c.closePath();c.fill();c.rotate(-this.view.rotation*Math.PI/180);c.font=(theme?.font??12)+'px Segoe UI';c.textAlign='center';c.fillText('N',0,-22);c.restore();
+  const length=2**Math.floor(Math.log2(this.view.scale*90)),pixels=length/this.view.scale;c.strokeStyle='#c1d2e7';c.lineWidth=2;c.beginPath();c.moveTo(18,h-22);c.lineTo(18+pixels,h-22);c.stroke();c.fillStyle=theme?.muted??'#a0b4cc';c.font=(theme?Math.round(theme.font*.92):11)+'px Segoe UI';c.textAlign='left';c.fillText(length>=1000?(length/1000).toFixed(1)+' km':length+' m',18,h-30);c.restore();
   if(!capture&&!this.capturing)this.drawSketch();
  }
  pick(point){const plans=[...(this.planning?.objects??[])].reverse();for(const p of plans){if(p.visible===false||this.planning.layers.find(l=>l.id===p.layer_id)?.visible===false)continue;if(p.type==='area'&&pointInPolygon(point,p.points))return p;if(p.type==='marker'&&Math.hypot(point[0]-p.points[0][0],point[1]-p.points[0][1])<10*this.view.scale)return p;if(p.type==='route')for(let i=1;i<p.points.length;i++){const a=p.points[i-1],b=p.points[i],dx=b[0]-a[0],dz=b[1]-a[1],t=clamp(((point[0]-a[0])*dx+(point[1]-a[1])*dz)/(dx*dx+dz*dz||1),0,1);if(Math.hypot(point[0]-a[0]-t*dx,point[1]-a[1]-t*dz)<Math.max(p.width/2,6*this.view.scale))return p;}}return null;}

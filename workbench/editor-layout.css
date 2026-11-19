@@ -1,17 +1,19 @@
 :root {
-  --panel: #19222c;
-  --chrome: #111a23;
-  --line: #2c3947;
-  --field: #202d39;
-  --text: #e2eaf1;
-  --muted: #a5b5c4;
-  --accent: #61b9c7;
-  --selected: #24434d;
+  --background: #16181d;
+  --heading: #f4f5f8;
+  --panel: #23262d;
+  --chrome: #1b1e24;
+  --line: #424751;
+  --field: #2b2f38;
+  --text: #e2e4ea;
+  --muted: #b0b5c2;
+  --accent: #aab9fa;
+  --selected: #363e56;
   --left: 228px;
   --right: 272px;
   color: var(--text);
 }
-.editor-shell { grid-template-rows: 32px 45px minmax(0, 1fr) 23px; }
+.editor-shell { grid-template-rows: max(32px,2.3rem) max(45px,3rem) minmax(0, 1fr) max(23px,1.65rem); }
 .menu-bar, .command-strip, .document-bar, .main-toolbar { background: var(--chrome); }
 .command-strip {
   display: flex;
@@ -58,12 +60,12 @@ button:disabled { cursor: default; }
 .project-panel > .panel-title { justify-content: start; }
 #add-layer { margin-left: auto; }
 .planning-tools { padding: 8px 10px; border-bottom: 1px solid var(--line); }
-.planning-tools summary { width: fit-content; cursor: pointer; color: var(--muted); font-size: 11px; }
+.planning-tools summary { width: fit-content; cursor: pointer; color: var(--muted); font-size: 0.9167rem; }
 .planning-tools .tool-rail { display: block; background: transparent; padding: 6px 0 0; border: 0; }
-.tool-rail > div { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 3px; }
+.tool-rail > div { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%,4.1rem),1fr)); gap: 3px; }
 .tool-rail button {
-  display: flex; width: 100%; height: 28px; padding: 3px; gap: 4px;
-  align-items: center; justify-content: center; color: var(--muted); font-size: 11px;
+  display: flex; width: 100%; min-height:max(28px,1.95rem); height:auto; padding: 3px; gap: 4px;
+  align-items: center; justify-content: center; color: var(--muted); font-size: 0.9167rem;
 }
 .tool-rail button .icon { width: 14px; height: 14px; }
 #focus-tool { margin-top: 4px; width: auto; padding-inline: 8px; }
@@ -72,10 +74,10 @@ button:disabled { cursor: default; }
 .planning-layer, .planning-object, .tree-row { color: var(--muted); }
 .planning-layer.selected, .planning-object.selected, .tree-row.selected { background: var(--selected); color: var(--text); }
 .property-section { padding: 12px 14px; border-color: var(--line); }
-.property-section h3 { color: var(--text); font-size: 12px; }
-.property-section label, .property-summary, .viewport-footer { color: var(--muted); font-size: 11px; }
+.property-section h3 { color: var(--text); font-size: 1rem; }
+.property-section label, .property-summary, .viewport-footer { color: var(--muted); font-size: 0.9167rem; }
 .property-section :is(input,textarea,select) { background-color: var(--field); border-color: #3b4a58; }
-.property-actions button, .property-section > button { font-size: 11px; padding: 5px 9px; }
+.property-actions button, .property-section > button { font-size: 0.9167rem; padding: 5px 9px; }
 .property-section input[type=range] { background-color: transparent; }
 .viewport-bar { min-height: 35px; height: auto; flex-wrap: wrap; padding: 3px 8px; background: var(--chrome); }
 #map-controls, #detail-controls { max-width: 100%; overflow-x: auto; scrollbar-width: thin; }

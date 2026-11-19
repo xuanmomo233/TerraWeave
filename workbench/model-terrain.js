@@ -42,9 +42,9 @@ export async function buildState(s,options={}){
  const {id,props}=parseState(s),read=options.readJson||json,mkmat=options.makeMaterial||material;
  if(['barrier','structure_void','light'].includes(id)){if(!options.showInvisible||id==='light')return [];return [{geometry:new THREE.PlaneGeometry(.86,.86).translate(.5,.5,.5),material:mkmat('item/'+id,id,false)}];}
  if(id==='water'||id==='lava'){const level=Number(props.level??0),height=level>=8?8/9:Math.max(1/9,(8-level)/9);return [{geometry:fluidGeometry(options.fluidCorners??[height,height,height,height],options.fluidMask??options.occlusionMask??0),material:mkmat('block/'+id+(level>0?'_flow':'_still'),id,false)}];}
+ if(props.waterlogged==='true'){const dry=s.replace('waterlogged=true','waterlogged=false'),parts=await buildState(dry,options),water=await buildState('minecraft:water[level=0]',{...options,occlusionMask:options.fluidMask??0});return [...parts,...water];}
  const entity=specialModel(id,props,mkmat);if(entity)return entity;
  if(special.test(id))throw Error('需要方块实体渲染器: '+s);
- if(props.waterlogged==='true'){const dry=s.replace('waterlogged=true','waterlogged=false'),parts=await buildState(dry,options),water=await buildState('minecraft:water[level=0]',{...options,occlusionMask:options.fluidMask??0});return [...parts,...water];}
  const bs=await read('/assets/minecraft/blockstates/'+id+'.json'),variants=selectVariants(bs,props),byTex=new Map();
  for(const v of variants){const m=await model(v.model,read);if(!m.elements?.length)throw Error('模型需要特殊渲染: '+s);
  for(const e of m.elements){const [x,y,z]=e.from.map(n=>n/16),[X,Y,Z]=e.to.map(n=>n/16);
@@ -64,4 +64,3 @@ export async function buildState(s,options={}){
  return [...byTex.values()].map(({t,tint,gs})=>({geometry:mergeGeometries(gs),material:mkmat(t,id,tint)}));
 }
 export function validate(d){if(d.schema!==1||d.minecraft!=='1.20.1'||!Array.isArray(d.bounds)||d.bounds.length!==6)throw Error('需要 Minecraft 1.20.1 / schema 1 的 MapWorkbench 数据');const b=d.bounds;if(!b.every(Number.isSafeInteger))throw Error('无效边界');const n=(b[3]-b[0]+1)*(b[4]-b[1]+1)*(b[5]-b[2]+1);if(n<1||n>100000||Object.keys(d.blocks||{}).length!==n)throw Error('区域必须完整，且不超过100000个位置');for(const [key,s]of Object.entries(d.blocks)){const xyz=key.split(',').map(Number);if(xyz.length!==3||xyz.some((v,i)=>!Number.isSafeInteger(v)||v<b[i]||v>b[i+3])||xyz.join(',')!==key)throw Error('无效坐标 '+key);parseState(s)}return d;}
-

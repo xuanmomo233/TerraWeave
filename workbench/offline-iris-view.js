@@ -5,7 +5,7 @@ import {awaitTextures} from './model-terrain.js';
 import {callWorkbench} from './workbench-api.js';
 
 const keyFor=g=>JSON.stringify([g.state,g.mask,g.fluid_mask,g.fluid_corners]);
-const blockEntity=/^minecraft:(?:chest|trapped_chest|ender_chest|.*_bed|.*_banner|.*_sign|.*_head|.*_skull|.*shulker_box|end_portal)(?:\[|$)/;
+const blockEntity=/^minecraft:(?:conduit|chest|trapped_chest|ender_chest|.*_bed|.*_banner|.*_sign|.*_head|.*_skull|.*shulker_box|end_portal)(?:\[|$)/;
 const celestialUp=new Vector3(0,1,0);
 const toArray=attribute=>Array.from(attribute.array);
 
@@ -42,29 +42,32 @@ function lightPositions(data){
 }
 
 async function collectScene({lod,chunks,snapshot,region},inputs){
- const items=[];
+ const items=[],missing=new Set();
  for(const group of lod.enabled?lod.meshes.values():[]){
   const tile=group.userData.tile;
   for(const g of tile.groups){
    const parts=lod.prepared.get(keyFor(g));if(!parts?.length)continue;
    const positions=positionsFor(tile,g,region.panorama?null:snapshot.bounds);
    if(!positions.length)continue;
-   for(const part of parts)items.push({geometry:part.geometry,material:part.material,state:g.state,positions});
+   for(const part of parts){
+    if(part.material.wireframe)missing.add(g.state);
+    else items.push({geometry:part.geometry,material:part.material,state:g.state,positions});
+   }
   }
  }
  if(!region.panorama)for(const mesh of chunks.meshes()){
   const {ps,s}=mesh.userData;
   if(!ps?.length||!s||/^minecraft:(?:barrier|structure_void|light)(\[|$)/.test(s))continue;
-  items.push({geometry:mesh.geometry,material:mesh.material,state:s,positions:ps.map(cell=>cell.p)});
+  if(mesh.material.wireframe)missing.add(s);
+  else items.push({geometry:mesh.geometry,material:mesh.material,state:s,positions:ps.map(cell=>cell.p)});
  }
- if(!items.length)throw Error('离线场景尚未准备好');
+ if(!items.length)throw Error(missing.size?'离线光影缺少可渲染方块模型':'离线场景尚未准备好');
  await awaitTextures(items.map(item=>item.material));
  const shared=lod.atlas&&items.every(item=>!item.material.map||lod.atlas.rects.has(item.material.map));
  const textureAtlas=shared?lod.atlas:createTextureAtlas(items.map(item=>item.material));
  try {
   const {dimension,rects,canvas}=textureAtlas,models=[],batches=[],cache=new Map(),ids=new Map();
   for(const {geometry,material,state,positions} of items){
-   if(material.wireframe)throw Error('离线光影缺少方块模型：'+state);
    const water=!!material.userData.water;
    const stage=material.transparent?'gbuffers_water':blockEntity.test(state)?'gbuffers_block':'gbuffers_terrain';
    const key=[geometry.id,material.id,stage].join(':');
@@ -83,7 +86,7 @@ async function collectScene({lod,chunks,snapshot,region},inputs){
    batches.push({model,positions,entity:ids.get(idKey)});
   }
   const [sun,moon]=await Promise.all(['sun','moon_phases'].map(name=>invoke('read_asset',{name:'minecraft/textures/environment/'+name+'.png'})));
-  return {models,batches,atlas:canvas.toDataURL('image/png'),sun,moon,light:inputs.world.chunks,origin:snapshot.bounds.slice(0,3)};
+  return {scene:{models,batches,atlas:canvas.toDataURL('image/png'),sun,moon,light:inputs.world.chunks,origin:snapshot.bounds.slice(0,3)},missing:[...missing]};
  }finally{if(!shared)textureAtlas.texture.dispose();}
 }
 
@@ -166,7 +169,9 @@ export class OfflineIrisView{
   if(inputs.world.world_uuid!==region.world_uuid)throw Error('原版光影输入与当前存档不一致');
   const renderKey=key+':'+inputs.world.environment_revision;
   if(this.key!==renderKey){
-   await invoke('iris_prepare',{pack:inputs.pack,scene:await collectScene(data,inputs)});
+   const {scene,missing}=await collectScene(data,inputs);
+   await invoke('iris_prepare',{pack:inputs.pack,scene});
+   this.missing=missing;
    this.key=renderKey;
   }
   const scale=exportFrame?1:Math.min(1,1920/Math.max(data.width,data.height));
@@ -183,7 +188,8 @@ export class OfflineIrisView{
   }
   if(this.canvas.width!==width||this.canvas.height!==height){this.canvas.width=width;this.canvas.height=height;}
   this.ctx.putImageData(new ImageData(new Uint8ClampedArray(rgba),width,height),0,0);
-  this.canvas.hidden=false;this.error.hidden=true;
+  this.canvas.hidden=false;this.error.hidden=!this.missing?.length;
+  if(this.missing?.length)this.error.textContent='光影预览缺少 '+this.missing.length+' 种方块模型 · '+this.missing.slice(0,3).join('、');
   const previous=this.presented;
   this.presented={key,camera:frameCamera};
   if(!exportFrame&&(!previous||previous.key!==key||
@@ -204,14 +210,14 @@ export class OfflineIrisView{
   }).finally(()=>{
    this.pending=null;
    const next=this.queued;this.queued=null;
-   if(next&&this.active&&this.error.hidden)this.show(next);
+   if(next&&this.active&&!this.canvas.hidden)this.show(next);
   });
  }
  async capture(data){
   this.queued=null;
   await this.pending;
   const canvas=await this.draw(data,{exportFrame:true});
-  this.report={...await invoke('iris_report'),world_revision:this.inputs.world.world_revision,environment_revision:this.inputs.world.environment_revision};
+  this.report={...await invoke('iris_report'),world_revision:this.inputs.world.world_revision,environment_revision:this.inputs.world.environment_revision,missing_models:this.missing??[]};
   return canvas;
  }
 }

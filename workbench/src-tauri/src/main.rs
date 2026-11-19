@@ -18,6 +18,8 @@ mod clipboard;
 }
 use base64::{engine::general_purpose::STANDARD,Engine};
 use std::{fs,path::Path};
+use tauri::Manager;
+use tauri_plugin_dialog::DialogExt;
 
 fn bounded(root:&Path,name:&str,max:u64)->Result<Vec<u8>,String>{
  if name.is_empty()||name.contains("..")||name.contains('\\')||name.starts_with('/')||name.contains(':'){return Err("Invalid asset path".into())}
@@ -53,8 +55,29 @@ fn open_pack_folder(kind:&str)->Result<(),String>{
  };
  let directory=workbench::project().join("assets").join(folder);
  fs::create_dir_all(&directory).map_err(|e|format!("无法准备目录：{e}"))?;
- std::process::Command::new(if cfg!(target_os="macos") {"open"} else {"explorer.exe"}).arg(directory).spawn()
+ open_local_directory(&directory)
+}
+fn open_local_directory(directory:&Path)->Result<(),String>{
+ if !directory.is_dir(){return Err("目录不存在或不可访问".into())}
+ #[cfg(target_os="windows")]
+ let program="explorer.exe";
+ #[cfg(target_os="macos")]
+ let program="open";
+ #[cfg(not(any(target_os="windows",target_os="macos")))]
+ let program="xdg-open";
+ std::process::Command::new(program).arg(directory).spawn()
   .map(|_|()).map_err(|e|format!("无法打开目录：{e}"))
+}
+#[tauri::command]
+async fn open_project_folder(id:String,kind:String)->Result<(),String>{
+ let details=workbench::workbench_call("project_locations".into(),serde_json::json!({"id":id})).await?;
+ let directory=match kind.as_str(){
+  "project"=>details["project_directory"].as_str(),
+  "save" if details["error"].is_null()=>details["directory"].as_str(),
+  "save"=>return Err("存档目录不可读取，请重新关联存档".into()),
+  _=>return Err("未知的工程目录类型".into()),
+ }.ok_or("当前工程没有对应的目录")?;
+ open_local_directory(Path::new(directory))
 }
 #[tauri::command]
 fn center_view_cursor(window:tauri::Window,x:i32,y:i32)->Result<(),String>{
@@ -64,6 +87,17 @@ fn center_view_cursor(window:tauri::Window,x:i32,y:i32)->Result<(),String>{
   window.set_cursor_position(tauri::PhysicalPosition::new(x,y)).map_err(|e|e.to_string())?;
  }
  Ok(())
+}
+#[tauri::command]
+async fn pick_world_directory(window: tauri::Window, initial_path: String, title: Option<String>) -> Result<Option<String>, String> {
+ let title=title.unwrap_or_else(||"选择 Minecraft 世界存档目录".into());
+ let dialog = window.dialog().file().set_title(title).set_parent(&window);
+ let path = Path::new(initial_path.trim());
+ let dialog = if path.is_absolute() && path.is_dir() { dialog.set_directory(path) } else { dialog };
+ let picked = tauri::async_runtime::spawn_blocking(move || dialog.blocking_pick_folder())
+  .await.map_err(|error|error.to_string())?;
+ picked.map(|entry|entry.into_path().map_err(|error|error.to_string()).and_then(|path|
+  path.into_os_string().into_string().map_err(|_|"该目录路径无法转换为文本".to_string()))).transpose()
 }
 fn main(){
  if std::env::args_os().any(|arg|arg=="--installation-path"){
@@ -79,7 +113,10 @@ fn main(){
  workbench::recover_requests().expect("Recover pending desktop requests");
  let mut context=tauri::generate_context!();
  if std::env::var("MAP_WORKBENCH_TEST_HIDDEN").as_deref()==Ok("1"){for window in &mut context.config_mut().app.windows{window.visible=false;}}
- tauri::Builder::default().invoke_handler(tauri::generate_handler![center_view_cursor,iris_native::iris_check_pack,iris_native::iris_prepare,iris_native::iris_draw,iris_native::iris_report,read_asset,open_pack_folder,clipboard::workbench_clipboard,workbench::workbench_heartbeat,workbench::workbench_poll,workbench::workbench_complete,workbench::workbench_call,workbench::workbench_show,workbench::workbench_read_image,workbench::workbench_window_action]).run(context).expect("TerraWeave startup failed");
+ tauri::Builder::default().plugin(tauri_plugin_dialog::init()).setup(|app|{
+  if let Some(window)=app.get_webview_window("main"){workbench::monitor_window(window);}
+  Ok(())
+ }).invoke_handler(tauri::generate_handler![pick_world_directory,center_view_cursor,iris_native::iris_check_pack,iris_native::iris_prepare,iris_native::iris_draw,iris_native::iris_report,read_asset,open_pack_folder,open_project_folder,clipboard::workbench_clipboard,workbench::workbench_heartbeat,workbench::workbench_poll,workbench::workbench_complete,workbench::workbench_call,workbench::workbench_show,workbench::workbench_read_image,workbench::workbench_window_action]).run(context).expect("TerraWeave startup failed");
 }
 #[cfg(test)]mod tests{
  use super::*;
