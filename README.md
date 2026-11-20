@@ -4,15 +4,15 @@ Minecraft 地图规划与创作工作台。先在整张世界地图上划分区�
 
 ## 下载
 
-当前版本 [v0.7.2](https://github.com/xuanmomo233/TerraWeave/releases/tag/v0.7.2)。
+当前桌面版本 [v0.7.2](https://github.com/xuanmomo233/TerraWeave/releases/tag/v0.7.2)。
 
 | 下载 | 使用方式 |
 | --- | --- |
 | [Windows x64 便携开发包](https://github.com/xuanmomo233/TerraWeave/releases/download/v0.7.2/TerraWeave-0.7.2-windows-x64-portable.zip) | 完整解压后双击第一层的 `织境工坊.exe` |
 | [Windows x64 双语安装包](https://github.com/xuanmomo233/TerraWeave/releases/download/v0.7.2/TerraWeave-0.7.2-windows-x64-setup.exe) | 安装向导支持简体中文、English 和自选目录 |
-| [WorkbenchLive 1.1.0](https://github.com/xuanmomo233/TerraWeave/releases/download/v0.7.2/WorkbenchLive-1.1.0.jar) | 部署到需要接收设计方案的 Paper 服务端 |
+| [TerraWeave.jar 1.2.0](https://github.com/xuanmomo233/TerraWeave/releases/download/plugin-v1.2.0/TerraWeave.jar) | 所有已验收的 Paper 版本共用同一份 JAR |
 
-v0.7.2 增加了新版 Anvil 存档读取、计算光影、容器内容和旗帜图案预览，以及 Paper 1.20.1 的容器与旗帜 NBT 撤销。读取存档和出图由工作台离线完成。配置服务端插件仅用于需要写入世界时。
+v0.7.2 增加了新版 Anvil 存档读取、计算光影、容器内容和旗帜图案预览。读取存档和出图由工作台离线完成。配置服务端插件仅用于需要写入世界时。
 
 ## 启动与目录
 
@@ -113,11 +113,13 @@ Windows 便携开发包完整解压后，双击第一层的 `织境工坊.exe`�
 
 ## 独立写入链路
 
-`world_writer` 读取「导出方案」生成的固定修订。配置 `TERRAWEAVE_WRITE_BRIDGE` 指向目标服的 `plugins/WorkbenchLive` 数据目录，然后运行 `npm run mcp:writer`。配套插件执行方块写入。写入端按批次保存请求和回执，失败后用同一个操作标识续接。撤销与重做按各批次实际改动计算，并在插件执行前检查原状态。
+`map_workbench` 负责读取存档、规划、预览和导出。需要施工时，`world_writer` 把固定修订交给 Paper 上的 TerraWeave 插件。安装 `TerraWeave.jar` 后，将写入 MCP 的 `TERRAWEAVE_WRITE_BRIDGE` 指向目标服的 `plugins/TerraWeave`。写入端按批次保存请求和回执，失败后可用原操作 ID 续接。[插件安装、MCP 配置和撤销指南](workbench/SDK.md#插件与-mcp-使用指南)
 
-本工程的 `.codex/config.toml` 将开发写入 MCP 指向已有测试服。测试服的生命周期由独立验收脚本控制。部署到其他服务器时，在目标服安装配套插件，并把写入连接指向它的数据目录。
+仓库内的开发配置连接已有测试服。部署时使用目标服的插件目录和独立的操作记录目录。
 
-新导出的方案携带存档版本。插件在写入前校验目标世界 UUID 和运行版本。告示牌撤销会恢复两面的文本组件、颜色、发光、封蜡和插件持久数据。Paper 1.20.1 的 NBT 适配器支持普通箱子、陷阱箱、木桶、潜影盒和旗帜。撤销和重做会核对方块状态及 NBT，保留之后在目标服做的改动。已在原测试服用箱子、木桶和旗帜验收。使用其他服务端版本时，接口会按服务端报告的恢复能力处理。世界存档和历史记录目前无法跨文件原子提交。
+TerraWeave 插件 1.2.0 在 Paper 1.20.1 至 26.2 范围内通过了 19 个官方可用构建的实服验收。箱子、木桶和旗帜均完成写入、撤销、重做及完整 SNBT 比较。1.20.3、1.21.2 和 26.1 在 Paper 官方下载服务中无可下载构建。
+
+新导出的方案携带存档版本。插件在写入前校验目标世界 UUID 和运行版本。撤销和重做会核对方块状态及 NBT，保留之后在目标服做的改动。世界存档和历史记录目前无法跨文件原子提交。[Paper 版本验收明细](workbench/SDK.md#paper-版本兼容)
 
 ## 离线光影
 
@@ -127,7 +129,7 @@ Windows 便携开发包完整解压后，双击第一层的 `织境工坊.exe`�
 
 ## 开发
 
-`npm run build` 构建界面；`npm run build:desktop` 构建并更新 `bin/TerraWeave.exe`，更新前关闭工作台。`tools/build-server.ps1` 在 PowerShell 7 中构建 Paper 桥接。`native-build/` 是可回收的开发缓存，运行程序不依赖它。
+`npm run build` 构建界面；`npm run build:desktop` 构建并更新 `bin/TerraWeave.exe`，更新前关闭工作台。在 `workbench` 下用 PowerShell 7 执行 `./tools/build-server.ps1` 构建 Paper 插件，输出 `packages/TerraWeave.jar`。`native-build/` 是可回收的开发缓存，运行程序不依赖它。
 
 `npm run test:entities:live` 在已有测试服上验收箱子、木桶和旗帜的写入、撤销、重做与冲突保护。运行前将构建好的新插件放入测试服的 `plugins` 目录，并保持测试服停止。
 

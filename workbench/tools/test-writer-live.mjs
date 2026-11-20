@@ -18,7 +18,7 @@ try{
  before=snapshot.blocks[key];
  assert.ok(before,'验收点必须已生成');
  target=before==='minecraft:polished_andesite'?'minecraft:stone':'minecraft:polished_andesite';
- const connector=worldWriter({directory:ledger,send:bridgeTransport(path.join(SERVER,'plugins','WorkbenchLive'))});
+ const connector=worldWriter({directory:ledger,send:bridgeTransport(path.join(SERVER,'plugins','TerraWeave'))});
  const blueprint={schema:1,world_uuid:status.identity.world_uuid,draft_id:randomUUID(),draft_revision:1,
   label:'独立写入链路验收',base:{[key]:before},changes:{[key]:target},previously_applied:{}};
  const result=await connector.apply(blueprint);

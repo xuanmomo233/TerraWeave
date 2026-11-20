@@ -4,6 +4,112 @@
 
 在「文件 → 世界存档来源」选择含 `level.dat` 的 Java 版存档根目录。首次进入三维会从本机资源或 Mojang 获取对应存档版本的原版模型和纹理。规划和预览写入本地 `project-state/workbench`，可用 `TERRAWEAVE_STATE` 指定独立工程目录。
 
+## 插件与 MCP 使用指南
+
+| 组件 | 用途 | 运行位置 |
+| --- | --- | --- |
+| `map_workbench` | 读存档、管理规划、截图、编辑草稿及导出方案 | 织境工坊所在电脑 |
+| `world_writer` | 提交导出方案、查看回执、续接、撤销和重做 | 能直接读写 `plugins/TerraWeave` 的主机 |
+| TerraWeave 插件 | 核对目标世界和现有方块，再在服务端执行写入 | 目标 Paper 服务端 |
+
+日常离线工作配置 `map_workbench` 即可。需要把方案写入目标服时，再配置 `world_writer` 并安装插件。
+
+### 安装 TerraWeave 插件
+
+1. 停止目标 Paper 服务端，移出先前安装的桥接插件 JAR，再将 `TerraWeave.jar` 放入 `plugins`。下表通过验收的 Paper 版本共用这个文件。[下载 TerraWeave.jar 1.2.0](https://github.com/xuanmomo233/TerraWeave/releases/download/plugin-v1.2.0/TerraWeave.jar)
+2. 启动目标服。确认服务端日志显示 `Persistent map workbench ready`，且 `plugins/TerraWeave/heartbeat.json` 持续更新。插件绑定服务端启动时的第一个已加载世界，心跳文件中的 `world`、`world_uuid` 和 `minecraft` 可用于核对目标。
+3. 用织境工坊打开同一世界的存档或其副本。副本保留 Paper 的 `uid.dat`。导出方案的世界 UUID 和游戏版本须与目标服匹配，目标坐标须位于已生成的区块内。只带 `local-` 标识的工程可用于离线规划。要写入 Paper，请从目标世界的存档建立工程后导出方案。
+
+新版在 `plugins/TerraWeave` 下建立独立的写入记录。已有的 `world_writer` 配置需把 `TERRAWEAVE_WRITE_BRIDGE` 和显式设置的 `TERRAWEAVE_WRITER_STATE` 改为下文的新路径，再在新聊天中确认 MCP 已加载。先前的操作记录可留存备查，新版从新目录读取回执。
+
+### Paper 版本兼容
+
+TerraWeave 插件 **1.2.0** 使用同一份 JAR 在 Paper 1.20.1 至 26.2 范围内逐版验收。下表列出实际测试的官方构建及上游渠道。1.20.x 至 1.21.11 使用 Java 21，26.1.1 至 26.2 使用 Java 25。[Paper 下载服务](https://docs.papermc.io/misc/downloads-service/) · [Paper Java 要求](https://docs.papermc.io/paper/getting-started/)
+
+每个通过的构建均在实际 Paper 进程中写入箱子、木桶和旗帜，再执行撤销、重做和二次撤销。测试比较两次恢复得到的完整 SNBT，覆盖物品槽位及数量、物品自定义数据、容器名称、旗帜图案和插件持久数据。另验证重做会保留后来改过内容的箱子。
+
+| Minecraft 版本 | Paper 构建 | 渠道 | 写入、撤销、重做及 NBT |
+| --- | ---: | --- | --- |
+| 1.20.1 | 196 | STABLE | 通过 |
+| 1.20.2 | 318 | STABLE | 通过 |
+| 1.20.3 | — | — | 官方源无构建 |
+| 1.20.4 | 499 | STABLE | 通过 |
+| 1.20.5 | 22 | ALPHA | 通过 |
+| 1.20.6 | 151 | STABLE | 通过 |
+| 1.21 | 130 | STABLE | 通过 |
+| 1.21.1 | 133 | STABLE | 通过 |
+| 1.21.2 | — | — | 官方源无构建 |
+| 1.21.3 | 83 | STABLE | 通过 |
+| 1.21.4 | 232 | STABLE | 通过 |
+| 1.21.5 | 114 | ALPHA | 通过 |
+| 1.21.6 | 48 | STABLE | 通过 |
+| 1.21.7 | 32 | STABLE | 通过 |
+| 1.21.8 | 60 | STABLE | 通过 |
+| 1.21.9 | 59 | ALPHA | 通过 |
+| 1.21.10 | 130 | STABLE | 通过 |
+| 1.21.11 | 132 | STABLE | 通过 |
+| 26.1 | — | — | 官方源无构建 |
+| 26.1.1 | 29 | ALPHA | 通过 |
+| 26.1.2 | 74 | STABLE | 通过 |
+| 26.2 | 135 | STABLE | 通过 |
+
+NBT 回执绑定其生成时的 Minecraft 版本。执行恢复时使用与回执一致的版本。服务端心跳的 `block_entity_payload=1` 表示原版容器与旗帜的 NBT 适配器已启用。
+
+### 配置 Codex
+
+在可信任的 Codex 工程的 `.codex/config.toml` 中加入以下配置。示例使用便携包内的 Node.js，路径按实际安装位置替换。已有同名配置时，编辑原配置块。加载工程配置时可用 `codex mcp list` 检查条目，新聊天中再检查工具是否出现。[Codex MCP 配置说明](https://developers.openai.com/codex/mcp)
+
+```toml
+[mcp_servers.map_workbench]
+command = 'D:\TerraWeave\runtime\node.exe'
+args = ['D:\TerraWeave\tools\creative-workbench.mjs', '--stdio']
+cwd = 'D:\TerraWeave'
+startup_timeout_sec = 20
+tool_timeout_sec = 180
+
+[mcp_servers.map_workbench.env]
+TERRAWEAVE_STATE = 'D:\TerraWeave\project-state\workbench'
+
+[mcp_servers.world_writer]
+command = 'D:\TerraWeave\runtime\node.exe'
+args = ['D:\TerraWeave\tools\writer-mcp.mjs', '--stdio']
+cwd = 'D:\TerraWeave'
+startup_timeout_sec = 20
+tool_timeout_sec = 180
+default_tools_approval_mode = 'prompt'
+
+[mcp_servers.world_writer.env]
+TERRAWEAVE_WRITE_BRIDGE = 'D:\Paper\plugins\TerraWeave'
+TERRAWEAVE_WRITER_STATE = 'D:\Paper\plugins\TerraWeave\writer-state'
+```
+
+- 默认为原工程时可沿用示例的 `TERRAWEAVE_STATE`。使用其他工程时，从织境工坊「文件 → 打开工程目录」取得实际工程路径并填入。调用 `map_workbench.workbench_status` 核对存档及所选规划。
+- `TERRAWEAVE_WRITE_BRIDGE` 填插件生成 `heartbeat.json` 的目录。写入 MCP 的运行账号需要读取心跳和回执，并能在插件数据目录中创建请求文件。连接后可调用 `world_writer.list_world_writes`，首次返回空列表属于正常情况。该调用只查历史，服务端是否在线仍由心跳确认。
+- `TERRAWEAVE_WRITER_STATE` 存放写入与撤销记录。省略时默认为插件数据目录下的 `writer-state`。同一目标世界复用同一个记录目录，测试服和生产服使用各自的记录目录。
+
+### 远程 Paper 服务端
+
+远程服务器上准备 Node.js，以及同版本的织境工坊文件。可以将便携开发包解压后把 `tools/`、`minecraft-version.js` 和 `package.json` 传到服务端，保留它们的目录结构。Windows 便携包中的 `node.exe` 用于 Windows 主机。
+
+写入 MCP 可在 Paper 所在主机运行。本机 Codex 可以通过已有的 SSH 连接启动该 STDIO 进程。下例替换同机配置中的整个 `world_writer` 部分，`map_workbench` 仍使用本机配置。先把导出的 JSON 传到服务器，`export_path` 填服务器上该文件的绝对路径。
+
+```toml
+[mcp_servers.world_writer]
+command = 'ssh'
+args = ['-T', '-o', 'BatchMode=yes', 'deploy@paper.example.org',
+  'env TERRAWEAVE_WRITE_BRIDGE=/srv/paper/plugins/TerraWeave TERRAWEAVE_WRITER_STATE=/srv/paper/plugins/TerraWeave/writer-state /usr/bin/node /opt/terraweave/tools/writer-mcp.mjs --stdio']
+startup_timeout_sec = 25
+tool_timeout_sec = 180
+default_tools_approval_mode = 'prompt'
+```
+
+### 首次写入、撤销与重做
+
+1. 在织境工坊打开草稿的差异预览，确认改动后点「导出方案」。也可用 `map_workbench.export_draft` 传入 `draft_id`，从返回结果中取 `path`。
+2. 用 `world_writer.apply_exported_design` 传入 `export_path`。记录返回的 `operation_id`。确认 `complete` 为 `true`、`conflict_count` 为 `0`，并核对 `changed` 和 `already`。有冲突时查看坐标；同一方案可能已经成功写入其他坐标。
+3. 用 `world_writer.world_write_status` 查询操作。遇到超时或部分批次完成时，先查历史和回执，再用同一份导出文件和原 `operation_id` 重试。调用超时且尚未拿到 ID 时，可先通过 `list_world_writes` 找到记录。保留导出文件、`writer-state` 和插件回执，便于恢复。
+4. 对 `undoable` 为 `true` 的施工，用 `world_writer.undo_world_write` 和原始写入的 `operation_id` 撤销。重做使用 `world_writer.redo_world_write` 及同一个原始写入 ID。插件会保留施工后由其他操作改过的方块；将冲突坐标留给人工核对。
+
 ## 开发与构建
 
 在开发包根目录运行 `npm ci`。前端用 Vite 构建，桌面使用 Tauri 2 和 Rust。Rust 使用 1.89 或更新版本。

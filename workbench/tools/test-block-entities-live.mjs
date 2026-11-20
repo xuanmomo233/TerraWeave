@@ -64,7 +64,7 @@ try{
  assert.match(baseline[barrel.join()].payload.snbt,/minecraft:book/);
  assert.match(baseline[banner.join()].payload.snbt,/Patterns/);
  await serverRequest('save');
- const writer=worldWriter({directory:path.join(scratch,'ledger'),send:bridgeTransport(path.join(SERVER,'plugins','WorkbenchLive'))});
+ const writer=worldWriter({directory:path.join(scratch,'ledger'),send:bridgeTransport(path.join(SERVER,'plugins','TerraWeave'))});
  const design={schema:1,world_uuid:server.world_uuid,minecraft:server.minecraft,draft_id:randomUUID(),draft_revision:1,
   label:'容器和旗帜撤销验收',base:Object.fromEntries(positions.map(p=>[p.join(),baseline[p.join()].state])),
   changes:Object.fromEntries(positions.map(p=>[p.join(),'minecraft:stone'])),previously_applied:{}};

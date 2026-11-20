@@ -16,7 +16,7 @@ import java.nio.channels.FileChannel;
 import java.security.MessageDigest;
 import java.util.*;
 
-public final class WorkbenchLive extends JavaPlugin {
+public final class TerraWeave extends JavaPlugin {
     private final Gson gson = new GsonBuilder().serializeNulls().create();
     private Path root, requests, responses, receipts, intents;
     private World world;

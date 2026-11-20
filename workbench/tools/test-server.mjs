@@ -4,9 +4,9 @@ import {spawn} from 'node:child_process';
 import {randomUUID} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 export const SERVER=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../../test-server');
-const ROOT=path.join(SERVER,'plugins/WorkbenchLive');
+const ROOT=path.join(SERVER,'plugins/TerraWeave');
 const read=p=>{try{return JSON.parse(fs.readFileSync(p,'utf8'));}catch{return null;}};
-export const serverStatus=()=>{const h=read(path.join(ROOT,'heartbeat.json'));return {running:!!h&&Date.now()-h.at_ms<10000,server:SERVER,...(h?{identity:h}:{})};};
+export const serverStatus=(root=ROOT)=>{const h=read(path.join(root,'heartbeat.json'));return {running:!!h&&Date.now()-h.at_ms<10000,server:SERVER,...(h?{identity:h}:{})};};
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 export async function stopServer(){
  const before=serverStatus();if(!before.running)return {...before,stopped:true};
@@ -32,9 +32,9 @@ export async function startServer(){
  for(let i=0;i<120;i++){await sleep(500);status=serverStatus();if(status.running)return {...status,reused:alive};}
  throw Error('Test server did not become ready; inspect '+path.join(ROOT,'process.log'));
 }
-export async function serverRequest(action,args={}){
- const status=serverStatus();if(!status.running)throw Error('Start the persistent test server first');
- const id=randomUUID(),requests=path.join(ROOT,'requests'),responses=path.join(ROOT,'responses');
+export async function serverRequest(action,args={},root=ROOT){
+ const status=serverStatus(root);if(!status.running)throw Error('Start the persistent test server first');
+ const id=randomUUID(),requests=path.join(root,'requests'),responses=path.join(root,'responses');
  fs.mkdirSync(requests,{recursive:true});fs.mkdirSync(responses,{recursive:true});
  const target=path.join(requests,id+'.json'),pending=target+'.pending';
  fs.writeFileSync(pending,JSON.stringify({action,world_uuid:status.identity.world_uuid,...args}),{flag:'wx'});fs.renameSync(pending,target);
