@@ -7,20 +7,23 @@ const label={area:'区域',route:'路线',marker:'标记'},icon=name=>'<svg clas
 function node(tag,value,className){const e=document.createElement(tag);e.textContent=value;if(className)e.className=className;return e;}
 export function mountMapWorkspace(context){
  let active=true,info=null,state=null,drafts=[],selectedLayer='buildings',busy=false,visibilityTimer,operations=0,selectionEpoch=0,pendingSelection;const visibility=new Map();
- let detailNavigation=null;
+ let detailNavigation=null,cancelDetail=null;
  let welcomeDismissed=false;
  $('continue-map-planning').onclick=()=>{welcomeDismissed=true;$('map-welcome').hidden=true;};
  function completeDetail(id){
   if(!id||detailNavigation!==id)return false;
   detailNavigation=null;
+  cancelDetail=null;
   $('detail-loading').hidden=true;
   document.body.classList.remove('loading-detail');
   return true;
  }
  function returnToMap(){
   context.editor.rememberView();
+  const cancel=cancelDetail;
   completeDetail(detailNavigation);
   visible(true);
+  cancel?.();
  }
  $('cancel-detail').onclick=returnToMap;
  const pendingKey=planId=>'plan:'+planId;
@@ -192,8 +195,10 @@ export function mountMapWorkspace(context){
   const belongs=point&&bounds&&point[0]>=bounds[0]&&point[0]<=bounds[2]&&point[1]>=bounds[1]&&point[1]<=bounds[3];
   await context.editor.run(async()=>{
    const navigation_id=active?crypto.randomUUID():undefined;
+   let cancelled;
    if(navigation_id){
     detailNavigation=navigation_id;
+    cancelled=new Promise(resolve=>{cancelDetail=()=>resolve({cancelled:true});});
     $('detail-loading-name').textContent=selected&&(!point||belongs)?selected.name:'三维细化';
     $('detail-loading').hidden=false;
     document.body.classList.add('loading-detail');
@@ -203,9 +208,10 @@ export function mountMapWorkspace(context){
    try{
     const y=viewport.view.slice_y??(belongs?planningFocusY(selected):undefined);
     const options={allow_saved:true,navigation_id,view_id:crypto.randomUUID(),y};
-    return selected&&!point
-     ?await call('open_plan_detail',{...options,plan_id:selected.id})
-     :await call('browse_world',{...options,x:point?.[0]??Math.round(viewport.view.x),z:point?.[1]??Math.round(viewport.view.z),plan_id:belongs?selected.id:undefined});
+    const request=selected&&!point
+     ?call('open_plan_detail',{...options,plan_id:selected.id})
+     :call('browse_world',{...options,x:point?.[0]??Math.round(viewport.view.x),z:point?.[1]??Math.round(viewport.view.z),plan_id:belongs?selected.id:undefined});
+    return await (cancelled?Promise.race([request,cancelled]):request);
    }finally{
     if(completeDetail(navigation_id))visible(true);
    }

@@ -4,15 +4,15 @@ Minecraft 地图规划与创作工作台。先在整张世界地图上划分区�
 
 ## 下载
 
-当前桌面版本 [v0.7.2](https://github.com/xuanmomo233/TerraWeave/releases/tag/v0.7.2)。
+当前桌面版本 [v0.7.3](https://github.com/xuanmomo233/TerraWeave/releases/tag/v0.7.3)。
 
 | 下载 | 使用方式 |
 | --- | --- |
-| [Windows x64 便携开发包](https://github.com/xuanmomo233/TerraWeave/releases/download/v0.7.2/TerraWeave-0.7.2-windows-x64-portable.zip) | 完整解压后双击第一层的 `织境工坊.exe` |
-| [Windows x64 双语安装包](https://github.com/xuanmomo233/TerraWeave/releases/download/v0.7.2/TerraWeave-0.7.2-windows-x64-setup.exe) | 安装向导支持简体中文、English 和自选目录 |
+| [Windows x64 便携开发包](https://github.com/xuanmomo233/TerraWeave/releases/download/v0.7.3/TerraWeave-0.7.3-windows-x64-portable.zip) | 完整解压后双击第一层的 `织境工坊.exe` |
+| [Windows x64 双语安装包](https://github.com/xuanmomo233/TerraWeave/releases/download/v0.7.3/TerraWeave-0.7.3-windows-x64-setup.exe) | 安装向导支持简体中文、English 和自选目录 |
 | [TerraWeave.jar 1.2.0](https://github.com/xuanmomo233/TerraWeave/releases/download/plugin-v1.2.0/TerraWeave.jar) | 所有已验收的 Paper 版本共用同一份 JAR |
 
-v0.7.2 增加了新版 Anvil 存档读取、计算光影、容器内容和旗帜图案预览。读取存档和出图由工作台离线完成。配置服务端插件仅用于需要写入世界时。
+v0.7.3 支持删除单组或多选删除预览图片，减少空缓存下的地图地形读取时间。取消三维细化会立即返回地图。读取存档和出图由工作台离线完成。配置服务端插件仅用于需要写入世界时。
 
 ## 启动与目录
 
@@ -82,6 +82,8 @@ Windows 便携开发包完整解压后，双击第一层的 `织境工坊.exe`�
 画笔、橡皮和范围填充写入草稿。草稿支持设计、原始、差异视图；绿色新增、橙色替换、红色删除。应用后仍可修订并继续施工。写入 MCP 的提交、撤销和重做会通过插件检查实际方块状态，保留后续外部改动。
 
 选中的规划 ID、精确顶点、道路宽度、图层、备注和版本一起提供给 Codex。相机按钮保存当前所见视角，保留位置、方向与视口比例；Codex 仍可指定六个方向或任意世界相机。全景图片同时保存实际方块状态、模型几何、贴图图集和修订哈希；精细窗口图片另外绑定原始方块快照。后续修改不会覆盖对应讨论上下文，图片面板可浏览和放大实际 PNG。
+
+在「预览图片」中选择一组后点击「删除本组」。需要一起清理多组时，点击「多选」，勾选对应项目，再点「删除所选」。确认删除后，工作台会回收失去引用的方块快照。
 
 ## 数据不会因每次刷新而无限增长
 

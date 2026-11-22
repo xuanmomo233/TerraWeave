@@ -95,6 +95,28 @@ export function decodeSurfaceChunk(nbt){
  return {block,surface};
 }
 const voidAirChunk=Object.freeze({DataVersion:3465,Status:'minecraft:full',sections:Object.freeze([])});
+const chunkLocationOffset=(cx,cz)=>((cz%32+32)%32*32+(cx%32+32)%32)*4;
+function readChunkData(fd,size,entry,region,cx,cz,missing){
+ if(!entry)return missing;
+ const sector=entry>>>8,sectors=entry&255;
+ if(sector<2||!sectors)return null;
+ const offset=sector*4096,prefix=Buffer.alloc(5),maxOutputLength=16*1024*1024;
+ if(fs.readSync(fd,prefix,0,5,offset)!==5)return null;
+ const length=prefix.readUInt32BE(),external=!!(prefix[4]&128),compression=prefix[4]&127;
+ if(length<1||length+4>sectors*4096||offset+4+length>size)return null;
+ let payload;
+ if(external){
+  const sidecar=path.join(region,`c.${cx}.${cz}.mcc`),externalFile=fs.statSync(sidecar,{throwIfNoEntry:false});
+  if(length!==1||!externalFile?.isFile()||externalFile.size>maxOutputLength)return null;
+  payload=fs.readFileSync(sidecar);
+ }else{
+  payload=Buffer.alloc(length-1);
+  if(fs.readSync(fd,payload,0,payload.length,offset+5)!==payload.length)return null;
+ }
+ const bytes=compression===1?gunzipSync(payload,{maxOutputLength}):compression===2?inflateSync(payload,{maxOutputLength}):
+  compression===3?payload:compression===4?decodeAnvilLz4(payload,maxOutputLength):null;
+ return bytes?parseNbt(bytes):null;
+}
 export function readWorldChunk(cx,cz,directory,voidWorld){
  if(directory===undefined){
   const source=worldSource();
@@ -106,30 +128,19 @@ export function readWorldChunk(cx,cz,directory,voidWorld){
  const region=overworldRegionDirectory(directory);
  if(!region)return missing;
  const file=path.join(region,'r.'+Math.floor(cx/32)+'.'+Math.floor(cz/32)+'.mca');if(!fs.existsSync(file))return missing;const fd=fs.openSync(file,'r');
- try{const stat=fs.fstatSync(fd);if(stat.size<8192)return null;const location=Buffer.alloc(4);fs.readSync(fd,location,0,4,((cz%32+32)%32*32+(cx%32+32)%32)*4);const entry=location.readUInt32BE(),sector=entry>>>8;if(!entry)return missing;if(sector<2||!(entry&255))return null;
-  const offset=sector*4096,prefix=Buffer.alloc(5),maxOutputLength=16*1024*1024;
-  if(fs.readSync(fd,prefix,0,5,offset)!==5)return null;
-  const length=prefix.readUInt32BE(),external=!!(prefix[4]&128),compression=prefix[4]&127;
-  if(length<1||length+4>(entry&255)*4096||offset+4+length>stat.size)return null;
-  let payload;
-  if(external){
-   const sidecar=path.join(region,`c.${cx}.${cz}.mcc`),externalFile=fs.statSync(sidecar,{throwIfNoEntry:false});
-   if(length!==1||!externalFile?.isFile()||externalFile.size>maxOutputLength)return null;
-   payload=fs.readFileSync(sidecar);
-  }else{
-   payload=Buffer.alloc(length-1);
-   if(fs.readSync(fd,payload,0,payload.length,offset+5)!==payload.length)return null;
-  }
-  const bytes=compression===1?gunzipSync(payload,{maxOutputLength}):compression===2?inflateSync(payload,{maxOutputLength}):
-   compression===3?payload:compression===4?decodeAnvilLz4(payload,maxOutputLength):null;
-  return bytes?parseNbt(bytes):null;
+ try{
+  const {size}=fs.fstatSync(fd);
+  if(size<8192)return null;
+  const location=Buffer.alloc(4);
+  fs.readSync(fd,location,0,4,chunkLocationOffset(cx,cz));
+  return readChunkData(fd,size,location.readUInt32BE(),region,cx,cz,missing);
  }finally{fs.closeSync(fd);}
 }
-export function readSurfaceChunk(cx,cz,directory,voidWorld){
- const nbt=readWorldChunk(cx,cz,directory,voidWorld);
+function surfaceChunk(nbt){
  if(nbt===voidAirChunk)return {block:()=>'minecraft:air',surface:()=>({y:null,state:'minecraft:air',empty:true})};
  return nbt?decodeSurfaceChunk(nbt):null;
 }
+export function readSurfaceChunk(cx,cz,directory,voidWorld){return surfaceChunk(readWorldChunk(cx,cz,directory,voidWorld));}
 export function sampleSurface(x,z,visibleOnly=false,directory,voidWorld){if(!Number.isSafeInteger(x)||!Number.isSafeInteger(z)||Math.abs(x)>30000000||Math.abs(z)>30000000)throw Error('Invalid world coordinate');const chunk=readSurfaceChunk(Math.floor(x/16),Math.floor(z/16),directory,voidWorld);return chunk?.surface((x%16+16)%16,(z%16+16)%16,visibleOnly)??null;}
 export function materialColor(state){const id=state.replace('minecraft:','').split('[')[0];
  if(/water|bubble_column/.test(id))return 0x397ba8;if(/lava|fire/.test(id))return 0xd65b25;if(/snow|quartz|white_concrete|white_wool/.test(id))return 0xdce4e3;if(/sand|sandstone|end_stone/.test(id))return 0xc9bd88;if(/grass|moss/.test(id))return 0x738a4b;if(/leaves|vine|fern/.test(id))return 0x405f3b;if(/log|wood|planks|stairs|slab/.test(id)&&/oak|spruce|birch|jungle|acacia|mangrove|cherry/.test(id))return /dark_oak|spruce/.test(id)?0x69533b:0xa08658;if(/dirt|mud|farmland/.test(id))return 0x7f6950;if(/terracotta|bricks/.test(id))return 0xa77963;if(/glass/.test(id))return 0x99c2c2;if(/ice/.test(id))return 0x97bdcf;if(/deepslate|blackstone|basalt/.test(id))return 0x4f5357;return 0x8a8c85;
@@ -142,19 +153,41 @@ export function surfaceTile(tx,tz,level,cacheRoot,index=worldIndex(),sliceY=null
  const parts=index.regions.filter(r=>r.x*512<minX+span&&(r.x+1)*512>minX&&r.z*512<minZ+span&&(r.z+1)*512>minZ);
  const revision=createHash('sha256').update(JSON.stringify([index.world_uuid,index.minecraft,index.region_directory,index.void_world,parts.map(r=>[r.x,r.z,r.mtime,r.size])])+(sliceY===null?'':'/Y='+sliceY)).digest('hex');
  if(file&&fs.existsSync(file)){try{const old=JSON.parse(fs.readFileSync(file,'utf8'));if(old.version===3&&old.revision===revision)return old;}catch{}}
- const chunks=new Map(),colors=Array(size*size).fill(0),heights=Array(size*size).fill(null),availability=Array(size*size).fill(0);let known=0;
- for(let py=0;py<size;py++)for(let px=0;px<size;px++){
-  const x=minX+px*step+Math.floor(step/2),z=minZ+py*step+Math.floor(step/2),cx=Math.floor(x/16),cz=Math.floor(z/16),key=cx+','+cz;
-  if(!chunks.has(key)){try{chunks.set(key,readSurfaceChunk(cx,cz,index.directory,index.void_world));}catch{chunks.set(key,null);}}
-  const chunk=chunks.get(key),lx=(x%16+16)%16,lz=(z%16+16)%16;
-  let s;
-  if(sliceY===null)s=chunk?.surface(lx,lz,true);
-  else{
-   const state=chunk?.block(lx,sliceY,lz);
-   if(state){const empty=/^minecraft:(air|cave_air|void_air|barrier|structure_void|light)(\[|$)/.test(state);s={state,y:empty?null:sliceY,empty};}
+ // Map tiles scan many columns in the same .mca. Keep one region open and read its location table once.
+ const regions=new Map(parts.map(r=>[r.x+','+r.z,r.file]));
+ const missing=index.directory&&index.void_world?voidAirChunk:null;
+ let reader;
+ function readTileChunk(cx,cz){
+  const regionFile=regions.get(Math.floor(cx/32)+','+Math.floor(cz/32));
+  if(!regionFile)return missing&&!index.pristine_void?readSurfaceChunk(cx,cz,index.directory,index.void_world):surfaceChunk(missing);
+  if(reader?.file!==regionFile){
+   if(reader)fs.closeSync(reader.fd);
+   reader=null;
+   const fd=fs.openSync(regionFile,'r');
+   try{
+    const header=Buffer.alloc(4096),{size}=fs.fstatSync(fd);
+    if(size<8192||fs.readSync(fd,header,0,header.length,0)!==header.length)throw Error('Incomplete region table');
+    reader={file:regionFile,fd,size,header};
+   }catch(error){fs.closeSync(fd);throw error;}
   }
-  if(s){const i=py*size+px;colors[i]=s.empty?0:materialColor(s.state);heights[i]=s.y;availability[i]=s.empty?1:2;known++;}
+  const entry=reader.header.readUInt32BE(chunkLocationOffset(cx,cz));
+  return surfaceChunk(readChunkData(reader.fd,reader.size,entry,index.region_directory,cx,cz,missing));
  }
+ const chunks=new Map(),colors=Array(size*size).fill(0),heights=Array(size*size).fill(null),availability=Array(size*size).fill(0);let known=0;
+ try{
+  for(let py=0;py<size;py++)for(let px=0;px<size;px++){
+   const x=minX+px*step+Math.floor(step/2),z=minZ+py*step+Math.floor(step/2),cx=Math.floor(x/16),cz=Math.floor(z/16),key=cx+','+cz;
+   if(!chunks.has(key)){try{chunks.set(key,readTileChunk(cx,cz));}catch{chunks.set(key,null);}}
+   const chunk=chunks.get(key),lx=(x%16+16)%16,lz=(z%16+16)%16;
+   let s;
+   if(sliceY===null)s=chunk?.surface(lx,lz,true);
+   else{
+    const state=chunk?.block(lx,sliceY,lz);
+    if(state){const empty=/^minecraft:(air|cave_air|void_air|barrier|structure_void|light)(\[|$)/.test(state);s={state,y:empty?null:sliceY,empty};}
+   }
+   if(s){const i=py*size+px;colors[i]=s.empty?0:materialColor(s.state);heights[i]=s.y;availability[i]=s.empty?1:2;known++;}
+  }
+ }finally{if(reader)fs.closeSync(reader.fd);}
  const result={version:3,x:tx,z:tz,level,size,step,bounds:[minX,minZ,minX+span,minZ+span],colors,heights,availability,known,revision,source:sliceY===null?'saved_anvil_surface':'saved_anvil_slice',...(sliceY===null?{}:{slice_y:sliceY})};
  if(!file)return result;
  fs.mkdirSync(cacheRoot,{recursive:true});

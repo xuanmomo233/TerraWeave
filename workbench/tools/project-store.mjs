@@ -4,6 +4,7 @@ import {createHash,randomUUID} from 'node:crypto';
 
 const digest=value=>createHash('sha256').update(value).digest('hex');
 const valid=id=>typeof id==='string'&&/^[a-zA-Z0-9-]{1,99}$/.test(id);
+const deletedCapturePrefix='.deleted-';
 const time=r=>r.updated_at??r.captured_at??r.created_at??'';
 const shape=r=>JSON.stringify([r.world_uuid,r.label,r.bounds,r.loaded_bounds]);
 const signature=r=>JSON.stringify([r.snapshot_hash,r.label,r.notes??'',r.bounds,r.loaded_bounds,r.source]);
@@ -90,6 +91,27 @@ export function projectStore(root){
   const saved={id:randomUUID(),label:label||r.label,region_id:r.id,created_at:new Date().toISOString()};data.checkpoints.push(saved);atomic(manifest,data);return saved;
  }
  function saveWorkspace(label){const data=initialize();if(label!==undefined){if(typeof label!=='string'||!label.trim()||label.length>120)throw Error('Invalid project name');data.label=label.trim();}data.saved_at=new Date().toISOString();atomic(manifest,data);return {label:data.label,saved_at:data.saved_at};}
+ function deleteCaptures(ids){
+  if(!Array.isArray(ids)||!ids.length||!ids.every(valid))throw Error('无效的预览图片组');
+  const captureRoot=path.join(root,'captures');
+  const deleted_ids=[],failures=[];
+  const directory=fs.lstatSync(captureRoot,{throwIfNoEntry:false});
+  if(!directory)return {deleted_ids,failures};
+  if(!directory.isDirectory())throw Error('预览图片目录不可用');
+  const entries=new Map(fs.readdirSync(captureRoot,{withFileTypes:true}).map(entry=>[entry.name,entry]));
+  for(const id of new Set(ids)){
+   const entry=entries.get(id);
+   if(!entry)continue;
+   const batch=path.join(captureRoot,id);
+   try{
+    if(!entry.isDirectory()||!fs.lstatSync(path.join(batch,'capture.json'),{throwIfNoEntry:false})?.isFile())throw Error('预览图片组不可用');
+    // Detach the whole group before removing files so the gallery never sees a partial group.
+    fs.renameSync(batch,path.join(captureRoot,deletedCapturePrefix+id));
+    deleted_ids.push(id);
+   }catch(error){failures.push({capture_id:id,error:error.message});}
+  }
+  return {deleted_ids,failures};
+ }
  function cleanupAssets(purgeArchived=false,oldCaptures=false){
   const data=initialize(),allDrafts=files('drafts').map(n=>read(path.join(root,'drafts',n))),draftIds=new Set(allDrafts.map(d=>d.id)),archivedEntities=new Set(Object.values(data.regions).filter(e=>e.archived).map(e=>e.id)),archivedDrafts=new Set(allDrafts.filter(d=>d.archived).map(d=>d.id));
   const captureRoot=path.join(root,'captures'),captures=[];
@@ -128,8 +150,17 @@ export function projectStore(root){
   for(const filename of files('drafts')){const d=read(path.join(root,'drafts',filename));pending.push(d.base_region_id,d.preview_region_id);}
   for(const c of data.checkpoints)pending.push(c.region_id);
   const captureRoot=path.join(root,'captures');
-  if(fs.existsSync(captureRoot))for(const entry of fs.readdirSync(captureRoot,{withFileTypes:true}))if(entry.isDirectory()&&valid(entry.name)){
-   const file=path.join(captureRoot,entry.name,'capture.json');if(fs.existsSync(file))pending.push(read(file).region_id);
+  if(fs.existsSync(captureRoot)){
+   const canRemoveDeleted=fs.lstatSync(captureRoot).isDirectory();
+   for(const entry of fs.readdirSync(captureRoot,{withFileTypes:true})){
+    if(!entry.isDirectory())continue;
+    if(valid(entry.name)){
+     const file=path.join(captureRoot,entry.name,'capture.json');
+     if(fs.existsSync(file))pending.push(read(file).region_id);
+    }else if(canRemoveDeleted&&entry.name.startsWith(deletedCapturePrefix)&&valid(entry.name.slice(deletedCapturePrefix.length))){
+     fs.rmSync(path.join(captureRoot,entry.name),{recursive:true,force:true,maxRetries:2,retryDelay:50});
+    }
+   }
   }
   const previews=files('regions').map(n=>({name:n,record:read(path.join(root,'regions',n))})).filter(x=>(x.record.source==='design_draft'||x.record.transient)&&(!x.record.draft_id||fs.existsSync(path.join(root,'drafts',x.record.draft_id+'.json')))).sort((a,b)=>fs.statSync(path.join(root,'regions',b.name)).mtimeMs-fs.statSync(path.join(root,'regions',a.name)).mtimeMs);
   pending.push(...previews.slice(0,data.retention.preview_versions).map(x=>x.record.id));
@@ -143,5 +174,5 @@ export function projectStore(root){
   let bytes=0;for(const file of remove){bytes+=fs.statSync(file).size;fs.unlinkSync(file);}
   return {removed_files:remove.length,freed_bytes:bytes,...summary()};
  }
- return {initialize,decorate,resolve,entityFor,saveSnapshot,commit,savePreview,listRegions,revisions,checkpoint,saveWorkspace,archive,retention,cleanupAssets,summary,compact};
+ return {initialize,decorate,resolve,entityFor,saveSnapshot,commit,savePreview,listRegions,revisions,checkpoint,saveWorkspace,archive,retention,deleteCaptures,cleanupAssets,summary,compact};
 }

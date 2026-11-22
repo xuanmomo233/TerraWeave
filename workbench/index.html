@@ -107,7 +107,22 @@
     <div class="viewport-footer"><span id="control-hint">地图：拖动平移 · 右键旋转 · 滚轮缩放</span><span id="render-stats"></span></div>
    </div>
    <div class="splitter horizontal" data-resize="bottom" role="separator" aria-label="调整底部面板高度"></div>
-   <section class="bottom-dock"><div class="dock-bar"><div><button data-dock="history">编辑历史</button><button data-dock="gallery">预览图片</button><button data-dock="versions">区域版本</button></div><div class="dock-actions" id="dock-actions"></div></div><div class="dock-content" data-dock-pane="history" hidden><div class="history-actions"><span id="history-info">选择记录以撤销实际世界修改</span><button id="undo">撤销此操作</button><button id="redo">重做此操作</button></div><div id="history-list" class="history-rows"></div></div><div class="dock-content gallery-dock" data-dock-pane="gallery" hidden><div id="capture-strip" class="capture-strip"></div><div class="gallery-content"><span id="gallery-meta"></span><div id="gallery" class="gallery"></div></div></div><div class="dock-content" data-dock-pane="versions" hidden><div class="history-actions"><span>真实内容变化时才产生新版本</span><button id="checkpoint">保存检查点</button></div><div id="version-list" class="history-rows"></div></div></section>
+   <section class="bottom-dock">
+    <div class="dock-bar"><div><button data-dock="history">编辑历史</button><button data-dock="gallery">预览图片</button><button data-dock="versions">区域版本</button></div><div class="dock-actions" id="dock-actions"></div></div>
+    <div class="dock-content" data-dock-pane="history" hidden><div class="history-actions"><span id="history-info">选择记录以撤销实际世界修改</span><button id="undo">撤销此操作</button><button id="redo">重做此操作</button></div><div id="history-list" class="history-rows"></div></div>
+    <div class="dock-content gallery-dock" data-dock-pane="gallery" hidden>
+     <div id="capture-strip" class="capture-strip"></div>
+     <div class="gallery-content">
+      <div class="gallery-toolbar">
+       <span id="gallery-meta"></span>
+       <button id="capture-multi" type="button" aria-pressed="false">多选</button>
+       <button id="capture-delete" type="button">删除本组</button>
+      </div>
+      <div id="gallery" class="gallery"></div>
+     </div>
+    </div>
+    <div class="dock-content" data-dock-pane="versions" hidden><div class="history-actions"><span>真实内容变化时才产生新版本</span><button id="checkpoint">保存检查点</button></div><div id="version-list" class="history-rows"></div></div>
+   </section>
   </section>
   <div class="splitter vertical" data-resize="right" role="separator" aria-label="调整属性面板宽度"></div>
   <aside class="properties-panel"><div class="panel-title">属性<span id="object-kind"></span></div><div id="map-inspector"><section class="property-section"><h3 id="map-property-title">世界地图</h3><p id="map-world-info" class="property-summary"></p><div id="plan-fields" hidden><div class="plan-field-content"><label>名称<input id="plan-name"></label><label>所属图层<select id="plan-layer"></select></label><label>颜色<input id="plan-color" type="color" value="#5b9cec"></label><label id="plan-width-label">道路宽度<input id="plan-width" type="number" min="0.5" max="512" value="4"></label><label>规划说明<textarea id="plan-notes" rows="3"></textarea></label><div class="coords plan-height-range"><label>最低 Y<input id="plan-min-y" type="number" min="-64" max="319" step="1" aria-describedby="plan-height-help"></label><label>最高 Y<input id="plan-max-y" type="number" min="-64" max="319" step="1" aria-describedby="plan-height-help"></label></div><p class="hint" id="plan-height-help">两项都留空时使用地表高度。只填一项时，按该高度规划。</p><p id="plan-geometry" class="property-summary"></p><label class="checkbox"><input id="plan-visible" type="checkbox" checked>显示规划</label><div class="pending-edits" id="plan-pending-edits" hidden><span>未保存修改已暂存</span><button id="discard-plan-edits" type="button">放弃修改</button></div></div><div class="property-actions plan-actions">

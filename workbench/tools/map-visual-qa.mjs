@@ -41,6 +41,7 @@ const fixtureMap=mapService({
  displayRegion:(region,kind,navigation_id)=>send({kind,region,navigation_id,snapshot:viewSnapshots.get(region.snapshot_id)})
 });
 let job={id:'qa-map',kind:'map'},completion,reply,view,sequence=0,barrierWait=null,modelReads=0,clipboardText='',selectionDelay=0,browseReads=0,fullscreen=false,sceneAckHold,detailWait;const captures=[],openedPackFolders=[];
+const tileReads={started:0,completed:0,failed:0};
 const pickedDirectories=[path.join(fixture,'带空格的 存档'),null];
 async function send(request){job={id:'qa-'+(++sequence),...request};return new Promise(resolve=>completion=resolve);}
 async function bridge(command,args){
@@ -74,6 +75,16 @@ async function bridge(command,args){
    shaders:[...settings.shaders,unsupported,...(openedPackFolders.includes('shaderpacks')?[newShader]:[])]};
  }
  if(tool==='ui_snapshot'){const data=await callTool(tool,input);return {...data,drafts:[...draftFixture.values(),...data.drafts],planning:planner.execute('planning_state',{}),captures:[...captures,...data.captures]};}
+ if(tool==='delete_captures'){
+  const deleted_ids=[];
+  for(const id of input.capture_ids){
+   const index=captures.findIndex(c=>c.capture_id===id);
+   assert.notEqual(index,-1,'Only fixture captures may be deleted during UI QA');
+   captures.splice(index,1);
+   deleted_ids.push(id);
+  }
+  return {deleted_ids,failures:[]};
+ }
  if(draftFixture.has(input.draft_id)){
   const d=draftFixture.get(input.draft_id);
   if(tool==='update_draft'){
@@ -92,6 +103,11 @@ async function bridge(command,args){
  if(tool==='select_plan'&&selectionDelay)await new Promise(resolve=>setTimeout(resolve,selectionDelay));
  if(PLANNING_TOOLS.some(t=>t.name===tool))return planner.execute(tool,input);
  if(tool==='world_map_info')return {...await callTool(tool,input),view};
+ if(tool==='world_map_tile'){
+  tileReads.started++;
+  try{const tile=await fixtureMap.execute(tool,input);tileReads.completed++;return tile;}
+  catch(error){tileReads.failed++;throw error;}
+ }
  if(tool==='save_map_view'){view=input.view;return view;}
  if(tool==='list_captures')return [...captures,...await callTool(tool,input)];
  if(tool==='get_scene_view')return send({kind:'scene_view'});
@@ -126,8 +142,16 @@ const server=http.createServer(async(req,res)=>{
 await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));let browser;
 try{
  browser=await chromium.launch({headless:true,executablePath:'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',args:['--use-angle=swiftshader','--enable-unsafe-swiftshader','--disable-background-networking']});
+ const mapStarted=performance.now();
  const deviceScaleFactor=Number(process.env.TERRAWEAVE_QA_DPR??1.5),page=await browser.newPage({viewport:{width:1600,height:1000},deviceScaleFactor}),errors=[];page.on('pageerror',e=>errors.push(e.message));await page.goto('http://127.0.0.1:'+server.address().port);await page.waitForFunction(()=>window.__qaComplete>=1,{},{timeout:60000});if(reply?.ok!==true)throw Error(reply?.error??'Map failed to open');
- await page.waitForFunction(()=>document.querySelector('#map-loading').hidden,{},{timeout:90000});
+ try{await page.waitForFunction(()=>document.querySelector('#map-loading').hidden,{},{timeout:90000});}
+ catch(error){
+  const loading=await page.locator('#map-loading').textContent();
+  throw Error('地图加载未结束 · '+loading+' · '+JSON.stringify(tileReads)+' · 浏览器错误 '+JSON.stringify(errors),{cause:error});
+ }
+ assert.equal(tileReads.failed,0,'The opening map should load all requested terrain tiles');
+ const startupTerrain={elapsed_ms:Math.round(performance.now()-mapStarted),...tileReads};
+ console.log('地图加载 · '+JSON.stringify(startupTerrain));
  assert.equal(await page.locator('#window-titlebar').getByText('已连接存档').count(),0);
  await page.locator('[data-menu="file"]').click();
  assert.ok(await page.getByRole('menuitem',{name:/关闭当前标签页/}).isDisabled());
@@ -335,6 +359,28 @@ try{
  await page.setViewportSize(photoViewport);
  await page.locator('html').evaluate((root,font)=>root.style.setProperty('--ui-size',font),photoFont);
  const scene=await callTool('world_scene_info'),panorama=await send({kind:'capture_scene',scene,width:1280,height:800,angles:['isometric','south','top'],views:[],show_plans:false,planning_revision:planner.read().revision});assert.equal(reply.ok,true);assert.equal(panorama.images.length,3);assert.ok(panorama.scene_geometry.tiles.length);assert.equal(panorama.world_revision,scene.revision);assert.equal(panorama.scene_geometry.representation,'minecraft_block_models');assert.ok(Object.keys(panorama.scene_geometry.models).length>100);assert.ok(panorama.scene_geometry.atlas_png.startsWith('data:image/png;base64,'));assert.ok(panorama.scene_geometry.tiles.some(t=>t.groups.some(g=>g.state.includes('sugar_cane'))));
+ const captureRow=(id,tag='button')=>page.locator('#capture-strip '+tag+'[data-capture-id="'+id+'"]');
+ const removeCapture=page.locator('#capture-delete'),multiCapture=page.locator('#capture-multi');
+ const confirmRemoval=page.locator('#draft-action-submit');
+ const batchCaptures=captures.filter(c=>c!==currentImage);
+ assert.equal(batchCaptures.length,2);
+ await captureRow(currentImage.capture_id).click();
+ await removeCapture.click();
+ await page.locator('#draft-action-cancel').click();
+ assert.ok(await captureRow(currentImage.capture_id).isVisible());
+ await removeCapture.click();
+ await confirmRemoval.click();
+ await captureRow(currentImage.capture_id).waitFor({state:'detached'});
+ await multiCapture.click();
+ assert.ok(await removeCapture.isDisabled());
+ for(const group of batchCaptures)await captureRow(group.capture_id,'input').check();
+ assert.equal(await removeCapture.innerText(),'删除所选（2）');
+ await removeCapture.click();
+ assert.match(await page.locator('#draft-action-description').innerText(),/2 组预览图片/);
+ await confirmRemoval.click();
+ for(const group of batchCaptures)await captureRow(group.capture_id).waitFor({state:'detached'});
+ assert.ok(await removeCapture.isDisabled());
+ assert.equal(captures.length,0);
  const {PerspectiveCamera,Vector3}=await import('three');
  const lakePose={mode:'free',world_uuid:scene.world_uuid,position:[49,92,14],target:[49,59,14],up:[0,0,-1]};
  await send({kind:'world_scene',scene,camera:lakePose});
@@ -553,13 +599,20 @@ try{
  await page.locator('.planning-object .name').filter({hasText:anchorName}).first().click();
  let releaseDetail;
  detailWait=new Promise(resolve=>{releaseDetail=resolve;});
+ const readsBeforeCancel=browseReads;
+ const acknowledgementsBeforeCancel=await page.evaluate(()=>window.__qaComplete);
  try{
   await page.locator('#plan-detail').click();
   assert.equal(await page.locator('#detail-loading').isVisible(),true);
   assert.equal(await page.locator('#map-host').isHidden(),true);
+  for(let attempt=0;attempt<100&&browseReads===readsBeforeCancel;attempt++)await new Promise(resolve=>setTimeout(resolve,20));
+  assert.equal(browseReads,readsBeforeCancel+1,'The detail request must be held before cancelling');
   await page.locator('#cancel-detail').click();
+  await page.waitForFunction(()=>document.querySelector('#status').textContent==='已返回地图');
+  assert.equal(await page.locator('#map-host').isVisible(),true);
  }finally{detailWait=null;releaseDetail();}
- await page.waitForFunction(()=>document.querySelector('#status').textContent==='已返回地图');
+ await page.waitForFunction(count=>window.__qaComplete>count,acknowledgementsBeforeCancel);
+ assert.equal(reply.result?.cancelled,true,'The late detail response must be ignored');
  assert.equal(await page.locator('#map-host').isVisible(),true);
  await page.locator('#plan-detail').click();
  await page.waitForFunction(()=>document.querySelector('#detail-loading').hidden&&document.querySelector('#source-state').textContent==='实机三维',{},{timeout:30000});
@@ -775,5 +828,5 @@ try{
  await page.waitForFunction(() => document.querySelector('#detail-loading').hidden);
  assert.equal(browseReads, previousReads + 1);
  assert.deepEqual(errors,[]);
- const report={passed:true,scope:'isolated browser with actual saved-world terrain and temporary planning metadata',deviceScaleFactor,selection_feedback_ms:instant.ms,rapid_selection_persisted:true,app_context_menu:true,text_copy_paste_menu:true,browser_context_menu_suppressed:true,world_map:true,full_models_and_textures:true,free_camera:true,movement_does_not_refetch_or_rebuild:true,apply_camera_after_editing:true,wheel_sensitivity:true,wheel_burst_limited:true,orbit_wheel_bounded:true,current_view_photo:true,capture_input_frozen:true,local_capture_restores_document:true,blur_stops_camera_drag:true,cancel_preserves_plan:true,close_returns_to_map:true,resource_reuse:resourceSamples,panorama_views:3,panorama_surface_to_live_detail:true,large_area:true,polygon_route_marker:true,hide_delete_undo:true,rotation:37,resize_boundary:true,capture_restores_layout:true,scene_preview:true,barrier_icon:true,screenshots:out,errors};fs.writeFileSync(path.join(out,'workflow-report.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report,null,2));
+ const report={passed:true,scope:'isolated browser with actual saved-world terrain and temporary planning metadata',deviceScaleFactor,startup_terrain:startupTerrain,selection_feedback_ms:instant.ms,rapid_selection_persisted:true,app_context_menu:true,text_copy_paste_menu:true,browser_context_menu_suppressed:true,world_map:true,full_models_and_textures:true,free_camera:true,movement_does_not_refetch_or_rebuild:true,apply_camera_after_editing:true,wheel_sensitivity:true,wheel_burst_limited:true,orbit_wheel_bounded:true,current_view_photo:true,capture_group_deletion:true,capture_input_frozen:true,local_capture_restores_document:true,blur_stops_camera_drag:true,cancel_preserves_plan:true,close_returns_to_map:true,resource_reuse:resourceSamples,panorama_views:3,panorama_surface_to_live_detail:true,large_area:true,polygon_route_marker:true,hide_delete_undo:true,rotation:37,resize_boundary:true,capture_restores_layout:true,scene_preview:true,barrier_icon:true,screenshots:out,errors};fs.writeFileSync(path.join(out,'workflow-report.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report,null,2));
 }finally{await browser?.close();server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}

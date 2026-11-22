@@ -19,6 +19,8 @@ function sessionRegion(region){
 
 export function mountWorkspaceUI(context){
  let regions=[],drafts=[],history=[],captures=[],documents=[],activeKey='',busy=false,activeTool='select',activeDock=null,selectedHistory='',selectedCapture='',galleryEpoch=0,picked=null,versionsEpoch=0,macro=null,paletteHash;
+ let captureMulti=false;
+ const checkedCaptures=new Set();
  const currentDraft=()=>drafts.find(d=>d.id===context.getRegion()?.draft_id);
  const say=message=>{$('status').textContent=message;$('status').title=message;};
  let sessionRestored=false,sessionLoading=false;
@@ -113,6 +115,7 @@ export function mountWorkspaceUI(context){
    button.setAttribute('aria-pressed', String(current));
   }
   document.querySelectorAll('#document-tabs .close').forEach(e=>e.disabled=busy);
+  syncCaptureActions();
  }
  function outcome(result){if(result?.archived)return '已归档，可从项目大纲的「已归档」恢复';if(result?.edit){const e=result.edit;return '已修改 '+e.changed+' 处'+(e.conflict_count?'，保留 '+e.conflict_count+' 处冲突':'')+(result.preview_error?'；预览刷新失败：'+result.preview_error:'');}if(result?.images)return '已保存 '+result.images.length+' 张预览图片';if(result?.snapshot_hash)return '已打开「'+result.label+'」';if(result?.revision)return '草稿第 '+result.revision+' 版 · '+result.changed_positions+' 处改动'+(result.preview_error?'；已保存，预览未更新：'+result.preview_error:'');if(result?.freed_bytes!==undefined)return '已整理 '+result.removed_files+' 个缓存文件，释放 '+(result.freed_bytes/1048576).toFixed(2)+' MB';return '已完成';}
  async function run(fn,message='正在处理…'){
@@ -442,9 +445,22 @@ export function mountWorkspaceUI(context){
   if (!id) { $('version-list').textContent = '打开已保存的区域后可查看版本。'; return; }
   try{const list=await call('list_region_versions',{region_id:id});if(ticket!==versionsEpoch)return;for(const [index,item]of list.entries()){const row=document.createElement('div');row.className='history-row'+(item.id===id?' selected':'');row.append(text('span',String(index+1)),text('span',item.label,'title'),text('span',item.pinned?'检查点':'工作版本'),text('span',date(item.captured_at),'time'));row.onclick=()=>run(()=>call('open_region',{region_id:item.id}));$('version-list').append(row);}}catch(e){say(String(e));}}
  let shownCapture;
+ function syncCaptureActions(){
+  const toggle=$('capture-multi'),remove=$('capture-delete');
+  toggle.disabled=busy||!captures.length;
+  toggle.setAttribute('aria-pressed',String(captureMulti));
+  toggle.textContent=captureMulti?'退出多选':'多选';
+  remove.disabled=busy||(captureMulti?!checkedCaptures.size:!selectedCapture);
+  remove.textContent=captureMulti?'删除所选（'+checkedCaptures.size+'）':'删除本组';
+  for(const checkbox of $('capture-strip').querySelectorAll('input'))checkbox.disabled=busy;
+ }
  function renderCaptureStrip(){
-  const strip=$('capture-strip'),focusId=strip.contains(document.activeElement)?document.activeElement.dataset.captureId:null;
-  if(!captures.some(c=>c.capture_id===selectedCapture))selectedCapture=captures[0]?.capture_id??'';
+  const strip=$('capture-strip'),focused=document.activeElement;
+  const focusId=strip.contains(focused)?focused.dataset.captureId:null;
+  const visibleIds=new Set(captures.map(c=>c.capture_id));
+  if(!visibleIds.has(selectedCapture))selectedCapture=captures[0]?.capture_id??'';
+  for(const id of checkedCaptures)if(!visibleIds.has(id))checkedCaptures.delete(id);
+  if(!captures.length)captureMulti=false;
   strip.replaceChildren();
   for(const c of captures){
    const b=text('button',(c.document_title??'区域预览')+' · '+(c.created_at?new Date(c.created_at).toLocaleTimeString('zh-CN'):c.images.length+' 张'));
@@ -452,10 +468,50 @@ export function mountWorkspaceUI(context){
    b.classList.toggle('active',selectedCapture===c.capture_id);
    b.setAttribute('aria-pressed',String(selectedCapture===c.capture_id));
    b.onclick=()=>{selectedCapture=c.capture_id;showGallery();};
-   strip.append(b);
-   if(focusId===c.capture_id)b.focus({preventScroll:true});
+   const row=text('div','','capture-item');
+   if(captureMulti){
+    const checkbox=document.createElement('input');
+    checkbox.type='checkbox';
+    checkbox.dataset.captureId=c.capture_id;
+    checkbox.checked=checkedCaptures.has(c.capture_id);
+    checkbox.setAttribute('aria-label','选择 '+b.textContent);
+    checkbox.onchange=()=>{
+     if(checkbox.checked)checkedCaptures.add(c.capture_id);else checkedCaptures.delete(c.capture_id);
+     syncCaptureActions();
+    };
+    row.append(checkbox);
+   }
+   row.append(b);
+   strip.append(row);
+   if(focusId===c.capture_id)(row.querySelector(focused.localName)??b).focus({preventScroll:true});
   }
+  syncCaptureActions();
  }
+ $('capture-multi').onclick=()=>{
+  captureMulti=!captureMulti;
+  checkedCaptures.clear();
+  renderCaptureStrip();
+ };
+ $('capture-delete').onclick=()=>{
+  const ids=captureMulti?[...checkedCaptures]:[selectedCapture];
+  const selected=captures.filter(c=>ids.includes(c.capture_id));
+  if(!selected.length)return;
+  const groups=selected.length;
+  const pictures=selected.reduce((count,c)=>count+c.images.length,0);
+  const subject=groups===1?'「'+(selected[0].document_title??'区域预览')+'」这组预览图片':groups+' 组预览图片';
+  openNamedAction({action:'delete',name:'',kind:'预览图片',deleteLabel:'删除',
+   description:'将删除'+subject+'，共 '+pictures+' 张。',
+   confirm:async()=>{
+    const result=await run(async()=>{
+     const deleted=await call('delete_captures',{capture_ids:selected.map(c=>c.capture_id)});
+     let message='已删除 '+deleted.deleted_ids.length+' 组预览图片';
+     if(deleted.failures.length)message+='，'+deleted.failures.length+' 组删除失败：'+deleted.failures[0].error;
+     if(deleted.storage_warning)message+='，清理存储失败：'+deleted.storage_warning;
+     return {message};
+    },'正在删除预览图片…');
+    if(result)($('capture-multi').disabled?document.querySelector('[data-dock="gallery"]'):$('capture-multi')).focus();
+   }});
+ };
  async function showGallery(){
   renderCaptureStrip();
   if(shownCapture===selectedCapture)return;

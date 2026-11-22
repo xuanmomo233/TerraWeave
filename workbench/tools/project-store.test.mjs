@@ -47,3 +47,24 @@ test('explicit old-asset cleanup removes archived objects and keeps the latest a
  for(const [id,owner]of [['100-old',active],['200-new',active],['300-retired',old]]){const dir=path.join(root,'captures',id);fs.mkdirSync(dir,{recursive:true});fs.writeFileSync(path.join(dir,'capture.json'),JSON.stringify({region_id:owner.id}));}
  const result=store.cleanupAssets(true,true);store.compact();assert.equal(result.removed_assets,2);assert.equal(store.listRegions(true).length,1);assert.ok(fs.existsSync(path.join(root,'captures','200-new')));assert.equal(fs.existsSync(path.join(root,'captures','100-old')),false);
 }));
+
+test('deleting selected capture groups releases only snapshots with no surviving reference',()=>fixture((root,store)=>{
+ store.retention(1,0);
+ const shared=store.savePreview(record('shared',store.saveSnapshot(snapshot('minecraft:stone')),{transient:true}));
+ const unique=store.savePreview(record('unique',store.saveSnapshot(snapshot('minecraft:dirt')),{transient:true}));
+ for(const [id,owner] of [['keep',shared],['remove-shared',shared],['remove-unique',unique]]){
+  const dir=path.join(root,'captures',id);
+  fs.mkdirSync(dir,{recursive:true});
+  fs.writeFileSync(path.join(dir,'capture.json'),JSON.stringify({region_id:owner.id}));
+  fs.writeFileSync(path.join(dir,'view-0.png'),'fixture');
+ }
+ assert.throws(()=>store.deleteCaptures(['keep','../snapshots']),/无效的预览图片组/);
+ assert.deepEqual(store.deleteCaptures(['remove-shared','remove-unique','remove-shared','missing']),{
+  deleted_ids:['remove-shared','remove-unique'],failures:[]
+ });
+ store.compact();
+ assert.deepEqual(fs.readdirSync(path.join(root,'captures')),['keep']);
+ assert.ok(fs.existsSync(path.join(root,'captures','keep','view-0.png')));
+ assert.deepEqual(fs.readdirSync(path.join(root,'snapshots')),[shared.snapshot_id+'.json']);
+ assert.deepEqual(store.deleteCaptures(['remove-unique']),{deleted_ids:[],failures:[]});
+}));
