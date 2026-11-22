@@ -55,7 +55,16 @@ async function bridge(command,args){
  }
  if(command==='workbench_clipboard'){if(args.text!==undefined){clipboardText=args.text;return '';}return clipboardText;}
  if(command==='open_pack_folder'){assert.ok(['resourcepacks','shaderpacks'].includes(args.kind));openedPackFolders.push(args.kind);return null;}
- if(command==='read_asset'){if(args.name.endsWith('item/barrier.png')&&barrierWait)await barrierWait;const file=path.resolve(PROJECT,'assets',args.name);if(!file.startsWith(path.join(PROJECT,'assets')+path.sep))throw Error('Invalid fixture asset');const bytes=fs.readFileSync(file);return args.name.endsWith('.png')?'data:image/png;base64,'+bytes.toString('base64'):bytes.toString('utf8');}
+ if(command==='read_asset'){
+  if(args.name.endsWith('item/barrier.png')&&barrierWait)await barrierWait;
+  const file=path.resolve(PROJECT,'assets',args.name);
+  if(!file.startsWith(path.join(PROJECT,'assets')+path.sep))throw Error('Invalid fixture asset');
+  const bytes=fs.readFileSync(file);
+  if(!args.name.endsWith('.png'))return bytes.toString('utf8');
+  const url='data:image/png;base64,'+bytes.toString('base64');
+  const sidecar=file+'.mcmeta';
+  return args.includeAnimation?JSON.stringify({url,animation:fs.existsSync(sidecar)?JSON.parse(fs.readFileSync(sidecar,'utf8')).animation:null}):url;
+ }
  if(command==='workbench_read_image'){const own=captures.find(c=>c.capture_id===args.captureId);if(own)return 'data:image/png;base64,'+fs.readFileSync(own.images[args.index].path).toString('base64');const c=await callTool('read_capture',{capture_id:args.captureId});return 'data:image/png;base64,'+fs.readFileSync(c.images[args.index].path).toString('base64');}
  if(command==='workbench_complete'){
   reply=args.result;const request=job;job=null;const result={...request?.region,...args.result.result,desktop_acknowledged:true};
@@ -325,7 +334,8 @@ try{
  assert.ok(fullscreenPose.render_stats.viewport_frames>appliedPose.render_stats.viewport_frames);
  await page.waitForTimeout(400);
  const idlePose=await send({kind:'scene_view'});
- assert.equal(idlePose.render_stats.viewport_frames,fullscreenPose.render_stats.viewport_frames);
+ const frames=pose=>pose.render_stats.viewport_frames-pose.render_stats.texture_animation_frames;
+ assert.equal(frames(idlePose),frames(fullscreenPose));
  await screenButton.click();
  await waitForFullscreen(false);
  assert.equal(fullscreen,false);

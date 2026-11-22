@@ -36,6 +36,17 @@ function signSide(data){
 }
 
 export function blockEntityAppearance(entity){
+ if(entity?.id==='minecraft:piston'){
+  const moved=entity.blockState??entity.BlockState;
+  if(!/^minecraft:[a-z0-9_]+$/.test(moved?.Name))return undefined;
+  const fields=Object.entries(moved.Properties??{}).filter(([name,value])=>/^[a-z0-9_]+$/.test(name)&&/^[a-z0-9_-]+$/.test(value)).sort();
+  const state=moved.Name+(fields.length?'['+fields.map(pair=>pair.join('=')).join(',')+']':'');
+  return {kind:'moving_piston',state,progress:Number.isFinite(entity.progress)?Math.max(0,Math.min(1,entity.progress)):1,extending:!!entity.extending};
+ }
+ if(entity?.id==='minecraft:decorated_pot'){
+  const sherds=entity.sherds??entity.shards??[];
+  return {kind:'decorated_pot',sherds:Array.isArray(sherds)?sherds.slice(0,4).map(item=>/^minecraft:([a-z0-9_]+)_pottery_sherd$/.exec(item)?.[1]??null):[]};
+ }
  if(entity?.id==='minecraft:banner'){
   const layers=entity.patterns??entity.Patterns;
   const patterns=(Array.isArray(layers)?layers:[]).slice(0,16).flatMap(layer=>{

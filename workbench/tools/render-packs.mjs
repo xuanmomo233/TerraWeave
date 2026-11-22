@@ -4,7 +4,8 @@ import {createHash,randomUUID} from 'node:crypto';
 import {inflateRawSync} from 'node:zlib';
 import {checkIrisSupport,nativeIrisSources} from './iris-runtime.mjs';
 
-const resource=/^assets\/minecraft\/(?:blockstates\/[a-z0-9_/-]+\.json|models\/[a-z0-9_/-]+\.json|textures\/[a-z0-9_/-]+\.png)$/;
+export const animationMetadata=/^assets\/minecraft\/textures\/[a-z0-9_/-]+\.png\.mcmeta$/;
+const resource=/^assets\/minecraft\/(?:blockstates\/[a-z0-9_/-]+\.json|models\/[a-z0-9_/-]+\.json|textures\/[a-z0-9_/-]+\.png(?:\.mcmeta)?)$/;
 const read=(file,fallback)=>{
  try{return JSON.parse(fs.readFileSync(file,'utf8'));}catch(e){if(e.code==='ENOENT')return fallback;throw e;}
 };
@@ -68,6 +69,31 @@ function extractPack(bytes,target){
   fs.writeFileSync(to,data,{flag:'wx'});
  });
  if(!imported)throw Error('未找到可导入的 Minecraft 方块资源');
+ fs.writeFileSync(path.join(target,'.animation-metadata'),'1');
+}
+
+// Backfill only derived files for previously imported ZIPs. Keep the selected stack and the source ZIP untouched.
+export function ensurePackAnimationMetadata(assets){
+ const {roots=[],pack_order:order=[]}=read(path.join(assets,'render-settings.json'),{});
+ for(const [i,relative] of roots.entries()){
+  if(!/^render-pack-cache\/[a-f0-9]{64}$/.test(relative))continue;
+  const destination=path.join(assets,relative),marker=path.join(destination,'.animation-metadata'),name=order[i];
+  if(fs.existsSync(marker)||typeof name!=='string'||path.basename(name)!==name)continue;
+  const archive=path.join(assets,'resourcepacks',name),stat=fs.statSync(archive,{throwIfNoEntry:false});
+  if(!stat?.isFile()||stat.size>256_000_000||!fs.existsSync(destination))continue;
+  const bytes=fs.readFileSync(archive);
+  if(createHash('sha256').update(bytes).digest('hex')!==path.basename(relative))continue;
+  visitZipEntries(bytes,entry=>animationMetadata.test(entry),(entry,data)=>{
+   const target=path.join(destination,entry.slice(7));
+   if(!fs.existsSync(target.slice(0,-7))||fs.existsSync(target))return;
+   const pending=target+'.pending-'+randomUUID();
+   fs.writeFileSync(pending,data,{flag:'wx'});
+   try{fs.renameSync(pending,target);}
+   catch(error){if(!fs.existsSync(target)||!fs.readFileSync(target).equals(data))throw error;}
+   finally{if(fs.existsSync(pending))fs.unlinkSync(pending);}
+  });
+  fs.writeFileSync(marker,'1');
+ }
 }
 
 export function saveRenderSettings(assets,args,minecraft){

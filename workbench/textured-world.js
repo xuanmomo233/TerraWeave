@@ -1,19 +1,37 @@
 import * as THREE from 'three';
 import {awaitTextures} from './model-terrain.js';
+import {updateAnimatedTexture} from './texture-animation.js';
 
 export function createTextureAtlas(materials){
-  const maps=[...new Set([...materials].map(m=>m.map).filter(Boolean))],tileSize=Math.max(16,...maps.map(m=>m.image.width)),cell=tileSize+4,dimension=2**Math.ceil(Math.log2(Math.ceil(Math.sqrt(maps.length+1))*cell)),canvas=document.createElement('canvas');canvas.width=canvas.height=dimension;const c=canvas.getContext('2d');c.imageSmoothingEnabled=false;c.fillStyle='#ffffff';c.fillRect(2,2,tileSize,tileSize);const rects=new Map();
-  maps.forEach((map,i)=>{const x=(i+1)%Math.floor(dimension/cell)*cell,y=Math.floor((i+1)/Math.floor(dimension/cell))*cell,img=map.image;c.drawImage(img,0,0,img.width,map.userData.frameHeight??img.height,x+2,y+2,tileSize,tileSize);rects.set(map,{x:x+2.5,y:y+2.5,w:tileSize-1,h:tileSize-1});});
-  const texture=new THREE.CanvasTexture(canvas);texture.colorSpace=THREE.SRGBColorSpace;texture.magFilter=THREE.NearestFilter;texture.minFilter=THREE.NearestFilter;texture.generateMipmaps=false;return {texture,canvas,rects,dimension,white:{x:2.5,y:2.5,w:tileSize-1,h:tileSize-1}};
+  const maps=[...new Set([...materials].map(m=>m.map).filter(Boolean))],tileSize=Math.max(16,...maps.map(m=>m.image.width)),cell=tileSize+4,dimension=2**Math.ceil(Math.log2(Math.ceil(Math.sqrt(maps.length+1))*cell)),canvas=document.createElement('canvas');canvas.width=canvas.height=dimension;const c=canvas.getContext('2d');c.imageSmoothingEnabled=false;c.fillStyle='#ffffff';c.fillRect(2,2,tileSize,tileSize);const rects=new Map(),animated=[];
+  const columns=Math.floor(dimension/cell);
+  function draw(map,x,y){c.clearRect(x,y,tileSize,tileSize);c.drawImage(map.image,x,y,tileSize,tileSize);}
+  maps.forEach((map,i)=>{
+   const x=(i+1)%columns*cell+2,y=Math.floor((i+1)/columns)*cell+2;
+   draw(map,x,y);rects.set(map,{x:x+.5,y:y+.5,w:tileSize-1,h:tileSize-1});
+   if(map.userData.animation)animated.push({map,x,y,version:map.version});
+  });
+  const texture=new THREE.CanvasTexture(canvas);texture.colorSpace=THREE.SRGBColorSpace;texture.magFilter=THREE.NearestFilter;texture.minFilter=THREE.NearestFilter;texture.generateMipmaps=false;
+  function animate(now){
+   let changed=false;
+   for(const entry of animated){
+    updateAnimatedTexture(entry.map,now);
+    if(entry.version===entry.map.version)continue;
+    draw(entry.map,entry.x,entry.y);entry.version=entry.map.version;changed=true;
+   }
+   if(changed)texture.needsUpdate=true;
+   return changed;
+  }
+  return {texture,canvas,rects,dimension,animate,white:{x:2.5,y:2.5,w:tileSize-1,h:tileSize-1}};
 }
 
 const MAX_RESIDENT_TILES=64;
 const MAX_RESIDENT_VERTICES=5_200_000;
 const helper=s=>/^minecraft:(barrier|structure_void|light)(\[|$)/.test(s);
-export const modelGroupKey=(g,minecraft)=>JSON.stringify([minecraft,g.state,g.mask,g.fluid_mask,g.fluid_corners,g.block_entity]);
+export const modelGroupKey=(g,minecraft)=>JSON.stringify([minecraft,g.state,g.mask,g.fluid_mask,g.fluid_corners,g.block_entity,g.variantIndices]);
 const keyFor=modelGroupKey;
 export class TexturedWorld{
- constructor(scene,call,parts,progress=()=>{}){this.scene=scene;this.call=call;this.parts=parts;this.progress=progress;this.meshes=new Map();this.cache=new Map();this.prepared=new Map();this.lookups=new Map();this.enabled=false;this.showInvisible=false;this.info=null;this.signature='';this.generation=0;this.loading=null;this.atlas=null;this.materials=new Map();this.markerMaterial=new THREE.PointsMaterial({size:1.1,transparent:true,alphaTest:.1,depthWrite:false});this.uniforms={active:{value:false},min:{value:new THREE.Vector3()},max:{value:new THREE.Vector3()}};}
+ constructor(scene,call,parts,progress=()=>{},chooseVariants){this.scene=scene;this.call=call;this.parts=parts;this.progress=progress;this.chooseVariants=chooseVariants;this.meshes=new Map();this.cache=new Map();this.prepared=new Map();this.lookups=new Map();this.enabled=false;this.showInvisible=false;this.info=null;this.signature='';this.generation=0;this.loading=null;this.atlas=null;this.materials=new Map();this.markerMaterial=new THREE.PointsMaterial({size:1.1,transparent:true,alphaTest:.1,depthWrite:false});this.uniforms={active:{value:false},min:{value:new THREE.Vector3()},max:{value:new THREE.Vector3()}};}
  async initialize(info){const generation=this.generation;if(!info){if(!this.infoRequest)this.infoRequest=this.call('world_scene_info',{preview:true}).finally(()=>this.infoRequest=null);info=await this.infoRequest;if(generation!==this.generation&&this.info)return this.info;}if(this.info?.revision!==info.revision){this.generation++;this.cache.clear();this.signature='';}else if(this.info?.preview_index&&!info.preview_index)this.generation++;this.info=info;this.tiles=this.indexTiles(info);return this.info;}
  setShowInvisible(value,map){this.showInvisible=value;if(map&&this.markerMaterial.map!==map){this.markerMaterial.map=map;this.markerMaterial.needsUpdate=true;}for(const group of this.meshes.values())for(const child of group.children)if(child.isPoints)child.visible=value;}
  dispose(group){for(const child of group.children)child.geometry.dispose();}
@@ -48,12 +66,26 @@ export class TexturedWorld{
    .reduce((count,part)=>count+(part.geometry.index?.count??part.geometry.getAttribute('position').count),0),0);
  }
  async tile(t){const revision=this.info.revision,key=revision+':'+t.key;if(this.cache.has(key)){const data=this.cache.get(key);this.cache.delete(key);this.cache.set(key,data);return data;}const data=await this.call('world_model_tile',{x:t.x,z:t.z,world_revision:revision});if(this.info?.revision===revision){this.cache.set(key,data);while(this.cache.size>192)this.cache.delete(this.cache.keys().next().value);}return data;}
- async prepare(data,current=()=>true){for(const g of data.groups){if(!current())return;if(helper(g.state))continue;const key=keyFor(g,data.minecraft);if(!this.prepared.has(key))this.prepared.set(key,await this.parts(g.state,{minecraft:data.minecraft,occlusionMask:g.mask,fluidMask:g.fluid_mask,fluidCorners:g.fluid_corners,blockEntity:g.block_entity}));}}
+ async prepare(data,current=()=>true){
+  const groups=[],position=n=>[n%32+data.bounds[0],Math.floor(n/1024)-64,Math.floor(n/32)%32+data.bounds[2]];
+  for(const g of data.groups){
+   if(!current())return;
+   if(helper(g.state)){groups.push(g);continue;}
+   const choices=this.chooseVariants?await this.chooseVariants(g.state,g.positions,position,data.minecraft):[{items:g.positions}];
+   for(const {indices,items} of choices){
+    if(!current())return;
+    const chosen=indices?{...g,positions:items,variantIndices:indices}:g,key=keyFor(chosen,data.minecraft);
+    if(!this.prepared.has(key))this.prepared.set(key,await this.parts(g.state,{minecraft:data.minecraft,occlusionMask:g.mask,fluidMask:g.fluid_mask,fluidCorners:g.fluid_corners,blockEntity:g.block_entity,variantIndices:indices}));
+    groups.push(chosen);
+   }
+  }
+  return {...data,groups};
+ }
  createAtlas(data){
   const materials=new Set();for(const tile of data)for(const group of tile.groups)for(const part of this.prepared.get(keyFor(group,tile.minecraft))??[])materials.add(part.material);
   return createTextureAtlas(materials);
  }
- style(material){return JSON.stringify([material.transparent??false,material.opacity??1,material.side??0,material.wireframe??false,material.emissiveIntensity??0,material.emissive?.getHex()??0]);}
+ style(material){return JSON.stringify([material.transparent??false,material.opacity??1,material.side??0,material.wireframe??false,material.emissiveIntensity??0,material.emissive?.getHex()??0,material.alphaTest??.1,material.depthWrite??true]);}
  atlasMaterial(source,resources=this){const key=this.style(source);if(!resources.materials.has(key)){const m=new THREE.MeshLambertMaterial({map:resources.atlas.texture,vertexColors:true,alphaTest:source.alphaTest??.1,transparent:source.transparent??false,opacity:source.opacity??1,depthWrite:source.depthWrite??true,side:source.side??THREE.FrontSide,wireframe:source.wireframe??false});if(source.emissive?.getHex()){m.emissive.copy(source.emissive);m.emissiveIntensity=source.emissiveIntensity;m.emissiveMap=resources.atlas.texture;}m.onBeforeCompile=shader=>{Object.assign(shader.uniforms,{previewCut:this.uniforms.active,previewMin:this.uniforms.min,previewMax:this.uniforms.max});shader.vertexShader='attribute vec3 blockOrigin;varying vec3 vPreviewOwner;\n'+shader.vertexShader;shader.vertexShader=shader.vertexShader.replace('#include <worldpos_vertex>','#include <worldpos_vertex>\nvPreviewOwner=(modelMatrix*vec4(blockOrigin,1.0)).xyz;');shader.fragmentShader='varying vec3 vPreviewOwner;uniform bool previewCut;uniform vec3 previewMin;uniform vec3 previewMax;\n'+shader.fragmentShader;shader.fragmentShader=shader.fragmentShader.replace('#include <dithering_fragment>','vec3 owner=floor(vPreviewOwner+vec3(0.5));if(previewCut&&all(greaterThanEqual(owner,previewMin))&&all(lessThan(owner,previewMax)))discard;\n#include <dithering_fragment>');};resources.materials.set(key,m);}return resources.materials.get(key);}
  bake(tile,origin,resources=this){const atlas=resources.atlas;
   const buckets=new Map(),lookup=new Map(),markers=[];for(const g of tile.groups){for(const p of g.positions)lookup.set(p,g.state);if(helper(g.state)){if(g.state==='minecraft:barrier')for(const p of g.positions)markers.push(p%32+tile.bounds[0]+.5-origin[0],Math.floor(p/1024)-63.5-origin[1],Math.floor(p/32)%32+tile.bounds[2]+.5-origin[2]);continue;}
@@ -88,9 +120,9 @@ export class TexturedWorld{
    while(cursor<wanted.length&&current()){
     const index=cursor++,tile=await this.tile(wanted[index]);
     if(!current())return;
-    await this.prepare(tile,current);
+    const prepared=await this.prepare(tile,current);
     if(!current())return;
-    data[index]=tile;
+    data[index]=prepared??tile;
     this.progress(++finished,wanted.length*2);
    }
   };
@@ -143,6 +175,7 @@ export class TexturedWorld{
  }
  stateAt(x,y,z){const key=Math.floor(x/32)+','+Math.floor(z/32),encoded=(y+64)*1024+((z%32+32)%32)*32+(x%32+32)%32;return this.lookups.get(key)?.get(encoded);}
  meshList(){return [...this.meshes.values()].flatMap(group=>group.children.filter(child=>child.isMesh));}
+ animate(now){return this.enabled&&(this.atlas?.animate?.(now)??false);}
  hitBlock(hit){const encoded=hit.object.userData.owners[hit.faceIndex],b=hit.object.userData.tile.bounds,coordinate=[encoded%32+b[0],Math.floor(encoded/1024)-64,Math.floor(encoded/32)%32+b[2]];return {coordinate,state:this.stateAt(...coordinate),appearance:hit.object.userData.tile.block_entities?.[coordinate.join()],normal:hit.face.normal.toArray()};}
  evidence(geometry=true){const tiles=[...this.meshes.values()].map(g=>g.userData.tile);if(!geometry)return {tiles};const keys=new Set(tiles.flatMap(t=>t.groups.filter(g=>!helper(g.state)).map(group=>keyFor(group,t.minecraft)))),models={};for(const key of keys)models[key]=(this.prepared.get(key)??[]).map(p=>({position:Array.from(p.geometry.getAttribute('position').array),normal:Array.from(p.geometry.getAttribute('normal')?.array??[]),uv:Array.from(p.geometry.getAttribute('uv')?.array??[]),index:p.geometry.index?Array.from(p.geometry.index.array):undefined,color:p.material.color?.getHex(),style:this.style(p.material),atlas_rect:this.atlas.rects.get(p.material.map)??this.atlas.white}));return {world_revision:this.info.revision,tiles,models,atlas_png:this.atlas.canvas.toDataURL('image/png'),representation:'minecraft_block_models',source:'saved_anvil_exact_models'};}
 }

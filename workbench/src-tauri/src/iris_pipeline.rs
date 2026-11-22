@@ -45,6 +45,8 @@ pub struct DrawFrame {
     pub in_swamp: f32,
     pub eye_in_water: i32,
     #[serde(default)]
+    pub atlas_update: Option<String>,
+    #[serde(default)]
     pub reset_history: bool,
     #[serde(default = "single_sample")]
     pub samples: u8,
@@ -1015,9 +1017,12 @@ impl Engine {
         self.resources = Some(Resources::new(compiled, scene)?);
         Ok(json!({"compiled_programs":count,"driver":driver()}))
     }
-    pub fn draw(&mut self, frame: DrawFrame) -> Result<Vec<u8>, String> {
+    pub fn draw(&mut self, mut frame: DrawFrame) -> Result<Vec<u8>, String> {
         frame.validate()?;
         let state = self.resources.as_mut().ok_or("尚未打开离线光影场景")?;
+        if let Some(atlas) = frame.atlas_update.take() {
+            state.scene.atlas = Texture::png(&atlas)?;
+        }
         let new_buffers=state
             .buffers
             .as_ref()

@@ -57,7 +57,7 @@ function lightPositions(data){
  return [...keys].sort().map(key=>key.split(',').map(Number));
 }
 
-async function collectScene({lod,chunks,snapshot,region},inputs){
+async function collectScene({lod,chunks,snapshot,region},inputs,animationTime){
  const items=[],missing=new Set();
  for(const group of lod.enabled?lod.meshes.values():[]){
   const tile=group.userData.tile;
@@ -82,6 +82,7 @@ async function collectScene({lod,chunks,snapshot,region},inputs){
  const shared=lod.atlas&&items.every(item=>!item.material.map||lod.atlas.rects.has(item.material.map));
  const textureAtlas=shared?lod.atlas:createTextureAtlas(items.map(item=>item.material));
  try {
+  textureAtlas.animate(animationTime);
   const {dimension,rects,canvas}=textureAtlas,models=[],batches=[],cache=new Map(),ids=new Map();
   for(const {geometry,material,state,positions} of items){
    const water=!!material.userData.water;
@@ -102,8 +103,8 @@ async function collectScene({lod,chunks,snapshot,region},inputs){
    batches.push({model,positions,entity:ids.get(idKey)});
   }
   const [sun,moon]=await celestialTextures(snapshot.minecraft);
-  return {scene:{models,batches,atlas:canvas.toDataURL('image/png'),sun,moon,light:inputs.world.chunks,origin:snapshot.bounds.slice(0,3)},missing:[...missing]};
- }finally{if(!shared)textureAtlas.texture.dispose();}
+  return {scene:{models,batches,atlas:canvas.toDataURL('image/png'),sun,moon,light:inputs.world.chunks,origin:snapshot.bounds.slice(0,3)},missing:[...missing],atlas:textureAtlas,ownsAtlas:!shared};
+ }catch(error){if(!shared)textureAtlas.texture.dispose();throw error;}
 }
 
 function celestial(dayTime,tilt){
@@ -166,6 +167,8 @@ export class OfflineIrisView{
   return this.active&&!document.hidden&&!this.canvas.hidden&&!this.pending&&now>=this.nextFrameAt;
  }
  configure(id){
+  if(this.ownsAtlas)this.atlas?.texture.dispose();
+  this.atlas=null;this.ownsAtlas=false;
   this.shader=id?.toLowerCase().endsWith('.zip')?id:null;
   this.key='';this.inputs=null;this.inputsKey='';
   this.presented=null;
@@ -174,6 +177,7 @@ export class OfflineIrisView{
  }
  async draw(data,{exportFrame=false}={}){
   const {key,snapshot,region,camera,lod}=data;
+  const animationTime=data.animationTime??performance.now();
   const environment=data.environment_revision??lod.info?.environment_revision??region.environment_revision;
   const source=data.world_revision??(lod.enabled?lod.info?.revision:undefined);
   const lightKey=JSON.stringify([this.shader,region.world_uuid,environment,source,lod.signature,snapshot.bounds]);
@@ -185,17 +189,25 @@ export class OfflineIrisView{
   if(inputs.world.world_uuid!==region.world_uuid)throw Error('原版光影输入与当前存档不一致');
   const renderKey=key+':'+inputs.world.environment_revision;
   if(this.key!==renderKey){
-   const {scene,missing}=await collectScene(data,inputs);
-   await invoke('iris_prepare',{pack:inputs.pack,scene});
-   this.missing=missing;
+   const prepared=await collectScene(data,inputs,animationTime);
+   try{await invoke('iris_prepare',{pack:inputs.pack,scene:prepared.scene});}
+   catch(error){if(prepared.ownsAtlas)prepared.atlas.texture.dispose();throw error;}
+   if(this.ownsAtlas)this.atlas?.texture.dispose();
+   this.atlas=prepared.atlas;this.ownsAtlas=prepared.ownsAtlas;
+   this.atlasVersion=this.atlas.texture.version;
+   this.missing=prepared.missing;
    this.key=renderKey;
   }
   const scale=exportFrame?1:Math.min(1,1920/Math.max(data.width,data.height));
   const width=Math.max(1,Math.floor(data.width*scale)),height=Math.max(1,Math.floor(data.height*scale));
   const frameCamera=exportFrame?camera:camera.clone();
   const frame=frameData(frameCamera,region,snapshot,lod,inputs,width,height,this.start);
+  this.atlas.animate(animationTime);
+  const atlasVersion=this.atlas.texture.version;
+  if(atlasVersion!==this.atlasVersion)frame.atlas_update=this.atlas.canvas.toDataURL('image/png');
   if(exportFrame){frame.reset_history=true;frame.samples=8;}
   const rgba=await invoke('iris_draw',{frame});
+  this.atlasVersion=atlasVersion;
   if(exportFrame){
    const output=document.createElement('canvas');
    output.width=width;output.height=height;

@@ -52,8 +52,68 @@ function signModel(id,props,makeMaterial,appearance){
  }
  return result;
 }
+
+function bedModel(id,props,makeMaterial){
+ const head=props.part==='head',color=id.slice(0,-4);
+ const mattress=cuboid([1,1,6/16],[0,0,0],[16,16,6],[0,head?0:22])
+  .rotateX(Math.PI/2).translate(.5,6/16,.5);
+ const legs=[3/32,29/32].map(x=>new THREE.BoxGeometry(3/16,3/16,3/16).translate(x,3/32,head?3/32:29/32));
+ return [
+  {geometry:orient(mattress,props.facing),material:makeMaterial('entity/bed/'+color,id,false)},
+  {geometry:orient(mergeGeometries(legs),props.facing),material:makeMaterial('block/oak_planks',id,false)},
+ ];
+}
+
+const skullTextures={skeleton:'skeleton/skeleton',wither_skeleton:'skeleton/wither_skeleton',zombie:'zombie/zombie',
+ creeper:'creeper/creeper',piglin:'piglin/piglin',dragon:'enderdragon/dragon',player:'player/wide/steve'};
+function skullModel(id,props,makeMaterial){
+ const kind=id.replace(/(?:_wall)?_(?:skull|head)$/,''),wall=!!props.facing;
+ const dimension=kind==='dragon'?[256,256]:['skeleton','wither_skeleton'].includes(kind)?[64,32]:[64,64];
+ const box=kind==='dragon'?[16,16,16]:[8,8,8],z=wall?.75:.5,y=wall?.5:box[1]/32;
+ const part=(units,center,uv)=>cuboid(units.map(n=>n/16),center,units,uv,dimension);
+ const components=[part(box,[.5,y,z],kind==='dragon'?[112,30]:[0,0])];
+ if(kind==='piglin'){
+  components.push(part([4,3,1],[.5,y-.08,z-.28],[31,1]));
+  for(const x of [.18,.82])components.push(part([2,4,3],[x,y+.04,z],[50,0]));
+ }
+ if(kind==='dragon'){
+  components.push(part([12,5,12],[.5,y-.08,z-.67],[176,44]),part([12,4,12],[.5,y-.27,z-.67],[176,65]));
+  for(const x of [.23,.77])components.push(part([2,4,6],[x,y+.58,z+.05],[0,0]));
+ }
+ const geometry=mergeGeometries(components);
+ if(wall)orient(geometry,props.facing);
+ else geometry.translate(-.5,0,-.5).rotateY(-(Number(props.rotation)||0)*Math.PI/8).translate(.5,0,.5);
+ return [{geometry,material:makeMaterial('entity/'+skullTextures[kind],id,false)}];
+}
+
+function potModel(id,props,makeMaterial,appearance){
+ const place=geometry=>orient(geometry,props.facing);
+ const ring=(size,y)=>cuboid(size,[.5,y,.5],[14,3,14],[0,0],[32,32]);
+ const rim=mergeGeometries([
+  ring([14/16,2/16,14/16],1/16),ring([8/16,2/16,8/16],15/16),
+  ring([7/16,2/16,7/16],13/16),
+ ]);
+ const result=[{geometry:place(rim),material:makeMaterial('entity/decorated_pot/decorated_pot_base',id,false)}];
+ const sherds=appearance?.sherds??[];
+ for(const [index,yaw] of [Math.PI,Math.PI/2,-Math.PI/2,0].entries()){
+  const name=sherds[index];
+  const texture=name?'entity/decorated_pot/'+name+'_pottery_pattern':'entity/decorated_pot/decorated_pot_side';
+  const panel=new THREE.PlaneGeometry(14/16,.75).translate(0,.4375,7/16).rotateY(yaw).translate(.5,0,.5);
+  result.push({geometry:place(panel),material:makeMaterial(texture,id,false)});
+ }
+ return result;
+}
+
 export function specialModel(id,props,makeMaterial,appearance){
  if(/_sign$/.test(id))return signModel(id,props,makeMaterial,appearance);
+ if(id.endsWith('_bed'))return bedModel(id,props,makeMaterial);
+ if(Object.hasOwn(skullTextures,id.replace(/(?:_wall)?_(?:skull|head)$/,'')))return skullModel(id,props,makeMaterial);
+ if(id==='decorated_pot')return potModel(id,props,makeMaterial,appearance);
+ if(id==='end_portal'||id==='end_gateway'){
+  const geometry=id==='end_portal'?new THREE.PlaneGeometry(1,1).rotateX(-Math.PI/2).translate(.5,.75,.5):
+   new THREE.BoxGeometry(1,1,1).translate(.5,.5,.5);
+  return [{geometry,material:makeMaterial('entity/end_portal',id,false)}];
+ }
  if(id==='conduit'){
   const size=6/16;
   return [{geometry:new THREE.BoxGeometry(size,size,size).translate(.5,.5,.5),material:makeMaterial('block/conduit',id,false)}];

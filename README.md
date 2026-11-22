@@ -4,15 +4,15 @@ Minecraft 地图规划与创作工作台。先在整张世界地图上划分区�
 
 ## 下载
 
-当前桌面版本 [v0.7.4](https://github.com/xuanmomo233/TerraWeave/releases/tag/v0.7.4)。
+当前桌面版本 [v0.7.5](https://github.com/xuanmomo233/TerraWeave/releases/tag/v0.7.5)。
 
 | 下载 | 使用方式 |
 | --- | --- |
-| [Windows x64 便携开发包](https://github.com/xuanmomo233/TerraWeave/releases/download/v0.7.4/TerraWeave-0.7.4-windows-x64-portable.zip) | 完整解压后双击第一层的 `织境工坊.exe` |
-| [Windows x64 双语安装包](https://github.com/xuanmomo233/TerraWeave/releases/download/v0.7.4/TerraWeave-0.7.4-windows-x64-setup.exe) | 安装向导支持简体中文、English 和自选目录 |
+| [Windows x64 便携开发包](https://github.com/xuanmomo233/TerraWeave/releases/download/v0.7.5/TerraWeave-0.7.5-windows-x64-portable.zip) | 完整解压后双击第一层的 `织境工坊.exe` |
+| [Windows x64 双语安装包](https://github.com/xuanmomo233/TerraWeave/releases/download/v0.7.5/TerraWeave-0.7.5-windows-x64-setup.exe) | 安装向导支持简体中文、English 和自选目录 |
 | [TerraWeave.jar 1.2.0](https://github.com/xuanmomo233/TerraWeave/releases/download/plugin-v1.2.0/TerraWeave.jar) | 所有已验收的 Paper 版本共用同一份 JAR |
 
-v0.7.4 修复了荷叶在三维预览和出图中显示为紫色占位的问题。读取存档和出图由工作台离线完成。配置服务端插件仅用于需要写入世界时。
+v0.7.5 修复了红石粉、瓜茎等方块的着色，补齐床、头颅、饰纹陶罐等特殊模型。三维预览支持贴图方向锁定、按坐标稳定选取加权变体，以及材质包指定的帧动画。读取存档和出图由工作台离线完成。配置服务端插件仅用于需要写入世界时。
 
 ## 启动与目录
 
@@ -136,3 +136,5 @@ TerraWeave 插件 1.2.0 在 Paper 1.20.1 至 26.2 范围内通过了 19 个官�
 `npm run test:entities:live` 在已有测试服上验收箱子、木桶和旗帜的写入、撤销、重做与冲突保护。运行前将构建好的新插件放入测试服的 `plugins` 目录，并保持测试服停止。
 
 `npm test` 为单元测试；`npm run test:map` 验证地表、模型及规划核心逻辑；`npm run test:storage` 检查去重与缓存。`npm run test:ui` 在隔离浏览器检查地图绘制、旋转、隐藏／删除／撤销、150% 缩放、面板边界、三维和截图恢复，不改动真实规划。`tools/verify-map-codex.mjs` 用独立 Codex 进程检查工具调用、实际读图及临时规划清理。`npm run test:writer:live` 独立启动已有测试服，执行一次可逆写入并关服。离线界面回归直接读取保存的世界。
+
+`npm run test:materials` 使用隔离场景复验原版和当前材质包的方块着色、特殊模型、贴图方向、加权变体与动画，并保存实际渲染图和检查报告。

@@ -2,7 +2,7 @@ import {installViewportLook} from './viewport-look.js';
 import {invoke} from '@tauri-apps/api/core';
 import * as THREE from 'three';
 import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
-import {buildState,awaitTextures,invisibleMarkerMaterial,opaqueModel} from './model-terrain.js';
+import {buildState,awaitTextures,invisibleMarkerMaterial,opaqueModel,chooseVariantGroups} from './model-terrain.js';
 import {ChunkRenderer} from './chunk-renderer.js';
 import {makeIndex,patchLocalIndex} from './chunk-index.js';
 import {snapshotDelta,applySnapshotDelta,affectedChunkColumns} from './snapshot-delta.js';
@@ -55,7 +55,7 @@ const getPlanSnap=()=>$('planning-snap').checked;
 let scenePointer=null,sceneDrag=null,coordinatePin=null,planOverlayDirty=true,planTargetDirty=false,lastPlanHover=0;
 function requestPlanOverlay(target=false){planOverlayDirty=true;planTargetDirty||=target;}
 let residentGeometry=null,geometryBuilds=0;
-let needsDraw=true,viewportFrames=0,needsCameraSync=true;
+let needsDraw=true,viewportFrames=0,textureAnimationFrames=0,needsCameraSync=true;
 const drawnPosition=new THREE.Vector3(),drawnRotation=new THREE.Quaternion();
 function requestDraw(){needsDraw=true;}
 function resizeViewport(){
@@ -91,7 +91,7 @@ panoramaButton.onclick=()=>{
  else ui.run(()=>api('open_world_scene'));
 };
 $('detail-controls').querySelector('.view-buttons').prepend(panoramaButton);
-const lod=new TexturedWorld(scene,api,parts,(done,total)=>{sceneLoading.hidden=macro.active||done>=total;sceneLoading.textContent='正在加载完整模型与贴图 '+done+' / '+total;if(region?.panorama)$('render-stats').textContent=done+' / '+total+' · 完整材质';}),planOverlay=new PlanningOverlay(view);let fly=true,lastFrame=performance.now(),flyLook=null,lastAngles=0;const heldKeys=new Set();
+const lod=new TexturedWorld(scene,api,parts,(done,total)=>{sceneLoading.hidden=macro.active||done>=total;sceneLoading.textContent='正在加载完整模型与贴图 '+done+' / '+total;if(region?.panorama)$('render-stats').textContent=done+' / '+total+' · 完整材质';},chooseVariantGroups),planOverlay=new PlanningOverlay(view);let fly=true,lastFrame=performance.now(),flyLook=null,lastAngles=0;const heldKeys=new Set();
 const cameraDraft=new Map();let cameraDirty=false;const cameraFields=['camera-x','camera-y','camera-z','camera-yaw','camera-pitch'];
 const speedField=document.createElement('label');speedField.innerHTML='移动速度 <input id="camera-speed" type="number" min="0.1" max="2048" value="20" aria-label="相机移动速度">';$('set-camera-angle').after(speedField);$('set-camera-angle').textContent='应用相机位置与朝向';
 const wheelField=document.createElement('label');wheelField.innerHTML='滚轮灵敏度（%）<input id="wheel-sensitivity" type="number" min="1" max="100" step="1" aria-label="滚轮灵敏度">';speedField.after(wheelField);$('wheel-sensitivity').value=String(readWheelSensitivity());$('wheel-sensitivity').onchange=()=>{$('wheel-sensitivity').value=String(saveWheelSensitivity($('wheel-sensitivity').value));};
@@ -309,6 +309,7 @@ function renderScene(incomingDelta){
    else chunks.reset(makeIndex(wanted,1,{cull:true,opaqueStates}),config.max_y,config.min_y);
    while(chunks.busy)await new Promise(r=>setTimeout(r,10));
    const updated=await chunks.update((wanted.bounds[0]+wanted.bounds[3]+1)/2,(wanted.bounds[2]+wanted.bounds[5]+1)/2,256,256,{
+    chooseVariants:chooseVariantGroups,minecraft:wanted.minecraft,
     parts:(state,options)=>parts(state,{...options,minecraft:wanted.minecraft},!!config.show_invisible),dirty,prepare:awaitTextures
    });
    if(wanted!==snapshot||wantedRegion!==region)return;
@@ -350,7 +351,7 @@ function applySceneCamera(pose){
  syncCameraFields(true);
  return true;
 }
-function sceneView(){if(macro.active)return {mode:'map',view:macro.getView()};if(!snapshot)return {mode:'empty'};const position=camera.position.toArray().map((n,i)=>n+snapshot.bounds[i]),target=controls.target.toArray().map((n,i)=>n+snapshot.bounds[i]),direction=camera.getWorldDirection(new THREE.Vector3());return {mode:fly?'free':'orbit',panoramic:!!region.panorama,view_id:region.view_id,label:region.label,position,target,up:camera.up.toArray(),yaw:(THREE.MathUtils.radToDeg(Math.atan2(direction.x,-direction.z))+360)%360,pitch:THREE.MathUtils.radToDeg(Math.asin(direction.y)),fov:camera.fov,width:view.clientWidth,height:view.clientHeight,world_uuid:region.world_uuid,region_id:region.panorama?undefined:region.id,world_revision:region.world_revision,render_stats:{viewport_frames:viewportFrames,draw_calls:renderer.info.render.calls,triangles:renderer.info.render.triangles,gpu_geometries:renderer.info.memory.geometries,gpu_textures:renderer.info.memory.textures,model_tiles:lod.meshes.size,cached_tiles:lod.cache.size,loading:!!lod.loading}};}
+function sceneView(){if(macro.active)return {mode:'map',view:macro.getView()};if(!snapshot)return {mode:'empty'};const position=camera.position.toArray().map((n,i)=>n+snapshot.bounds[i]),target=controls.target.toArray().map((n,i)=>n+snapshot.bounds[i]),direction=camera.getWorldDirection(new THREE.Vector3());return {mode:fly?'free':'orbit',panoramic:!!region.panorama,view_id:region.view_id,label:region.label,position,target,up:camera.up.toArray(),yaw:(THREE.MathUtils.radToDeg(Math.atan2(direction.x,-direction.z))+360)%360,pitch:THREE.MathUtils.radToDeg(Math.asin(direction.y)),fov:camera.fov,width:view.clientWidth,height:view.clientHeight,world_uuid:region.world_uuid,region_id:region.panorama?undefined:region.id,world_revision:region.world_revision,render_stats:{viewport_frames:viewportFrames,texture_animation_frames:textureAnimationFrames,draw_calls:renderer.info.render.calls,triangles:renderer.info.render.triangles,gpu_geometries:renderer.info.memory.geometries,gpu_textures:renderer.info.memory.textures,model_tiles:lod.meshes.size,cached_tiles:lod.cache.size,loading:!!lod.loading}};}
 function localVertices(collection){
  return collection.meshes().reduce((n,mesh)=>n+mesh.count*(mesh.geometry.index?.count??mesh.geometry.getAttribute('position').count),0);
 }
@@ -427,6 +428,7 @@ async function openPanorama(q){
  ui.say(info.progressive_loading&&!sameWorld?'附近区块已就绪 · 其余区块继续加载':'实景已就绪 · WASD 移动，右键转头，E/空格上升，Q/C 下降');
  return {world_uuid:region.world_uuid,world_revision:q.scene.revision,view_id:region.view_id,representation:'minecraft_block_models',tiles:lod.meshes.size};
 }
+let captureAnimationTime=0;
 function captureScene(displayMode){
  const result=new THREE.Scene();
  result.background=new THREE.Color(displayMode==='editor'?'#14171c':'#b8d4ed');
@@ -436,6 +438,7 @@ function captureScene(displayMode){
 }
 async function captureScope(callback){
  const previous=controls.enabled;
+ captureAnimationTime=performance.now();
  capturing=true;resetNavigation();controls.enabled=false;
  renderer.domElement.setAttribute('aria-busy','true');
  try{return await callback();}
@@ -460,8 +463,10 @@ async function exportViews(q,data,frozenPlans,views){
  const overlay=new PlanningOverlay(document.createElement('div'));
  overlay.update(frozenPlans,q.show_plans,(x,z)=>snapshotHeight(data,x,z),data.key);
  const shaded=iris.active&&q.display_mode!=='editor',images=[];
+ data.chunks.animate(captureAnimationTime);
+ data.lod.animate(captureAnimationTime);
  for(const {camera:renderCamera,pose,name} of views){
-  const output=shaded?await iris.capture({...data,camera:renderCamera,width:q.width,height:q.height}):
+  const output=shaded?await iris.capture({...data,animationTime:captureAnimationTime,camera:renderCamera,width:q.width,height:q.height}):
    renderCapture(renderer,data.scene,renderCamera,q.width,q.height);
   const canvas=overlay.capture(output,renderCamera,origin);
   images.push({name,camera:pose,data_url:canvas.toDataURL('image/png')});
@@ -476,7 +481,7 @@ async function capturePanorama(q){
   const plans=await api('planning_state');
   if(plans.revision!==q.planning_revision)throw Error('规划已变化，请重新截图');
   const bounds=q.scene.bounds,scene=captureScene('scene');
-  const staged=new TexturedWorld(scene,api,parts);
+  const staged=new TexturedWorld(scene,api,parts,undefined,chooseVariantGroups);
   const placed={...q.scene,id:'capture-world',panorama:true,loaded_bounds:bounds};
   const snap={bounds,blocks:{}};
   const requested=current?[{...current,name:'当前实景'}]:q.views?.length?q.views:q.angles.map(name=>({name}));
@@ -539,7 +544,7 @@ async function display(q){
 async function captures(q){
  return captureScope(async()=>{
   const r=q.region,snap=q.snapshot,origin=snap.bounds.slice(0,3);
-  const scene=captureScene(q.display_mode),staged=new TexturedWorld(scene,api,parts);
+  const scene=captureScene(q.display_mode),staged=new TexturedWorld(scene,api,parts,undefined,chooseVariantGroups);
   const localChunks=new ChunkRenderer(scene,(s,o)=>parts(s,{...o,minecraft:snap.minecraft},!!q.show_invisible),origin);
   const helpers=[];
   try{
@@ -548,7 +553,7 @@ async function captures(q){
    await Promise.all([...states].map(async state=>{if(await opaqueModel(state,snap.minecraft))opaqueStates.add(state);}));
    localChunks.reset(makeIndex(snap,1,{cull:true,opaqueStates}),q.max_y,q.min_y);
    const b=snap.bounds;
-   await localChunks.update((b[0]+b[3]+1)/2,(b[2]+b[5]+1)/2,256,256,{prepare:awaitTextures});
+   await localChunks.update((b[0]+b[3]+1)/2,(b[2]+b[5]+1)/2,256,256,{prepare:awaitTextures,chooseVariants:chooseVariantGroups,minecraft:snap.minecraft});
    if(q.show_selection){
     const bounds=r.bounds,box=new THREE.BoxGeometry(...origin.map((_,i)=>bounds[i+3]-bounds[i]+1));
     const edges=new THREE.EdgesGeometry(box);box.dispose();
@@ -855,13 +860,15 @@ function updatePlanningTarget(now){
 let lastSessionPersist=0;
 renderer.setAnimationLoop(()=>{
  const now=performance.now(),delta=Math.min(.1,(now-lastFrame)/1000);lastFrame=now;if(capturing||macro.active)return;
+ const localAnimation=chunks.animate(now),sceneAnimation=lod.animate(now);
  if(fly&&region&&heldKeys.size){const direction=camera.getWorldDirection(new THREE.Vector3()),side=new THREE.Vector3().crossVectors(direction,camera.up).normalize(),move=new THREE.Vector3(),speed=delta*moveSpeed()*(heldKeys.has('ShiftLeft')||heldKeys.has('ShiftRight')?4:1);if(heldKeys.has('KeyW'))move.add(direction);if(heldKeys.has('KeyS'))move.sub(direction);if(heldKeys.has('KeyD'))move.add(side);if(heldKeys.has('KeyA'))move.sub(side);if(heldKeys.has('Space')||heldKeys.has('KeyE'))move.y++;if(heldKeys.has('KeyC')||heldKeys.has('KeyQ'))move.y--;if(move.lengthSq())move.normalize().multiplyScalar(speed);camera.position.add(move);controls.target.add(move);}
  if(!fly)controls.update();
  updatePlanningOverlay();
  const cameraChanged=drawnPosition.distanceToSquared(camera.position)>1e-12||1-Math.abs(drawnRotation.dot(camera.quaternion))>1e-12;
  if(cameraChanged&&region&&now-lastSessionPersist>350){lastSessionPersist=now;ui.recovery.schedule();}
  scheduleVolumeRefresh(now,cameraChanged);
- if(needsDraw||cameraChanged){
+ if(needsDraw||cameraChanged||localAnimation||sceneAnimation){
+  if(!needsDraw&&!cameraChanged)textureAnimationFrames++;
   camera.far=Math.max(5000,camera.position.distanceTo(controls.target)*4+1024);
   camera.updateProjectionMatrix();
   requestPlanOverlay(!usesIris());

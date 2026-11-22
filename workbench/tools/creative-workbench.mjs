@@ -17,7 +17,7 @@ import {projectStore} from './project-store.mjs';
 import {planningService,PLANNING_TOOLS} from './planning-service.mjs';
 import {mapService,MAP_TOOLS} from './map-service.mjs';
 import {worldIndex} from './world-surface.mjs';
-import {readRenderSettings,saveRenderSettings} from './render-packs.mjs';
+import {ensurePackAnimationMetadata,readRenderSettings,saveRenderSettings} from './render-packs.mjs';
 import {checkIrisSupport,nativeIrisSources,savedIrisInputs} from './iris-runtime.mjs';
 import {ensureVanillaAssets} from './vanilla-assets.mjs';
 import {snapshotDelta} from '../snapshot-delta.js';
@@ -262,6 +262,7 @@ async function execute(name,args){
  if(needsVanilla.has(name)){
   const index=worldIndex();
   if(!(emptySceneTools.has(name)&&index.pristine_void))await ensureVanillaAssets(index.minecraft);
+  ensurePackAnimationMetadata(path.join(PROJECT,'assets'));
  }
  if(name==='world_source')return worldSource();
  if(name==='restore_project_backup')return restoreProjectBackup(args.directory);
@@ -299,7 +300,9 @@ async function execute(name,args){
   let minecraft;
   try{minecraft=worldIndex().minecraft;}catch{}
   const assets=path.join(PROJECT,'assets');
-  return name==='render_settings'?readRenderSettings(assets,minecraft):saveRenderSettings(assets,args,minecraft);
+  if(name==='save_render_settings')return saveRenderSettings(assets,args,minecraft);
+  ensurePackAnimationMetadata(assets);
+  return readRenderSettings(assets,minecraft);
  }
  if(name==='iris_pack_source'||name==='offline_iris_inputs'){
   const pack=nativeIrisSources(path.join(PROJECT,'assets'),args.shader,worldIndex().minecraft),issues=checkIrisSupport(pack);
@@ -408,7 +411,7 @@ async function invokeTool(name,args={}){
 }
 async function handle(q){
  if(q.id===undefined)return null;const ok=result=>({jsonrpc:'2.0',id:q.id,result});
- if(q.method==='initialize')return ok({protocolVersion:'2025-06-18',capabilities:{tools:{}},serverInfo:{name:'TerraWeave',version:'0.7.4'},instructions:'TerraWeave offline map planning and saved-world preview. Use export_draft to hand off an immutable revision to the separate world writer MCP. open_world_scene renders complete block models and textures with a free camera; do not replace visible scenery with colored voxels. get_scene_view reads the actual user camera. capture_world_scene defaults to that observed view and freezes block states, model geometry and texture atlas; explicit angles/custom cameras remain available. inspect_captured_scene verifies its exact source. show_invisible reveals barrier glyphs without changing world blocks. planning_state and inspect_plan provide selected map geometry and notes; save_plan supports areas/routes/markers independent of chunk size. Hide/show is separate from deletion. capture_map freezes map planning geometry. browse_world/open_plan_detail enter a saved-world detail view; create_draft with plan_id supports sparse world-scale designs. capture_views supports precise cameras and cutaways. Distinguish saved-world renders, live blocks, planning and drafts; workbench lighting/animation differs from Minecraft-client screenshots. Repeated navigation reuses bounded caches.'});
+ if(q.method==='initialize')return ok({protocolVersion:'2025-06-18',capabilities:{tools:{}},serverInfo:{name:'TerraWeave',version:'0.7.5'},instructions:'TerraWeave offline map planning and saved-world preview. Use export_draft to hand off an immutable revision to the separate world writer MCP. open_world_scene renders complete block models and textures with a free camera; do not replace visible scenery with colored voxels. get_scene_view reads the actual user camera. capture_world_scene defaults to that observed view and freezes block states, model geometry and texture atlas; explicit angles/custom cameras remain available. inspect_captured_scene verifies its exact source. show_invisible reveals barrier glyphs without changing world blocks. planning_state and inspect_plan provide selected map geometry and notes; save_plan supports areas/routes/markers independent of chunk size. Hide/show is separate from deletion. capture_map freezes map planning geometry. browse_world/open_plan_detail enter a saved-world detail view; create_draft with plan_id supports sparse world-scale designs. capture_views supports precise cameras and cutaways. Distinguish saved-world renders, live blocks, planning and drafts; workbench lighting/animation differs from Minecraft-client screenshots. Repeated navigation reuses bounded caches.'});
  if(q.method==='ping')return ok({});if(q.method==='tools/list')return ok({tools:TOOLS});
  if(q.method==='tools/call')try{
   const r=await callTool(q.params.name,q.params.arguments??{}),content=[{type:'text',text:JSON.stringify(r)}];

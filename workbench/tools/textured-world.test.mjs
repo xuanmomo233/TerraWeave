@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import {test} from 'node:test';
 import * as THREE from 'three';
 import {TexturedWorld} from '../textured-world.js';
-import {buildState,materialSettings} from '../model-terrain.js';
+import {buildState,materialSettings,modelFaceTint} from '../model-terrain.js';
+import {textureAnimation,textureFrame} from '../texture-animation.js';
+import {blockEntityAppearance} from './block-entity-appearance.mjs';
 
 test('lily pads keep their tinted, cutout surface instead of a missing-model cube',async()=>{
  const face={texture:'#leaf',tintindex:0};
@@ -23,6 +25,33 @@ test('lily pads keep their tinted, cutout surface instead of a missing-model cub
  assert.equal(geometry.index.count,12);
  assert.deepEqual(material,{texture:'block/lily_pad',color:0x208030,alphaTest:.1});
  geometry.dispose();
+});
+
+test('animation honors frame rectangles, listed order, duration and interpolation',()=>{
+ const animation=textureAnimation(32,16,{width:16,height:16,frametime:4,frames:[1,{index:0,time:2}],interpolate:true});
+ assert.equal(animation.columns,2);
+ assert.deepEqual(textureFrame(animation,0),{index:1,next:0,mix:0});
+ assert.deepEqual(textureFrame(animation,100),{index:1,next:0,mix:.5});
+ assert.deepEqual(textureFrame(animation,200),{index:0,next:1,mix:0});
+ assert.deepEqual(textureFrame(animation,300),{index:1,next:0,mix:0});
+ assert.equal(textureAnimation(17,32,{width:16,height:16}),null);
+ assert.equal(textureAnimation(16,32,null),null);
+});
+
+test('redstone and stems use state-dependent tint, while neutral tinted faces retain their textures',()=>{
+ assert.equal(modelFaceTint('redstone_wire',{power:'0'},0),0x4c0000);
+ assert.equal(modelFaceTint('redstone_wire',{power:'15'},0),0xff3200);
+ assert.equal(modelFaceTint('pumpkin_stem',{age:'7'},0),0xe0c71c);
+ assert.equal(modelFaceTint('attached_melon_stem',{},0),0xe0c71c);
+ assert.ok(modelFaceTint('pink_petals',{},0));
+ assert.equal(modelFaceTint('stonecutter',{},0),false);
+});
+
+test('placed pot sherds and moving-piston state survive Anvil appearance decoding',()=>{
+ assert.deepEqual(blockEntityAppearance({id:'minecraft:decorated_pot',sherds:['minecraft:brick','minecraft:angler_pottery_sherd']}),
+  {kind:'decorated_pot',sherds:[null,'angler']});
+ assert.deepEqual(blockEntityAppearance({id:'minecraft:piston',blockState:{Name:'minecraft:oak_log',Properties:{axis:'x'}},progress:.5,extending:1}),
+  {kind:'moving_piston',state:'minecraft:oak_log[axis=x]',progress:.5,extending:true});
 });
 const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});return {promise,resolve,reject};};
 const info=revision=>({revision,occupied_chunks:[[0,0,0,15]],helper_chunks:[]});
