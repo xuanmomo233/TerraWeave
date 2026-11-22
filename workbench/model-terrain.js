@@ -15,6 +15,7 @@ async function model(id,read=json,seen=new Set()){
 function textureName(t,tex){for(let i=0;t?.startsWith('#')&&i<20;i++)t=tex[t.slice(1)];if(!t||t.startsWith('#'))throw Error('Unresolved texture '+t);return t.replace('minecraft:','')}
 export function materialSettings(id,tint=false){
  if(Number.isInteger(tint))return {color:tint,alphaTest:.1};
+ if(tint&&id==='lily_pad')return {color:0x208030,alphaTest:.1};
  if(id==='water')return {transparent:true,opacity:.72,depthWrite:false,side:THREE.DoubleSide,color:0x3f76e4};
  if(id==='lava')return {color:0xffffff,emissive:0xffffff,emissiveIntensity:.7};
  if(tint&&/_banner$/.test(id))return {color:dyes[id.replace(/(?:_wall)?_banner$/,'')]??0xf9fffe};
@@ -63,7 +64,7 @@ export async function buildState(s,options={}){
  const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.Float32BufferAttribute(a.flat(),3));g.setAttribute('uv',new THREE.Float32BufferAttribute(u.flat(),2));g.setIndex([0,1,2,0,2,3]);
  if(e.rotation){const r=e.rotation,origin=r.origin.map(n=>n/16),angle=r.angle*Math.PI/180;if(!['x','y','z'].includes(r.axis))throw Error('Unknown rotation axis');g.translate(...origin.map(n=>-n));g['rotate'+r.axis.toUpperCase()](angle);if(r.rescale){const scale=[1,1,1],axis='xyz'.indexOf(r.axis);for(let i=0;i<3;i++)if(i!==axis)scale[i]=1/Math.cos(angle);g.scale(...scale)}g.translate(...origin)}
  g.translate(-.5,-.5,-.5);g.rotateX(-(v.x||0)*Math.PI/180);g.rotateY(-(v.y||0)*Math.PI/180);g.translate(.5,.5,.5);g.computeVertexNormals();
- const t=textureName(f.texture,m.textures),tint=f.tintindex!==undefined,key=t+'|'+tint;if(tint&&!/^(grass_block|grass|short_grass|tall_grass|fern|large_fern|vine|bamboo|sugar_cane|water_cauldron|.*_leaves)$/.test(id))throw Error('尚未支持此方块的专用染色: '+s);if(!byTex.has(key))byTex.set(key,{t,tint,gs:[]});byTex.get(key).gs.push(g);
+ const t=textureName(f.texture,m.textures),tint=f.tintindex!==undefined,key=t+'|'+tint;if(tint&&!/^(grass_block|grass|short_grass|tall_grass|fern|large_fern|vine|bamboo|sugar_cane|water_cauldron|lily_pad|.*_leaves)$/.test(id))throw Error('尚未支持此方块的专用染色: '+s);if(!byTex.has(key))byTex.set(key,{t,tint,gs:[]});byTex.get(key).gs.push(g);
  }} }
  if(!byTex.size){if(options.occlusionMask)return [];throw Error('No renderable faces '+s);}
  return [...byTex.values()].map(({t,tint,gs})=>({geometry:mergeGeometries(gs),material:mkmat(t,id,tint)}));

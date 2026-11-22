@@ -2,6 +2,28 @@ import assert from 'node:assert/strict';
 import {test} from 'node:test';
 import * as THREE from 'three';
 import {TexturedWorld} from '../textured-world.js';
+import {buildState,materialSettings} from '../model-terrain.js';
+
+test('lily pads keep their tinted, cutout surface instead of a missing-model cube',async()=>{
+ const face={texture:'#leaf',tintindex:0};
+ const assets={
+  '/assets/minecraft/blockstates/lily_pad.json':{variants:{'':{model:'minecraft:block/lily_pad'}}},
+  '/assets/minecraft/models/block/lily_pad.json':{textures:{leaf:'minecraft:block/lily_pad'},
+   elements:[{from:[0,.25,0],to:[16,.25,16],faces:{up:face,down:face}}]},
+ };
+ const parts=await buildState('minecraft:lily_pad',{
+  readJson:async name=>assets[name],
+  makeMaterial:(texture,id,tint)=>({texture,...materialSettings(id,tint)}),
+ });
+ assert.equal(parts.length,1);
+ const [{geometry,material}]=parts;
+ geometry.computeBoundingBox();
+ assert.equal(geometry.boundingBox.min.y,.25/16);
+ assert.equal(geometry.boundingBox.max.y,.25/16);
+ assert.equal(geometry.index.count,12);
+ assert.deepEqual(material,{texture:'block/lily_pad',color:0x208030,alphaTest:.1});
+ geometry.dispose();
+});
 const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});return {promise,resolve,reject};};
 const info=revision=>({revision,occupied_chunks:[[0,0,0,15]],helper_chunks:[]});
 const tile={x:0,z:0,groups:[{state:'minecraft:stone',mask:0,fluid_mask:0,positions:[0]}]};

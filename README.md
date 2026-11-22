@@ -4,15 +4,15 @@ Minecraft 地图规划与创作工作台。先在整张世界地图上划分区�
 
 ## 下载
 
-当前桌面版本 [v0.7.3](https://github.com/xuanmomo233/TerraWeave/releases/tag/v0.7.3)。
+当前桌面版本 [v0.7.4](https://github.com/xuanmomo233/TerraWeave/releases/tag/v0.7.4)。
 
 | 下载 | 使用方式 |
 | --- | --- |
-| [Windows x64 便携开发包](https://github.com/xuanmomo233/TerraWeave/releases/download/v0.7.3/TerraWeave-0.7.3-windows-x64-portable.zip) | 完整解压后双击第一层的 `织境工坊.exe` |
-| [Windows x64 双语安装包](https://github.com/xuanmomo233/TerraWeave/releases/download/v0.7.3/TerraWeave-0.7.3-windows-x64-setup.exe) | 安装向导支持简体中文、English 和自选目录 |
+| [Windows x64 便携开发包](https://github.com/xuanmomo233/TerraWeave/releases/download/v0.7.4/TerraWeave-0.7.4-windows-x64-portable.zip) | 完整解压后双击第一层的 `织境工坊.exe` |
+| [Windows x64 双语安装包](https://github.com/xuanmomo233/TerraWeave/releases/download/v0.7.4/TerraWeave-0.7.4-windows-x64-setup.exe) | 安装向导支持简体中文、English 和自选目录 |
 | [TerraWeave.jar 1.2.0](https://github.com/xuanmomo233/TerraWeave/releases/download/plugin-v1.2.0/TerraWeave.jar) | 所有已验收的 Paper 版本共用同一份 JAR |
 
-v0.7.3 支持删除单组或多选删除预览图片，减少空缓存下的地图地形读取时间。取消三维细化会立即返回地图。读取存档和出图由工作台离线完成。配置服务端插件仅用于需要写入世界时。
+v0.7.4 修复了荷叶在三维预览和出图中显示为紫色占位的问题。读取存档和出图由工作台离线完成。配置服务端插件仅用于需要写入世界时。
 
 ## 启动与目录
 
