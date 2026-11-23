@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import {spawnSync} from 'node:child_process';
 import {test} from 'node:test';
 import {deflateSync,gzipSync} from 'node:zlib';
 import {decodeAnvilLz4} from './anvil-lz4.mjs';
@@ -16,6 +17,7 @@ import {modelTile} from './world-models.mjs';
 import {snapshotBytes} from './project-store.mjs';
 import {constructionView,registerConstructionSource} from './construction-view.mjs';
 import {blockConverter} from './design-conversion.mjs';
+import {validateDesignPacket} from './world-writer.mjs';
 
 const short=n=>Buffer.from([n>>>8,n&255]);
 const int=n=>{const b=Buffer.alloc(4);b.writeInt32BE(n);return b;};
@@ -142,6 +144,30 @@ test('26.3 reads default and explicit block palettes in a world with older chunk
  assert.deepEqual([0,1,2,16,32].map(x=>colors.availability[x]),[2,2,2,2,2]);
  const models=modelTile(0,0,path.join(world,'model-cache'),index);
  assert.ok(expected.every(state=>models.groups.some(group=>group.state===state)));
+ const project=path.join(world,'conversion-project'),source=path.join(world,'building.json');
+ fs.writeFileSync(source,JSON.stringify({schema:1,minecraft:'1.20.1',world_uuid:index.world_uuid,
+  draft_id:'00000000-0000-4000-8000-000000000002',draft_revision:1,
+  base:{'0,304,0':'minecraft:air'},changes:{'0,304,0':'minecraft:grass'},previously_applied:{}}));
+ const call=(tool,args)=>{
+  const result=spawnSync(process.execPath,['tools/creative-workbench.mjs','--json'],{
+   cwd:new URL('..',import.meta.url),encoding:'utf8',input:JSON.stringify({tool,args}),
+   env:{...process.env,TERRAWEAVE_STATE:project,TERRAWEAVE_PRIMARY_STATE:project,TERRAWEAVE_WORLD:world}
+  });
+  assert.equal(result.status,0,result.stdout||result.stderr);
+  return JSON.parse(result.stdout);
+ };
+ const input={export_path:source},analysis=call('analyze_design_conversion',input);
+ const converted=call('convert_design_export',{...input,analysis_token:analysis.analysis_token});
+ const result=JSON.parse(fs.readFileSync(converted.path,'utf8'));
+ assert.match(result.world_uuid,/^local-/);
+ assert.deepEqual(result.base,{'0,304,0':expected[0]});
+ assert.deepEqual(result.changes,{'0,304,0':'minecraft:short_grass'});
+ assert.throws(()=>validateDesignPacket(result),/无效的织境工坊方案/);
+ const audit=call('audit_world_version',{target_version:'26.2'});
+ assert.equal(audit.scope.terrain_chunks,3);
+ assert.ok(audit.issues.some(issue=>issue.kind==='incompatible_block'&&issue.id==='minecraft:poplar_log[axis=x]'));
+ assert.match(fs.readFileSync(audit.report_path,'utf8'),/世界存档版本差异/);
+ assert.deepEqual(fs.readFileSync(path.join(directory,'r.0.0.mca')),mca);
 });
 
 test('26.3 authoring and Anvil use actual defaults, including properties absent from the model',()=>{

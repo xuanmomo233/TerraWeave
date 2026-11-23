@@ -62,6 +62,7 @@ dialog .dialog-actions > button {width:auto;min-inline-size:70px;flex:0 1 auto;m
 #large-image {max-width:calc(100vw - 96px);max-height:calc(100vh - max(32px,2rem) - 108px);width:auto;height:auto;object-fit:contain;}
 .document-tab .tab-open {display:flex;align-items:center;gap:7px;flex:1;min-width:0;min-height:28px;text-align:left;padding:0;}
 .document-tab .tab-open .name {min-width:0;}
+.document-tab.opening .tab-open {cursor:progress;}
 .document-tab .close {flex:none;}
 .menu-popup button {gap:12px;}
 .menu-popup kbd {margin-left:0;flex:none;}

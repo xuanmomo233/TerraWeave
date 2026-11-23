@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import {createHash,randomUUID} from 'node:crypto';
+import {createHash} from 'node:crypto';
 import {savedBlocks} from './render-context.mjs';
 import {worldIndex} from './world-surface.mjs';
 import {validateDesignPacket} from './world-writer.mjs';
@@ -14,11 +14,10 @@ const convert=argumentsFor({analysis_token:id});
 convert.required=['export_path','analysis_token'];
 export const DESIGN_CONVERSION_TOOLS=[
  {name:'analyze_design_conversion',description:'Check a TerraWeave export against the current project’s linked target save. Report version differences and proposed writes without changing the source export or target save.',inputSchema:analyze,annotations:{readOnlyHint:true}},
- {name:'convert_design_export',description:'Create a version-checked export at the same coordinates for the current project’s linked Paper world. Pass the analysis_token from an unblocked analysis. This does not apply the export.',inputSchema:convert}
+ {name:'convert_design_export',description:'Create a version-checked building export at the same coordinates for the Java save linked to the current project. Vanilla saves can use local world IDs for offline conversion. Applying through world_writer still requires a matching server UUID. Pass the analysis_token from an unblocked analysis.',inputSchema:convert}
 ];
 
 const statePattern=/^(?:minecraft:)?([a-z0-9_]+)(?:\[([a-z0-9_=,]+)\])?$/;
-const worldUuid=/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
 const limit=80;
 const maxExportBytes=64*1024*1024;
 const hash=value=>createHash('sha256').update(value).digest('hex');
@@ -39,6 +38,10 @@ function rule(id,version){
  if(!Object.hasOwn(catalog.blocks,id))return;
  const versionRange=catalog.blocks[id].find(([from,to])=>version>=from&&version<=to);
  return versionRange&&catalog.rules[versionRange[2]];
+}
+export function registryContains(version,name,id){
+ const release=versionIndex(version),entries=catalog.registries[name];
+ return Object.hasOwn(entries,id)&&!!(entries[id]&1<<release);
 }
 function parseState(value){
  const match=typeof value==='string'&&statePattern.exec(value);
@@ -98,7 +101,7 @@ function readExport(file){
 export function designConversion({folder,atomic}){
  return function execute(name,args){
   const index=worldIndex();
-  if(!index.directory)throw Error('请先在当前工程关联目标服务器的存档');
+  if(!index.directory)throw Error('请先在当前工程关联目标 Java 版存档');
   const targetUuid=index.paper_world_uuid??index.world_uuid;
   const {packet,sha,source}=readExport(args.export_path);
   const configured=args.replacements??{};
@@ -128,10 +131,9 @@ export function designConversion({folder,atomic}){
    counts,incompatible:entries.slice(offset,offset+limit),incompatible_count:issues.size,
    previous_issue_offset:offset>0?Math.max(0,offset-limit):null,
    next_issue_offset:offset+limit<entries.length?offset+limit:null};
-  if(counts.blocked||!Object.keys(changes).length||!worldUuid.test(targetUuid??'')){
+  if(counts.blocked||!Object.keys(changes).length){
    if(name==='convert_design_export')throw Error('请先完成方案检查并处理所有无法转换的方块');
    if(!Object.keys(packet.changes).length)summary.target_error='原方案没有可转换的编辑';
-   else if(!worldUuid.test(targetUuid??''))summary.target_error='目标存档缺少 Paper 世界 UUID';
    return summary;
   }
   const base=savedBlocks(Object.keys(changes),index);
@@ -146,7 +148,7 @@ export function designConversion({folder,atomic}){
   const draftId=digest.slice(0,32).match(/^(.{8})(.{4})(.{4})(.{4})(.{12})$/).slice(1).join('-');
   const output={schema:1,world_uuid:targetUuid,minecraft:index.minecraft,draft_id:draftId,draft_revision:1,
    label:typeof packet.label==='string'?packet.label.slice(0,120):'转换后的建筑方案',base,changes,previously_applied:{}};
-  validateDesignPacket(output);
+  validateDesignPacket(output,{allowLocalWorld:true});
   const file=path.join(folder('exports'),'converted-'+token.slice(0,24)+'.json');
   const bytes=JSON.stringify(output);
   if(Buffer.byteLength(bytes)>maxExportBytes)throw Error('转换后的方案超过写入端支持的 64 MB，请先拆分原方案');

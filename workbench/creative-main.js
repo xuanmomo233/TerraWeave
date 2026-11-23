@@ -7,6 +7,7 @@ import {ChunkRenderer} from './chunk-renderer.js';
 import {makeIndex,patchLocalIndex} from './chunk-index.js';
 import {snapshotDelta,applySnapshotDelta,affectedChunkColumns} from './snapshot-delta.js';
 import {mountWorkspaceUI} from './workspace-ui.js';
+import {documentKey} from './editor-state.js';
 import {mountMapWorkspace} from './map-workspace.js';
 import {TexturedWorld} from './textured-world.js';
 import {chooseRenderCapacity} from './render-capacity.js';
@@ -18,7 +19,7 @@ import './editor-layout.css';
 import './appearance.css';
 import './panel-layout.css';
 import {readWheelSensitivity,saveWheelSensitivity,wheelZoomFactor,wheelTravel} from './viewport-wheel.js';
-import {callWorkbench,finishWorkbenchWrites,invokeProject,readWorkbenchSnapshot} from './workbench-api.js';
+import {callWorkbench,finishWorkbenchWrites,invokeProject,readWorkbenchSnapshot,workbenchViewEpoch} from './workbench-api.js';
 import {mountRenderSettings} from './render-settings-ui.js';
 import {OfflineIrisView} from './offline-iris-view.js';
 
@@ -53,7 +54,7 @@ function showGeometry(group,visible){
  if(visible&&!group.parent)scene.add(group);
  else if(!visible)group.removeFromParent();
 }
-const chunks=new ChunkRenderer(localGeometry,parts,[0,0,0]);
+let chunks=new ChunkRenderer(localGeometry,parts,[0,0,0]);
 let region=null,snapshot=null,outline=null,diffGroup=new THREE.Group(),working=false,polling=false,sceneChanging=false,capturing=false,marking=false,corner=null,renderQueue=Promise.resolve();
 let tool='select',grid=null,blockOutline=null;
 const sceneSketch=new PlanningSketch();
@@ -61,6 +62,7 @@ const getPlanSnap=()=>$('planning-snap').checked;
 let scenePointer=null,sceneDrag=null,coordinatePin=null,planOverlayDirty=true,planTargetDirty=false,lastPlanHover=0;
 function requestPlanOverlay(target=false){planOverlayDirty=true;planTargetDirty||=target;}
 let residentGeometry=null,geometryBuilds=0;
+const cachedLocalGeometry=new Map();
 let needsDraw=true,viewportFrames=0,textureAnimationFrames=0,needsCameraSync=true;
 const drawnPosition=new THREE.Vector3(),drawnRotation=new THREE.Quaternion();
 function requestDraw(){needsDraw=true;}
@@ -85,7 +87,7 @@ const openRenderSettings=mountRenderSettings({
  selected:sceneView,
  apply:async(_config,pose)=>{await ui.recovery.flush();reloadRenderSettings(pose);}
 });
-const ui=mountWorkspaceUI({getRegion:()=>region,getSnapshot:()=>snapshot,getView:()=>({...settings}),getCamera:()=>sceneView(),isCapturing:()=>capturing,setView,frame:name=>{if(region&&!capturing)frame(name);},setTool,undoSketch,cancelActiveSketch,clear:clearDocument,openRenderSettings,switchProject});
+const ui=mountWorkspaceUI({getRegion:()=>region,getSnapshot:()=>snapshot,getView:()=>({...settings}),getCamera:()=>sceneView(),isCapturing:()=>capturing,setView,frame:name=>{if(region&&!capturing)frame(name);},setTool,undoSketch,cancelActiveSketch,clear:clearDocument,openRenderSettings,switchProject,presentTabView,tabPrefetchReady:()=>!capturing&&!sceneChanging&&!lod.loading&&!preparingVolumeFor&&!document.hidden});
 const iris=new OfflineIrisView(view,ui.say,()=>requestPlanOverlay(true));
 const api=callWorkbench;
 const macro=mountMapWorkspace({editor:ui,canvas:renderer.domElement,getRegion:()=>region,getPlanSnap,sketchChanged:refreshPlanningControls,syncConstruction,
@@ -152,7 +154,11 @@ function setTool(name){
 function clearDocument({keepWorld=false,keepLocal=false}={}){
  resetNavigation();
  region=null;snapshot=null;showGeometry(localGeometry,false);showGeometry(worldGeometry,false);
- if(!keepLocal){residentGeometry=null;chunks.reset({chunks:[]},319);}
+ if(!keepLocal){
+  residentGeometry=null;chunks.reset({chunks:[]},319);
+  for(const {renderer} of cachedLocalGeometry.values())renderer.reset({chunks:[]},319);
+  cachedLocalGeometry.clear();
+ }
  lod.enabled=false;
  if(!keepWorld)lod.clear();
  sceneLoading.hidden=true;
@@ -306,6 +312,32 @@ function markers(){
   changes.forEach((c,i)=>{matrix.makeTranslation(...c.coordinate.map((v,n)=>v-s[n]+.5));mesh.setMatrixAt(i,matrix);});mesh.renderOrder=8;diffGroup.add(mesh);
  }
 }
+const localCacheKey=(hash,profile)=>hash+':'+profile;
+function switchLocalRenderer(next,geometry){
+ if(residentGeometry?.hash){
+  for(const entry of chunks.loaded.values())localGeometry.remove(entry.group);
+  const key=localCacheKey(residentGeometry.hash,residentGeometry.profile);
+  cachedLocalGeometry.get(key)?.renderer.reset({chunks:[]},319);
+  cachedLocalGeometry.set(key,{renderer:chunks,geometry:residentGeometry});
+ }
+ chunks=next;residentGeometry=geometry;
+ for(const entry of chunks.loaded.values())localGeometry.add(entry.group);
+}
+function trimLocalCache(){
+ let used=lod.loadedVertices+(residentGeometry?.vertices??0);
+ for(const {geometry} of cachedLocalGeometry.values())used+=geometry.vertices;
+ for(const [key,entry] of cachedLocalGeometry){
+  if(cachedLocalGeometry.size<=2&&used<=lod.capacity.maxVertices)return;
+  cachedLocalGeometry.delete(key);
+  used-=entry.geometry.vertices;
+  entry.renderer.reset({chunks:[]},319);
+ }
+}
+function cachedLocalSnapshot(hash){
+ if(!hash)return;
+ if(residentGeometry?.hash===hash)return residentGeometry.snapshot;
+ for(const {geometry} of cachedLocalGeometry.values())if(geometry.hash===hash)return geometry.snapshot;
+}
 function renderScene(wanted,wantedRegion,config,{incomingDelta,visibilityOnly=false,current,commit}){
  const run=async()=>{
   if(!current())return;
@@ -314,9 +346,16 @@ function renderScene(wanted,wantedRegion,config,{incomingDelta,visibilityOnly=fa
   const previous=residentGeometry;
   const sameProfile=previous?.profile===profile;
   const reused=!!wantedRegion.snapshot_hash&&sameProfile&&previous.hash===wantedRegion.snapshot_hash;
+  const cacheKey=localCacheKey(wantedRegion.snapshot_hash,profile);
+  const cached=!reused&&wantedRegion.snapshot_hash&&cachedLocalGeometry.get(cacheKey);
+  const changedDocument=previous&&previous.snapshot.uuid===wanted.uuid&&previous.document!==documentKey(wantedRegion);
   let meshUpdate={mode:'reused',rebuilt_chunks:0,retained_chunks:chunks.loaded.size};
-  if(!reused){
-   const delta=sameProfile
+  if(cached){
+   cachedLocalGeometry.delete(cacheKey);
+   switchLocalRenderer(cached.renderer,{...cached.geometry,document:documentKey(wantedRegion)});
+   meshUpdate.retained_chunks=chunks.loaded.size;
+  }else if(!reused){
+   const delta=sameProfile&&!changedDocument
     ?(incomingDelta?.from_hash===previous.hash?incomingDelta:snapshotDelta(previous.snapshot,wanted,visibilityOnly?Infinity:undefined))
     :null;
    const dirty=delta?affectedChunkColumns(delta):null;
@@ -327,17 +366,21 @@ function renderScene(wanted,wantedRegion,config,{incomingDelta,visibilityOnly=fa
    await Promise.all([...states].map(async state=>{if(await opaqueModel(state,wanted.minecraft))opaqueStates.add(state);}));
    if(!current())return;
    const index=delta?patchLocalIndex(chunks.index,wanted,dirty,opaqueStates):makeIndex(wanted,1,{cull:true,opaqueStates});
-   while(chunks.busy)await new Promise(r=>setTimeout(r,10));
-   const updated=await chunks.update((wanted.bounds[0]+wanted.bounds[3]+1)/2,(wanted.bounds[2]+wanted.bounds[5]+1)/2,256,256,{
+   const renderer=changedDocument&&!delta&&previous.hash?new ChunkRenderer(localGeometry,parts,wanted.bounds.slice(0,3)):chunks;
+   while(renderer.busy)await new Promise(r=>setTimeout(r,10));
+   const updated=await renderer.update((wanted.bounds[0]+wanted.bounds[3]+1)/2,(wanted.bounds[2]+wanted.bounds[5]+1)/2,256,256,{
     chooseVariants:chooseVariantGroups,minecraft:wanted.minecraft,
     parts:(state,options)=>parts(state,{...options,minecraft:wanted.minecraft},!!config.show_invisible),dirty,prepare:awaitTextures,
     geometry:{index,cap:config.max_y,min:config.min_y,origin:wanted.bounds.slice(0,3),replace:!delta},isCurrent:current
    });
    if(!updated)return;
-   residentGeometry={hash:wantedRegion.snapshot_hash,snapshot:wanted,profile,opaqueStates,vertices:localVertices(chunks)};
+   const geometry={hash:wantedRegion.snapshot_hash,snapshot:wanted,profile,opaqueStates,vertices:localVertices(renderer),document:documentKey(wantedRegion)};
+   if(renderer!==chunks)switchLocalRenderer(renderer,geometry);
+   else residentGeometry=geometry;
    meshUpdate={mode:delta?'partial':'full',...updated};
    geometryBuilds++;
-  }
+  }else residentGeometry.document=documentKey(wantedRegion);
+  trimLocalCache();
   commit();
   markers();atmosphere();
   const active=[...new Set(chunks.meshes().map(m=>m.userData.s))].filter(s=>unsupported.has(s));
@@ -426,6 +469,7 @@ async function updateWorldVolume(tileLimit){
  volumeLoadEye=eye;
  await lod.update(target[0],target[2],camera.position.distanceTo(controls.target),origin,cut,eye,undefined,captureFrustum(camera),budget,tileLimit);
  if(owner!==region||lod.loading||lod.residentRevision!==lod.info?.revision)return;
+ trimLocalCache();
  if(owner.panorama){
   // Prefer visible world geometry when retaining the last local view would exceed the scene budget.
   if(residentGeometry&&residentGeometry.vertices+lod.loadedVertices>lod.capacity.maxVertices){
@@ -516,9 +560,10 @@ function restoredSettings(defaults,saved,bounds){
  const max_y=THREE.MathUtils.clamp(saved.max_y,min_y,bounds[4]);
  return {...defaults,...saved,min_y,max_y};
 }
-async function openPanorama(q){
+async function openPanorama(q,current=()=>true,prepared=false){
  if(!q.scene.bounds)throw Error('当前存档中没有可预览的完整三维内容');
  const info=q.scene.occupied_chunks?q.scene:await api('world_scene_info',{preview:true,render_view:true});
+ if(!current())return {cancelled:true};
  if(info.revision!==q.scene.revision)throw Error('打开期间存档已变化，请刷新三维视图');
  ui.rememberView();
  const b=q.scene.bounds,compatible=lod.info?.world_uuid===q.scene.world_uuid&&lod.info.revision===info.revision;
@@ -526,6 +571,10 @@ async function openPanorama(q){
  const next={id:'world-scene',view_id:q.view_id,panorama:true,transient:true,label:q.label??'全景三维',bounds:b,loaded_bounds:b,
   source:'saved_anvil_volume',world:q.scene.world,world_uuid:q.scene.world_uuid,world_revision:q.scene.revision,environment_revision:q.scene.environment_revision};
  const saved=ui.storedView(next);
+ const config=restoredSettings({min_y:b[1],max_y:b[4],show_selection:false,show_grid:false,show_plans:false,
+  show_invisible:settings.show_invisible??false,display_mode:'scene'},saved?.view,b);
+ const marker=await invisibleMap(config.show_invisible);
+ if(!current())return {cancelled:true};
  const keepLocal=residentGeometry?.snapshot.uuid===q.scene.world_uuid;
  clearDocument({keepWorld:compatible,keepLocal});
  fly=true;
@@ -533,23 +582,28 @@ async function openPanorama(q){
  region=next;
  lod.rebase(b.slice(0,3),null);
  lod.enabled=true;showGeometry(worldGeometry,true);
- settings=restoredSettings({min_y:b[1],max_y:b[4],show_selection:false,show_grid:false,show_plans:false,
-  show_invisible:settings.show_invisible??false,display_mode:'scene'},saved?.view,b);
+ settings=config;
  macro.showDetail();
  atmosphere();
- await macro.refresh();
- await lod.initialize(info);
- await configureInvisible(settings.show_invisible);
+ void lod.initialize(info);
+ lod.setShowInvisible(!!config.show_invisible,marker);
  if(!applySceneCamera(q.camera??saved?.camera??q.scene.initial_camera))frame('isometric');
  ui.setRegion(region);ui.setViewFields(settings);ui.toolChanged('orbit');
  $('source-state').textContent='存档全景三维';
  $('source-status').textContent='完整模型与贴图 · 自由相机';
  $('object-summary').textContent=info.occupied_chunks.length+(info.preview_index?' 个候选区块 · 相机周围优先加载':' 个有内容区块 · 全部使用方块模型与贴图')+'\n自由移动观察，双击表面进入方块编辑';
  ui.setLimits(q.scene.limits);
+ if(prepared){
+  volumeQueued=true;
+  refineVolumeIndex(info);
+  requestDraw();
+  return {world_uuid:region.world_uuid,world_revision:q.scene.revision,view_id:region.view_id,representation:'minecraft_block_models',tiles:lod.meshes.size};
+ }
  if(info.progressive_loading&&!sameWorld){
   await updateWorldVolume(lod.capacity.initialTiles);
   volumeQueued=true;
  }else await updateWorldVolume();
+ if(!current())return {cancelled:true};
  refineVolumeIndex(info);
  cameraMode();
  ui.say(info.progressive_loading&&!sameWorld?'附近区块已就绪 · 其余区块继续加载':'实景已就绪 · WASD 移动，右键转头，空格上升，Q/C 下降');
@@ -633,11 +687,11 @@ async function capturePanorama(q){
   }finally{staged.clear();staged.markerMaterial.dispose();}
  });
 }
-async function display(q){
- if(!macro.acceptsDetail(q.navigation_id))return {cancelled:true};
+async function display(q,acceptsView=()=>true){
+ if(!acceptsView()||!macro.acceptsDetail(q.navigation_id))return {cancelled:true};
  ui.rememberView();
  const oldRegion=region,saved=q.region.view_id?ui.storedView(q.region):ui.restoringView(q.region),visibilityOnly=!!q.expected_region_id;
- const current=()=>region===oldRegion&&macro.acceptsDetail(q.navigation_id)&&(!visibilityOnly||!macro.active&&
+ const current=()=>acceptsView()&&region===oldRegion&&macro.acceptsDetail(q.navigation_id)&&(!visibilityOnly||!macro.active&&
   (q.region.source!=='saved_anvil_detail'||macro.matchesConstruction(q.region)));
  if(!current())return {cancelled:true};
  const oldCamera=snapshot&&region?.world_uuid===q.region.world_uuid&&q.region.keep_camera?sceneView():null;
@@ -690,6 +744,12 @@ async function display(q){
   }).catch(error=>ui.say(String(error))).finally(()=>{if(preparingVolumeFor===owner)preparingVolumeFor=undefined;});
  }
  return {...described(),geometry_reused:meshUpdate?.mode==='reused',local_geometry_builds:geometryBuilds,local_mesh_update:meshUpdate};
+}
+async function presentTabView(prepared,current){
+ while(capturing&&current())await new Promise(resolve=>setTimeout(resolve,20));
+ if(!current())return {cancelled:true};
+ if(prepared.kind==='world_scene')return openPanorama(prepared,current,true);
+ return display(prepared,current);
 }
 async function captures(q){
  return captureScope(async()=>{
@@ -804,14 +864,17 @@ async function poll(){
   const openOnShow=initialiseSession&&q.kind==='show';
   initialMapPending = false;
   working=true;sceneChanging=!nonBlockingRequests.has(q.kind);let response;
+  const epoch=workbenchViewEpoch();
+  const current=()=>epoch===workbenchViewEpoch()&&(!q.view_epoch||q.view_epoch===epoch);
   try{
    let result;
-   if(q.kind==='map')result=await macro.open();
+   if(['map','world_scene','display','display_cached','display_delta','select'].includes(q.kind)&&!current())result={cancelled:true};
+   else if(q.kind==='map')result=await macro.open();
    else if(q.kind==='ui_diagnostics'){const samples=[],pids=[];for(let i=0;i<6;i++){const start=performance.now(),data=await api('ui_snapshot');samples.push(performance.now()-start);pids.push(data.backend_pid);}result={samples_ms:samples,median_ms:[...samples].sort((a,b)=>a-b)[3],worker_processes:[...new Set(pids)]};
     if(q.inspect_layout)result.planning_layout=planningLayoutDiagnostics();
    }
    else if(q.kind==='scene_view')result=sceneView();
-   else if(q.kind==='world_scene')result=await openPanorama(q);
+   else if(q.kind==='world_scene')result=await openPanorama(q,current);
    else if(q.kind==='capture_scene')result=await capturePanorama(q);
    else if(q.kind==='capture_viewport')result=await captureViewport(q);
    else if(q.kind==='planning_update'){await macro.refresh(await readWorkbenchSnapshot({fresh:true}));result={planning_updated:true};}
@@ -819,17 +882,18 @@ async function poll(){
    else if(q.kind==='draft_deleted')result=await ui.draftDeleted(q.draft_id);
    else if(q.kind==='capture_map')result=await macro.capture(q);
    else if(q.expected_region_id&&(macro.active||region?.id!==q.expected_region_id))result={cancelled:true};
-   else if(q.kind==='display')result=await display(q);
+   else if(q.kind==='display')result=await display(q,current);
    else if(q.kind==='display_cached'){
+    const cached=cachedLocalSnapshot(q.region.snapshot_hash);
     if(!macro.acceptsDetail(q.navigation_id))result={cancelled:true};
-    else if(!residentGeometry?.hash||residentGeometry.hash!==q.region.snapshot_hash)result={cache_miss:true};
-    else result={...await display({...q,snapshot:residentGeometry.snapshot}),snapshot_reused:true};
+    else if(!cached)result={cache_miss:true};
+    else result={...await display({...q,snapshot:cached},current),snapshot_reused:true};
    }
    else if(q.kind==='display_delta'){
     const delta=q.snapshot_delta;
     if(!macro.acceptsDetail(q.navigation_id))result={cancelled:true};
     else if(!residentGeometry?.hash||residentGeometry.hash!==delta?.from_hash)result={cache_miss:true};
-    else result={...await display({...q,snapshot:applySnapshotDelta(residentGeometry.snapshot,delta)}),snapshot_delta_applied:true};
+    else result={...await display({...q,snapshot:applySnapshotDelta(residentGeometry.snapshot,delta)},current),snapshot_delta_applied:true};
    }
    else if(q.kind==='select'){
     if(!snapshot||q.region.snapshot_hash!==region.snapshot_hash)throw Error('请先打开对应快照');
@@ -981,7 +1045,7 @@ document.addEventListener('keydown',e=>{
   else if(!e.repeat)void savePlanning();
   return;
  }
- if(capturing||macro.active||e.target.closest('input,textarea,select')||e.ctrlKey||e.metaKey)return;
+ if(capturing||ui.loadingDocument||macro.active||e.target.closest('input,textarea,select')||e.ctrlKey||e.metaKey)return;
  heldKeys.add(e.code);
  if(fly&&['KeyW','KeyS','KeyA','KeyD','Space','KeyC'].includes(e.code))e.preventDefault();
  if(e.key==='Escape')ui.toolChanged('select');

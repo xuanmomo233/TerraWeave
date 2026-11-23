@@ -70,7 +70,7 @@ export function savedWorldCamera(index){
  return usable(spawn)?{position:[spawn[0]+12,spawn[1]+12,spawn[2]-12],target:spawn,mode:'free',world_uuid:index.world_uuid}:null;
 }
 function packed(data,index,bits){const per=Math.floor(64/bits),value=data?.[Math.floor(index/per)];return value===undefined?null:Number((BigInt.asUintN(64,value)>>BigInt(index%per*bits))&((1n<<BigInt(bits))-1n));}
-function stateName(palette){const name=palette?.Name;if(typeof name!=='string')return null;const properties=palette.Properties?Object.entries(palette.Properties).sort().map(([k,v])=>k+'='+v):[];return name+(properties.length?'['+properties.join(',')+']':'');}
+export function stateName(palette){const name=palette?.Name;if(typeof name!=='string')return null;const properties=palette.Properties?Object.entries(palette.Properties).sort().map(([k,v])=>k+'='+v):[];return name+(properties.length?'['+properties.join(',')+']':'');}
 export function decodeSurfaceChunk(nbt){
  if(!completeAnvilChunk(nbt))throw Error('Unsupported or incomplete Anvil chunk');
  const sections=new Map((nbt.sections??[]).filter(s=>s.block_states).map(s=>[s.Y,s.block_states]));
@@ -102,6 +102,25 @@ function readChunkData(fd,size,entry,region,cx,cz,missing){
  const bytes=compression===1?gunzipSync(payload,{maxOutputLength}):compression===2?inflateSync(payload,{maxOutputLength}):
   compression===3?payload:compression===4?decodeAnvilLz4(payload,maxOutputLength):null;
  return bytes?normalizeAnvilPalette(parseNbt(bytes)):null;
+}
+export function* readAnvilRegion(file){
+ const location=/^r\.(-?\d+)\.(-?\d+)\.mca$/.exec(path.basename(file));
+ if(!location)throw Error('无效的区域文件名');
+ const fd=fs.openSync(file,'r');
+ try{
+  const {size}=fs.fstatSync(fd),header=Buffer.alloc(4096);
+  if(size<8192||fs.readSync(fd,header,0,header.length,0)!==header.length)throw Error('区域文件头不完整');
+  const startX=Number(location[1])*32,startZ=Number(location[2])*32;
+  for(let cell=0;cell<1024;cell++){
+   const entry=header.readUInt32BE(cell*4);
+   if(!entry)continue;
+   const x=startX+cell%32,z=startZ+Math.floor(cell/32);
+   let chunk;
+   try{chunk=readChunkData(fd,size,entry,path.dirname(file),x,z);}
+   catch(error){yield {x,z,error:error.message};continue;}
+   yield chunk?{x,z,chunk}:{x,z,error:'区块数据无法读取'};
+  }
+ }finally{fs.closeSync(fd);}
 }
 export function readWorldChunk(cx,cz,directory,voidWorld){
  if(directory===undefined){

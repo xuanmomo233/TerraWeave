@@ -19,13 +19,13 @@ export const DESIGN_TOOLS=[
  {name:'redo_draft',description:'Redo a draft edit and optionally display its saved revision. No world writes.',inputSchema:schema({draft_id:id,preview:previewOptions},['draft_id'])},
  {name:'edit_draft',description:'Change or fill draft blocks using their saved world version. Optionally display the saved revision in the same request. No world writes. reset clears the draft overlay.',inputSchema:schema({draft_id:id,blocks:{type:'array',items:block,maxItems:16384},fill:schema({bounds,state},['bounds','state']),reset:{type:'boolean'},preview:previewOptions},['draft_id'])},
  {name:'inspect_draft',description:'Read draft revision, changed coordinates, before/after block states and added/replaced/removed counts.',inputSchema:schema({draft_id:id,offset:integer,limit:integer},['draft_id']),annotations:{readOnlyHint:true}},
- {name:'preview_draft',description:'Display a design at a world-coordinate focus. With reveal_changes in diff mode, a hidden design can show its comparison markers while its target blocks stay hidden.',inputSchema:schema({draft_id:id,mode:{type:'string',enum:['target','base','diff']},focus:{type:'array',items:{type:'number'},minItems:3,maxItems:3},keep_camera:{type:'boolean'},reveal_changes:{type:'boolean'},expected_region_id:id},['draft_id'])},
+ {name:'preview_draft',description:'Display a design at a world-coordinate focus. With reveal_changes in diff mode, a hidden design can show its comparison markers while its target blocks stay hidden.',inputSchema:schema({draft_id:id,mode:{type:'string',enum:['target','base','diff']},focus:{type:'array',items:{type:'number'},minItems:3,maxItems:3},keep_camera:{type:'boolean'},reveal_changes:{type:'boolean'},expected_region_id:id,reuse_preview_id:id},['draft_id'])},
  {name:'export_draft',description:'Freeze a draft revision and its before-states as a JSON file for the independent world-writer MCP.',inputSchema:schema({draft_id:id},['draft_id'])},
  {name:'list_history',description:'List persisted world edit history with undo/redo availability.',inputSchema:schema({}),annotations:{readOnlyHint:true}},
 ];
 
 export function designService(ctx){
- const {folder,atomic,read,readRegion,readRegionMetadata,currentRegion,currentWorldRevision,currentConstruction,exportWorldUuid,saveSnapshot,savePreview,displayRegion,readSavedPositions,normalizeState,prepareBlockAssets,validateBounds,validateEdits,planning,captureDetail}=ctx;
+ const {folder,atomic,read,readRegion,readRegionMetadata,currentRegion,currentWorldRevision,currentConstruction,exportWorldUuid,snapshotPins,saveSnapshot,savePreview,displayRegion,readSavedPositions,normalizeState,prepareBlockAssets,validateBounds,validateEdits,planning,captureDetail}=ctx;
  const valid=id=>typeof id==='string'&&/^[a-zA-Z0-9-]{1,99}$/.test(id);
  function file(group,id){if(!valid(id))throw Error('Invalid '+group+' identity');return path.join(folder(group),id+'.json');}
  function draft(id){
@@ -84,9 +84,24 @@ export function designService(ctx){
   }
   return {patches,overlapping_drafts,overlap_candidates:peers.map(({id,revision})=>({id,revision}))};
  }
- async function preview(d,{mode='target',focus,keep_camera=false,reveal_changes=false,expected_region_id},baseStates){
+ async function preview(d,{mode='target',focus,keep_camera=false,reveal_changes=false,expected_region_id,reuse_preview_id,prepare=false},baseStates){
   if(expected_region_id&&currentRegion()?.id!==expected_region_id)return {cancelled:true};
   const baseId=d.preview_region_id??d.base_region_id;
+  const reveal=mode==='diff'&&reveal_changes;
+  const plans=planning.read(),designVisible=visibility(d,plans);
+  const construction=mode==='base'?null:currentConstruction?.(d.world_uuid);
+  if(reuse_preview_id&&!focus&&!keep_camera&&designVisible){
+   let cached;
+   try{cached=readRegionMetadata(reuse_preview_id);}catch(error){if(error.code!=='ENOENT')throw error;}
+   if(cached?.draft_id===d.id&&cached.draft_revision===d.revision&&cached.world_uuid===d.world_uuid&&
+      cached.preview_source_region_id===baseId&&cached.preview_mode===mode&&!!cached.reveal_changes===!!reveal&&
+      cached.design_visible&&(cached.construction_visibility??'')===(construction?.visibility_revision??'')&&
+      (!cached.world_revision||cached.world_revision===currentWorldRevision?.(d.world_uuid))){
+    if(prepare)return {kind:'display',...readRegion(cached.id),saved:true};
+    const shown=await displayRegion(cached,'display',undefined,undefined,expected_region_id,true);
+    return {...shown,diff:undefined,preview_context_reused:true,preview_reused:true};
+   }
+  }
   let base=readRegion(baseId);
   const diff=diffChanges(baseStates??(d.schema!==2&&baseId===d.base_region_id?base.snapshot:baseFor(d)),d.changes);
   let contextReused=true;
@@ -95,17 +110,19 @@ export function designService(ctx){
    if(target.length!==3||!target.every(Number.isFinite))throw Error('Invalid design focus');
    const worldRevision=mode!=='base'&&base.region.source==='saved_anvil_detail'?currentWorldRevision?.(d.world_uuid):undefined;
    if(!base.snapshot.context_blocks||!coversFocus(base.snapshot.bounds,target)||worldRevision&&base.region.world_revision!==worldRevision){
-    const region=await captureDetail({x:Math.floor(target[0]),z:Math.floor(target[2]),y:target[1],plan_id:d.plan_id,capture_only:true});
-    d={...d,preview_region_id:region.id,focus:target};
-    atomic(file('drafts',d.id),d);
-    base=readRegion(region.id);
+    const captured=await captureDetail({x:Math.floor(target[0]),z:Math.floor(target[2]),y:target[1],plan_id:d.plan_id,capture_only:true,prepare});
+    if(prepare)base={snapshot:captured.snapshot,region:{...captured.region,id:baseId}};
+    else{
+     d={...d,preview_region_id:captured.id,focus:target};
+     atomic(file('drafts',d.id),d);
+     base=readRegion(captured.id);
+    }
     contextReused=false;
    }
   }
   const visible=key=>{const p=key.split(',').map(Number),b=base.snapshot.bounds;return p.every((n,i)=>n>=b[i]&&n<=b[i+3]);};
-  const physical=base.snapshot,construction=mode==='base'?null:currentConstruction?.(d.world_uuid);
+  const physical=base.snapshot;
   if(construction)base={...base,snapshot:projectConstructionSnapshot(physical,construction)};
-  const plans=planning.read(),designVisible=visibility(d,plans);
   let overlappingDrafts=[],overlapCandidates;
   let patches=mode==='base'?(d.schema===2?d.base_cells:{}):d.changes;
   if(mode!=='base'&&!designVisible){
@@ -124,12 +141,12 @@ export function designService(ctx){
   const block_entities=base.snapshot.block_entities&&Object.fromEntries(Object.entries(base.snapshot.block_entities)
    .filter(([position])=>blocks[position]===base.snapshot.blocks[position]));
   const snapshot={...base.snapshot,blocks,context_blocks,block_entities,source:'design_draft',block_entity_count:null,block_entity_positions:undefined,draft_id:d.id,draft_revision:d.revision};
-  const pins=blocks===physical.blocks&&context_blocks===physical.context_blocks
+ const pins=prepare?snapshotPins(snapshot):blocks===physical.blocks&&context_blocks===physical.context_blocks
    ?{snapshot_id:base.region.snapshot_id,snapshot_hash:base.region.snapshot_hash}
    :saveSnapshot(snapshot);
-  const reveal=mode==='diff'&&reveal_changes;
-  const r={...base.region,id:'preview-'+d.id+'-'+d.revision+'-'+mode+(reveal?'-located':'')+'-'+pins.snapshot_hash.slice(0,20),entity_id:undefined,view_id:undefined,label:d.label,notes:d.notes??base.region.notes??'',source:'design_draft',draft_id:d.id,draft_revision:d.revision,design_visible:designVisible,construction_visibility:construction?.visibility_revision??'',overlapping_drafts:overlappingDrafts,overlap_candidates:overlapCandidates,sparse_draft:d.schema===2,detail_for_plan_id:d.plan_id,keep_camera,base_region_id:d.base_region_id,preview_mode:mode,reveal_changes:reveal,diff:designVisible||reveal?diff.rows.filter(c=>visible(c.coordinate.join(','))):[],counts:diff.counts,...pins};
+  const r={...base.region,id:'preview-'+d.id+'-'+d.revision+'-'+mode+(reveal?'-located':'')+'-'+pins.snapshot_hash.slice(0,20),entity_id:undefined,view_id:undefined,label:d.label,notes:d.notes??base.region.notes??'',source:'design_draft',draft_id:d.id,draft_revision:d.revision,design_visible:designVisible,construction_visibility:construction?.visibility_revision??'',overlapping_drafts:overlappingDrafts,overlap_candidates:overlapCandidates,sparse_draft:d.schema===2,detail_for_plan_id:d.plan_id,keep_camera,base_region_id:d.base_region_id,preview_source_region_id:base.region.id,preview_mode:mode,reveal_changes:reveal,diff:designVisible||reveal?diff.rows.filter(c=>visible(c.coordinate.join(','))):[],counts:diff.counts,...pins};
   r.construction_window_key=constructionWindowKey(snapshot.bounds,construction?.visibility_tiles);
+  if(prepare)return {kind:'display',region:r,snapshot};
   savePreview(r);
   const shown=await displayRegion(r,'display',undefined,snapshot,expected_region_id);
   return {...shown,diff:undefined,changed_positions:diff.total,preview_context_reused:contextReused};
@@ -222,7 +239,7 @@ export function designService(ctx){
    atomic(file('drafts',d.id),next);
    return afterEdit(next,options,base);
   }
-  if(name==='preview_draft')return preview(draft(args.draft_id),{...requestedPreview({mode:args.mode,focus:args.focus,keep_camera:args.keep_camera??false}),reveal_changes:args.reveal_changes,expected_region_id:args.expected_region_id});
+  if(name==='preview_draft')return preview(draft(args.draft_id),{...requestedPreview({mode:args.mode,focus:args.focus,keep_camera:args.keep_camera??false}),reveal_changes:args.reveal_changes,expected_region_id:args.expected_region_id,reuse_preview_id:args.reuse_preview_id,prepare:args.prepare});
   if(name==='export_draft'){
    const d=draft(args.draft_id);
    const base=baseFor(d);

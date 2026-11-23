@@ -87,15 +87,30 @@ fn open_local_directory(directory:&Path)->Result<(),String>{
   .map(|_|()).map_err(|e|format!("无法打开目录：{e}"))
 }
 #[tauri::command]
-async fn open_project_folder(id:String,kind:String,project_epoch:u64)->Result<(),String>{
- let details=workbench::workbench_call("project_locations".into(),serde_json::json!({"id":id}),project_epoch).await?;
+async fn open_project_folder(id:String,kind:String,capture_id:Option<String>,project_epoch:u64)->Result<(),String>{
+ let details=workbench::workbench_call("project_locations".into(),serde_json::json!({"id":id}),project_epoch,None).await?;
+ let root=Path::new(details["project_directory"].as_str().ok_or("工程目录不可读取")?);
  let directory=match kind.as_str(){
-  "project"=>details["project_directory"].as_str(),
-  "save" if details["error"].is_null()=>details["directory"].as_str(),
+  "project"=>root.to_path_buf(),
+  "save" if details["error"].is_null()=>Path::new(details["directory"].as_str().ok_or("当前工程尚未关联存档")?).to_path_buf(),
   "save"=>return Err("存档目录不可读取，请重新关联存档".into()),
+  "exports"|"captures"=>{
+   let directory=root.join(&kind);
+   if let Some(id)=capture_id{
+    if kind!="captures"||id.is_empty()||id.len()>=100||!id.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'-'){
+     return Err("预览图片组标识无效".into());
+    }
+    let group=directory.join(id);
+    if !group.join("capture.json").is_file(){return Err("这组预览图片已不存在".into());}
+    group
+   }else{
+    fs::create_dir_all(&directory).map_err(|e|format!("无法准备工程目录：{e}"))?;
+    directory
+   }
+  },
   _=>return Err("未知的工程目录类型".into()),
- }.ok_or("当前工程没有对应的目录")?;
- open_local_directory(Path::new(directory))
+ };
+ open_local_directory(&directory)
 }
 #[tauri::command]
 fn center_view_cursor(window:tauri::Window,x:i32,y:i32)->Result<(),String>{
@@ -108,7 +123,7 @@ fn center_view_cursor(window:tauri::Window,x:i32,y:i32)->Result<(),String>{
 }
 #[tauri::command]
 async fn pick_design_export(window:tauri::Window)->Result<Option<String>,String>{
- let dialog=window.dialog().file().set_title("选择建筑方案").add_filter("建筑方案", &["json"]).set_parent(&window);
+ let dialog=window.dialog().file().set_title("选择原建筑导出文件").add_filter("工坊建筑文件", &["json"]).set_parent(&window);
  let picked=tauri::async_runtime::spawn_blocking(move||dialog.blocking_pick_file()).await.map_err(|e|e.to_string())?;
  picked.map(|entry|entry.into_path().map_err(|e|e.to_string()).and_then(|path|
   path.into_os_string().into_string().map_err(|_|"该文件路径无法转换为文本".into()))).transpose()

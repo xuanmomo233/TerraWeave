@@ -22,12 +22,13 @@ export function mountMapWorkspace(context){
  }
  function returnToMap(){
   context.editor.rememberView();
+  context.editor.cancelTabView();
   const cancel=cancelDetail;
   completeDetail(detailNavigation);
   visible(true);
   cancel?.();
  }
- $('cancel-detail').onclick=returnToMap;
+ $('cancel-detail').onclick=()=>{returnToMap();say('已返回地图');};
  const pendingKey=planId=>'plan:'+planId;
  for(const id of ['plan-name','plan-notes','plan-color','plan-width','plan-layer','plan-min-y','plan-max-y']){
   $(id).addEventListener('input',()=>{
@@ -66,7 +67,7 @@ export function mountMapWorkspace(context){
   }
   context.sketchChanged?.();
  }
- function visible(value){active=value;$('map-host').hidden=!value;context.canvas.hidden=value;$('map-controls').hidden=!value;$('detail-controls').hidden=value;$('detail-switches').hidden=value;$('detail-axis').hidden=value;$('map-tools').hidden=!value;$('detail-tools').hidden=value;$('map-inspector').hidden=!value;$('inspector').hidden=value;$('project-tree').hidden=true;$('planning-tree').hidden=false;$('world-map-tab').classList.toggle('active',value);context.editor.mapActive(value);context.sketchChanged?.();if(value){$('empty-view').hidden=true;$('source-state').textContent='地图规划';$('source-status').textContent='已保存世界地表 + 规划';$('view-badge').textContent='地图总览';$('control-hint').textContent='拖动平移 · 右键旋转 · 滚轮缩放 · 双击进入三维';} viewport.setActive(value); }
+ function visible(value){active=value;$('map-host').hidden=!value;context.canvas.hidden=value;$('map-controls').hidden=!value;$('detail-controls').hidden=value;$('detail-switches').hidden=value;$('detail-axis').hidden=value;$('map-tools').hidden=!value;$('detail-tools').hidden=value;$('map-inspector').hidden=!value;$('inspector').hidden=value;$('world-map-tab').classList.toggle('active',value);context.editor.mapActive(value);context.sketchChanged?.();if(value){$('empty-view').hidden=true;$('source-state').textContent='地图规划';$('source-status').textContent='已保存世界地表 + 规划';$('view-badge').textContent='地图总览';$('control-hint').textContent='拖动平移 · 右键旋转 · 滚轮缩放 · 双击进入三维';} viewport.setActive(value); }
  function adopt(next){if(state&&next.revision<state.revision)return;state=next;if(pendingSelection!==undefined&&(!pendingSelection||state.objects.some(p=>p.id===pendingSelection)))state.selected_id=pendingSelection;}
  function isVisible(kind,item){return visibility.get(kind+':'+item.id)?.value??item.visible!==false;}
  function shownPlanning(){
@@ -75,6 +76,26 @@ export function mountMapWorkspace(context){
  }
  function parentOf(d){return state.objects.find(p=>p.id===d.plan_id||!d.plan_id&&d.base_entity_id&&p.detail_entity_id===d.base_entity_id);}
  function draftVisible(d){const p=parentOf(d),layer=p&&state.layers.find(l=>l.id===p.layer_id);return isVisible('draft',d)&&(!p||isVisible('plan',p))&&(!layer||isVisible('layer',layer));}
+ function navigation(){
+  if(active)return {plan:state?.selected_id};
+  const opened=context.editor.requestedRegion()??context.getRegion?.(),draft=opened?.draft_id;
+  const plan=opened?.detail_for_plan_id??(draft&&state?parentOf(drafts.find(item=>item.id===draft)??{})?.id:state?.selected_id);
+  return {plan,draft};
+ }
+ function followDocument(reveal=false){
+  if(!state)return;
+  const {plan,draft}=navigation(),root=$('planning-tree');
+  if(displayedState)displayedState={...displayedState,selected_id:plan??null};
+  let page;
+  for(const row of root.querySelectorAll('[data-plan-id],[data-draft-id]')){
+   const selected=row.dataset.planId===plan&&!!plan||row.dataset.draftId===draft&&!!draft;
+   const current=draft?row.dataset.draftId===draft:row.dataset.planId===plan&&!!plan;
+   row.classList.toggle('selected',selected);
+   if(current){row.setAttribute('aria-current','true');page=row;}
+   else row.removeAttribute('aria-current');
+  }
+  if(reveal&&page)page.scrollIntoView({block:'nearest',inline:'nearest'});
+ }
  function adoptDrafts(items){
   const previous=new Map(drafts.map(d=>[d.id,d]));
   drafts=items.filter(d=>!d.archived).map(d=>previous.get(d.id)?.revision>d.revision?previous.get(d.id):d);
@@ -112,7 +133,7 @@ export function mountMapWorkspace(context){
  async function selectPlan(id){const ticket=++selectionEpoch;pendingSelection=id??null;state.selected_id=pendingSelection;displayedState=shownPlanning();viewport.setPlanning(displayedState,active);$('planning-tree').querySelectorAll('[data-plan-id]').forEach(row=>row.classList.toggle('selected',row.dataset.planId===state.selected_id));properties();context.editor.mapActive(active);try{const next=await call('select_plan',id?{plan_id:id}:{});if(ticket===selectionEpoch){pendingSelection=undefined;adopt(next);paint();}}catch(error){if(ticket===selectionEpoch){pendingSelection=undefined;await refresh();say(String(error));}}}
  function syncDraftPreview(){
   const r=context.getRegion?.(),d=drafts.find(d=>d.id===r?.draft_id);
-  if(active||!d||r.preview_mode==='base'||visibilityPreview)return;
+  if(active||context.editor.loadingDocument||!d||r.preview_mode==='base'||visibilityPreview)return;
   const rendered=[{id:d.id,revision:r.draft_revision,visible:r.design_visible},...(r.overlapping_drafts??[])];
   const affected=rendered.map(layer=>({layer,draft:drafts.find(item=>item.id===layer.id)}));
   const layerChanged=affected.some(({layer,draft})=>{
@@ -227,6 +248,7 @@ export function mountMapWorkspace(context){
    }
   }
   const independent=drafts.filter(d=>!state.objects.some(p=>d.plan_id===p.id||!d.plan_id&&p.detail_entity_id&&d.base_entity_id===p.detail_entity_id));if(independent.length){root.append(node('div','独立设计方案','planning-layer'));for(const d of independent)draftRow(d,root);}
+  followDocument();
   root.scrollTop=scrollTop;
   if(previousRow){
    const attr=['data-layer-id','data-plan-id','data-draft-id'].find(key=>previousRow.hasAttribute(key));
@@ -387,5 +409,5 @@ export function mountMapWorkspace(context){
   if(request.world_revision!==undefined&&map.revision!==request.world_revision)throw Error('存档地表已变化，请重新请求截图');
   return viewport.capture(request,map,plans);
  }
- return {get active(){return active;},matchesConstruction,open,resumeMap,refresh,flushView:()=>viewport.saveView(),panorama,showDetail(){visible(false);},acceptsDetail:id=>!id||detailNavigation===id,completeDetail,chooseTool,createPlanning,draftHeight,sketch:viewport.sketch,redrawSketch:()=>viewport.drawSketch(),locate:(point,focus)=>viewport.locate(point,focus),enterDetail,fit(){const p=state?.objects.find(p=>p.id===state.selected_id);viewport.fit(p?planBounds(p):info?.bounds);},north(){viewport.view.rotation=0;viewport.request();viewport.draw();viewport.notify();},undo:redo=>run(()=>call(redo?'redo_plan':'undo_plan')),deleteSelected:()=>$('delete-plan').onclick(),save:()=>state?.selected_id?$('save-plan').onclick():context.editor.run(()=>call('save_workspace')),capture,getView:()=>({...viewport.view}),getState:()=>displayedState,getSelected:()=>state?.objects.find(p=>p.id===state.selected_id),getVisibilityRevision:()=>info?.visibility_revision??'',isDraftVisible(id){const d=drafts.find(item=>item.id===id);return d&&draftVisible(d);},selectLocal:chooseTool};
+ return {get active(){return active;},matchesConstruction,followDocument,open,resumeMap,refresh,flushView:()=>viewport.saveView(),panorama,showDetail(){visible(false);},beginTabView(){const cancel=cancelDetail;completeDetail(detailNavigation);if(active)visible(false);cancel?.();},acceptsDetail:id=>!id||detailNavigation===id,completeDetail,chooseTool,createPlanning,draftHeight,sketch:viewport.sketch,redrawSketch:()=>viewport.drawSketch(),locate:(point,focus)=>viewport.locate(point,focus),enterDetail,fit(){const p=state?.objects.find(p=>p.id===state.selected_id);viewport.fit(p?planBounds(p):info?.bounds);},north(){viewport.view.rotation=0;viewport.request();viewport.draw();viewport.notify();},undo:redo=>run(()=>call(redo?'redo_plan':'undo_plan')),deleteSelected:()=>$('delete-plan').onclick(),save:()=>state?.selected_id?$('save-plan').onclick():context.editor.run(()=>call('save_workspace')),capture,getView:()=>({...viewport.view}),getState:()=>displayedState,getSelected:()=>state?.objects.find(p=>p.id===state.selected_id),getVisibilityRevision:()=>info?.visibility_revision??'',isDraftVisible(id){const d=drafts.find(item=>item.id===id);return d&&draftVisible(d);},selectLocal:chooseTool};
 }

@@ -6,11 +6,19 @@ import {javaReleases} from '../minecraft-version.js';
 const [reportsRoot,output]=process.argv.slice(2);
 if(!reportsRoot||!output)throw Error('Usage: node tools/generate-design-catalog.mjs <report-root> <output-json>');
 const versions=[],rules=[],ruleIds=new Map(),blocks=new Map();
+const registries=Object.fromEntries(['item','entity_type','block_entity_type'].map(name=>[name,new Map()]));
 const ordered=table=>Object.fromEntries(Object.entries(table).sort(([a],[b])=>a.localeCompare(b)));
 for(const [version,dataVersion] of Object.entries(javaReleases)){
- const report=JSON.parse(fs.readFileSync(path.join(reportsRoot,version,'generated','reports','blocks.json'),'utf8'));
+ const directory=path.join(reportsRoot,version,'generated','reports');
+ const report=JSON.parse(fs.readFileSync(path.join(directory,'blocks.json'),'utf8'));
  const release=versions.length;
  versions.push([version,dataVersion,Object.keys(report).length]);
+ const registryReport=JSON.parse(fs.readFileSync(path.join(directory,'registries.json'),'utf8'));
+ for(const [name,entries] of Object.entries(registries)){
+  const keys=Object.keys(registryReport['minecraft:'+name].entries);
+  assert.ok(keys.length,version+' '+name);
+  for(const id of keys)entries.set(id,(entries.get(id)??0)|1<<release);
+ }
  for(const [id,definition] of Object.entries(report).sort(([a],[b])=>a.localeCompare(b))){
   const values=ordered(definition.properties??{}),defaults=ordered(definition.states.find(state=>state.default)?.properties??{});
   // Mojang declares the legal combinations as the Cartesian product of property values.
@@ -37,7 +45,9 @@ const json=[
  '{',
  ' "versions":'+JSON.stringify(versions)+',',
  ' "rules":['+rules.map(rule=>'\n  '+JSON.stringify(rule)).join(',')+'\n ],',
- ' "blocks":{'+entries.map(([id,spans])=>'\n  '+JSON.stringify(id)+':'+JSON.stringify(spans)).join(',')+'\n }',
+ ' "blocks":{'+entries.map(([id,spans])=>'\n  '+JSON.stringify(id)+':'+JSON.stringify(spans)).join(',')+'\n },',
+ ' "registries":{'+Object.entries(registries)
+  .map(([name,ids])=>'\n  "'+name+'":'+JSON.stringify(ordered(Object.fromEntries(ids)))).join(',')+'\n }',
  '}',
  ''
 ].join('\n');

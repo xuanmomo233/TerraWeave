@@ -31,7 +31,7 @@
 #new-world-dialog{width:min(410px,90vw)}
 #new-world-error:empty{display:none}
 #view:has(#map-host:not([hidden])) :is(.offline-iris-view,.offline-iris-error){display:none}
-#detail-loading{position:absolute;inset:0;z-index:7;display:grid;place-items:center;background:#141a23}
+#detail-loading,#tab-loading{position:absolute;inset:0;z-index:7;display:grid;place-items:center;background:#141a23}
 .detail-loading-card{display:grid;gap:12px;justify-items:center;color:#99aec8}
 .detail-loading-card strong{color:#d8e7fa;font-size:1.25rem;font-weight:550}
 #cancel-detail{background:#27374b;color:#d4e4f7;padding:6px 12px}

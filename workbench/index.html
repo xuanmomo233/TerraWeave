@@ -64,7 +64,7 @@
      <button id="finish-planning-gesture" type="button">保存规划</button>
     </div>
    </section>
-   <div class="tree-search"><svg class="icon"><use href="#i-search"/></svg><input id="tree-search" placeholder="搜索规划与方案" aria-label="搜索对象"></div><div id="planning-tree" role="tree" aria-label="地图规划图层"></div><div id="project-tree" role="tree" aria-label="局部数据" hidden></div><div class="project-storage"><span id="storage-summary">项目数据</span><button id="compact" title="整理未引用缓存">整理</button></div></aside>
+   <div class="tree-search"><svg class="icon"><use href="#i-search"/></svg><input id="tree-search" placeholder="搜索规划与方案" aria-label="搜索对象"></div><div id="planning-tree" role="tree" aria-label="地图规划图层"></div><div class="project-storage"><span id="storage-summary">项目数据</span><button id="compact" title="整理未引用缓存">整理</button></div></aside>
   <div class="splitter vertical" data-resize="left" role="separator" aria-label="调整项目面板宽度"></div>
   <section class="center-workspace drawer-closed">
    <div class="viewport-shell">
@@ -99,6 +99,9 @@
        <button id="cancel-detail" type="button">返回地图</button>
       </div>
      </div>
+     <div id="tab-loading" hidden><div class="detail-loading-card">
+      <strong id="tab-loading-name"></strong><span role="status">正在读取此页面…</span>
+     </div></div>
      <div class="empty-view" id="empty-view" hidden><svg><use href="#i-cube"/></svg><h2>三维场景</h2><p>从地图双击位置，或选择规划进入详细设计</p></div>
      <pre id="hover"></pre>
      <div class="axis-widget" id="detail-axis" hidden><button id="axis-x" class="axis-x" title="X 轴视图">X</button><button id="axis-y" class="axis-y" title="Y 轴视图">Y</button><button id="axis-z" class="axis-z" title="Z 轴视图">Z</button></div>
@@ -115,6 +118,7 @@
      <div class="gallery-content">
       <div class="gallery-toolbar">
        <span id="gallery-meta"></span>
+       <button id="capture-folder" type="button">打开所在目录</button>
        <button id="capture-multi" type="button" aria-pressed="false">多选</button>
        <button id="capture-delete" type="button">删除本组</button>
       </div>
@@ -130,7 +134,7 @@
    <button id="delete-plan" type="button">删除规划</button>
    <button id="plan-detail" type="button">进入三维细化</button>
   </div></div></section><section id="layer-settings" class="property-section"><h3>图层管理</h3><label>图层名称<input id="layer-name" value="区域规划"></label><div class="property-actions"><button id="rename-layer">重命名</button><button id="delete-layer">删除图层</button></div></section></div><div id="inspector" hidden>
-   <section class="property-section"><h3>基本信息</h3><label>名称<input id="label" aria-label="对象名称"></label><div class="property-summary" id="object-summary">未选择对象</div><div class="pending-edits" id="detail-pending-edits" hidden><span>未保存修改已暂存</span><button id="discard-detail-edits" type="button">放弃修改</button></div><div class="property-actions"><button id="save-notes">保存属性</button><button id="archive-object">归档</button></div></section>
+   <section class="property-section"><h3>基本信息</h3><label>名称<input id="label" aria-label="对象名称"></label><div class="property-summary" id="object-summary">未选择对象</div><div class="pending-edits" id="detail-pending-edits" hidden><span>未保存修改已暂存</span><button id="discard-detail-edits" type="button">放弃修改</button></div><div class="property-actions"><button id="save-notes">保存属性</button><button id="detail-object-action">返回地图</button></div></section>
    <section class="property-section"><h3>区域范围</h3><div class="axis-labels"><span class="x">X</span><span class="y">Y</span><span class="z">Z</span></div><div class="coords"><input id="b0" type="number" aria-label="最小 X"><input id="b1" type="number" aria-label="最小 Y"><input id="b2" type="number" aria-label="最小 Z"></div><div class="coords"><input id="b3" type="number" aria-label="最大 X"><input id="b4" type="number" aria-label="最大 Y"><input id="b5" type="number" aria-label="最大 Z"></div><div class="bounds-captions"><span>上：最小坐标</span><span>下：最大坐标</span></div><button id="save">更新区域范围</button></section>
    <section class="property-section">
     <h3>显示与切层</h3>
@@ -160,7 +164,6 @@
  <footer class="status-bar"><span id="status" role="status">准备就绪</span><span id="source-status">本地工程</span><span id="coordinate-status">—</span></footer>
 </div>
 <div id="menu-popup" class="menu-popup" hidden></div>
-<dialog id="new-region-dialog"><form id="new-region-form"><h2>新增区域</h2><label>区域名称<input id="new-label" value="新区域" required></label><div class="axis-labels"><span>X</span><span>Y</span><span>Z</span></div><div class="coords"><input id="n0" type="number" required><input id="n1" type="number" required><input id="n2" type="number" required></div><div class="coords"><input id="n3" type="number" required><input id="n4" type="number" required><input id="n5" type="number" required></div><p class="hint">从当前工程的存档读取此坐标范围。</p><div class="dialog-actions"><button type="button" id="cancel-new">取消</button><button type="submit" class="accent">读取区域</button></div></form></dialog>
 <dialog id="image-dialog"><button id="close-image">关闭</button><img id="large-image" alt="工作台预览图片"></dialog>
 <dialog id="help-dialog" aria-labelledby="help-title"><h2 id="help-title" tabindex="-1" autofocus>编辑器操作</h2><div id="shortcut-help" role="region" aria-label="快捷键与操作说明" tabindex="0"></div><div class="dialog-actions"><button id="close-help">关闭</button></div></dialog>
 <dialog id="render-settings-dialog">
@@ -281,12 +284,13 @@
 </dialog>
 <dialog id="design-conversion-dialog" aria-labelledby="design-conversion-title">
  <form id="design-conversion-form">
-  <h2 id="design-conversion-title">转换建筑方案</h2>
-  <p class="hint">使用当前工程关联的 Paper 存档作为目标，沿用原方案的坐标。</p>
+  <h2 id="design-conversion-title">转换地图建筑版本</h2>
+  <p class="hint">从当前工程关联的 Java 版存档读取目标版本，建筑沿用原坐标。</p>
   <div class="folder-field">
-   <label for="design-conversion-path">原方案 JSON</label>
-   <div class="folder-picker"><input id="design-conversion-path" type="text" required autofocus>
+   <label for="design-conversion-path">原建筑导出文件</label>
+   <div class="folder-picker"><input id="design-conversion-path" type="text" aria-describedby="design-conversion-source-help" required autofocus>
     <button id="design-conversion-browse" type="button">浏览…</button></div>
+   <p id="design-conversion-source-help" class="hint">在原工程打开建筑草稿，点「导出方案」取得 JSON。文件只记录建筑改动的方块和坐标。</p>
   </div>
   <p id="design-conversion-status" role="status"></p>
   <ul id="design-conversion-issues" class="design-conversion-issues" hidden></ul>
@@ -294,14 +298,35 @@
    <button id="design-conversion-prev" type="button">上一页</button>
    <button id="design-conversion-next" type="button">下一页</button>
   </div>
-  <label id="design-conversion-result" hidden>转换后的方案
-   <input id="design-conversion-output" type="text" readonly>
-  </label>
+  <div id="design-conversion-result" class="folder-field" hidden>
+   <label for="design-conversion-output">转换结果</label>
+   <div class="folder-picker"><input id="design-conversion-output" type="text" readonly>
+    <button id="design-conversion-open-folder" type="button">打开导出目录</button></div>
+  </div>
   <p id="design-conversion-error" role="alert"></p>
   <div class="dialog-actions">
    <button id="design-conversion-close" type="button">关闭</button>
-   <button id="design-conversion-check" type="submit">检查方案</button>
-   <button id="design-conversion-save" class="accent" type="button" disabled>生成方案</button>
+   <button id="design-conversion-check" type="submit">检查兼容性</button>
+   <button id="design-conversion-save" class="accent" type="button" disabled>导出转换结果</button>
+  </div>
+ </form>
+</dialog>
+<dialog id="world-version-dialog" aria-labelledby="world-version-title">
+ <form id="world-version-form">
+  <h2 id="world-version-title">世界存档版本差异</h2>
+  <p id="world-version-source" class="hint">读取当前工程关联的 Java 版存档。</p>
+  <label for="world-version-target">目标版本<select id="world-version-target" required></select></label>
+  <p id="world-version-status" role="status"></p>
+  <ul id="world-version-issues" class="design-conversion-issues" hidden></ul>
+  <div id="world-version-result" class="folder-field" hidden>
+   <label for="world-version-report">完整差异清单</label>
+   <div class="folder-picker"><input id="world-version-report" type="text" readonly>
+    <button id="world-version-folder" type="button">打开导出目录</button></div>
+  </div>
+  <p id="world-version-error" role="alert"></p>
+  <div class="dialog-actions">
+   <button id="world-version-close" type="button">关闭</button>
+   <button id="world-version-check" class="accent" type="submit" disabled>扫描存档</button>
   </div>
  </form>
 </dialog>

@@ -1,6 +1,9 @@
 import {invoke} from '@tauri-apps/api/core';
 const writes=new Set(['create_layer','update_layer','delete_layer','save_plan','delete_plan','select_plan','undo_plan','redo_plan','save_map_view','save_workspace','update_draft']);
 let mutation=Promise.resolve(),snapshot=null;
+let viewEpoch='initial';
+export function beginWorkbenchView(){viewEpoch=crypto.randomUUID();return viewEpoch;}
+export function workbenchViewEpoch(){return viewEpoch;}
 // Retain the project generation of this document, even in callbacks that outlive a switch.
 const projectEpoch=Number(new URLSearchParams(globalThis.location?.search).get('project_epoch')??0);
 export function invokeProject(command,args={}){
@@ -23,7 +26,8 @@ export function readWorkbenchSnapshot({fresh=false}={}){
 }
 export function callWorkbench(tool,args={}){
  if(tool==='ui_snapshot')return readWorkbenchSnapshot();
- const run=()=>invokeProject('workbench_call',{tool,args});
+ const issuedFor=viewEpoch;
+ const run=()=>invokeProject('workbench_call',{tool,args,viewEpoch:issuedFor});
  if(writes.has(tool)){const next=mutation.then(run);mutation=next.catch(()=>{});return next;}
  return run();
 }

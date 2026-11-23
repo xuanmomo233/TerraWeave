@@ -71,8 +71,8 @@ button:disabled { cursor: default; }
 #focus-tool { margin-top: 4px; width: auto; padding-inline: 8px; }
 .tree-search { padding: 8px 10px; }
 .tree-search input { background: var(--chrome); border-color: var(--line); }
-.planning-layer, .planning-object, .tree-row { color: var(--muted); }
-.planning-layer.selected, .planning-object.selected, .tree-row.selected { background: var(--selected); color: var(--text); }
+.planning-layer, .planning-object { color: var(--muted); }
+.planning-layer.selected, .planning-object.selected { background: var(--selected); color: var(--text); }
 .property-section { padding: 12px 14px; border-color: var(--line); }
 .property-section h3 { color: var(--text); font-size: 1rem; }
 .property-section label, .property-summary, .viewport-footer { color: var(--muted); font-size: 0.9167rem; }

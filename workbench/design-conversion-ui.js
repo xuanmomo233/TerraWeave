@@ -1,7 +1,8 @@
 import {invoke} from '@tauri-apps/api/core';
+import {javaReleases} from './minecraft-version.js';
 import {callWorkbench} from './workbench-api.js';
 
-export function mountDesignConversion(){
+export function mountDesignConversion(openExports){
  const element=name=>document.getElementById('design-conversion-'+name);
  const dialog=element('dialog'),path=element('path'),status=element('status'),error=element('error');
  const save=element('save'),result=element('result'),output=element('output'),issues=element('issues');
@@ -93,18 +94,77 @@ export function mountDesignConversion(){
    output.value=converted.path;
    result.hidden=false;
    output.select();
-   status.textContent='方案已生成 · 目标版本 '+converted.target_version;
+   status.textContent='建筑已导出 · 目标版本 '+converted.target_version;
   }catch(failure){
    checked=undefined;
    error.textContent=String(failure);
   }finally{setBusy(false);}
  };
  element('close').onclick=()=>dialog.close();
+ element('open-folder').onclick=openExports;
  dialog.addEventListener('cancel',event=>{if(busy)event.preventDefault();});
  return ()=>{
   if(dialog.open)return;
   path.value='';
   reset();
   dialog.showModal();
+ };
+}
+
+export function mountWorldVersionAudit(openExports){
+ const element=name=>document.getElementById('world-version-'+name);
+ const dialog=element('dialog'),target=element('target'),check=element('check'),status=element('status'),error=element('error');
+ const source=element('source'),issues=element('issues'),result=element('result');
+ const versions=Object.keys(javaReleases);
+ const kinds={incompatible_block:'方块待替换',adapted_block:'可适配方块',item:'缺少物品',entity:'缺少实体',
+  block_entity:'缺少方块实体',check_data:'需复核',unreadable:'读取失败'};
+ let busy=false;
+ target.onchange=()=>{status.textContent='';error.textContent='';issues.hidden=result.hidden=true;};
+ element('form').onsubmit=async event=>{
+  event.preventDefault();
+  if(busy||check.disabled)return;
+  busy=check.disabled=target.disabled=true;
+  error.textContent='';
+  issues.hidden=result.hidden=true;
+  status.textContent='正在扫描已保存的区块和数据文件…';
+  try{
+   const report=await callWorkbench('audit_world_version',{target_version:target.value});
+   const counts=Object.entries(report.counts).filter(([,count])=>count).map(([name,count])=>kinds[name]+' '+count);
+   status.textContent='已读取 '+report.scope.terrain_chunks+' 个地形区块 · '+counts.join(' · ');
+   issues.replaceChildren();
+   for(const issue of report.issues){
+    const row=document.createElement('li');
+    const title=document.createElement('strong'),detail=document.createElement('small');
+    title.textContent=kinds[issue.kind]+' · '+issue.id;
+    detail.textContent=issue.reason+' · '+issue.count+' 处 · '+issue.samples[0];
+    row.append(title,detail);issues.append(row);
+   }
+   issues.hidden=!report.issues.length;
+   element('report').value=report.report_path;
+   result.hidden=false;
+  }catch(failure){
+   status.textContent='';
+   error.textContent=String(failure);
+  }finally{busy=check.disabled=target.disabled=false;}
+ };
+ element('folder').onclick=openExports;
+ element('close').onclick=()=>dialog.close();
+ return async()=>{
+  if(dialog.open||busy)return;
+  target.replaceChildren();
+  target.onchange();
+  check.disabled=true;
+  source.textContent='正在读取当前工程的存档…';
+  dialog.showModal();
+  try{
+   const info=await callWorkbench('world_map_info');
+   if(!dialog.open)return;
+   if(!info.world_uuid)throw Error('请先在当前工程关联要检查的 Java 版存档');
+   source.textContent=info.world+' · 当前版本 '+info.minecraft;
+   const options=versions.filter(version=>version!==info.minecraft);
+   for(const version of options)target.append(new Option(version,version));
+   target.value=versions[versions.indexOf(info.minecraft)-1]??options.at(-1);
+   check.disabled=false;
+  }catch(failure){source.textContent='当前工程';error.textContent=String(failure);}
  };
 }

@@ -314,7 +314,7 @@ fn background_read(tool:&str)->bool{
   |"list_history"|"list_captures"|"read_editor_state"|"project_locations"|"list_projects"|"render_settings"|"iris_scene_inputs")
 }
 #[tauri::command]
-pub async fn workbench_call(tool:String,args:Value,project_epoch:u64)->Result<Value,String>{
+pub async fn workbench_call(tool:String,args:Value,project_epoch:u64,view_epoch:Option<String>)->Result<Value,String>{
  let (state,operation)={
   let mut active=active_project().lock().map_err(|e|e.to_string())?;
   active.check_page(project_epoch)?;
@@ -329,7 +329,7 @@ pub async fn workbench_call(tool:String,args:Value,project_epoch:u64)->Result<Va
   command.env("TERRAWEAVE_DESKTOP_EXE",std::env::current_exe().map_err(|e|e.to_string())?);
   #[cfg(windows)]{use std::os::windows::process::CommandExt;command.creation_flags(0x08000000);}
   let mut child=command.spawn().map_err(|e|e.to_string())?;
-  child.stdin.take().ok_or("Missing tool stdin")?.write_all(serde_json::to_string(&json!({"tool":tool,"args":args})).unwrap().as_bytes()).map_err(|e|e.to_string())?;
+  child.stdin.take().ok_or("Missing tool stdin")?.write_all(serde_json::to_string(&json!({"tool":tool,"args":args,"view_epoch":view_epoch})).unwrap().as_bytes()).map_err(|e|e.to_string())?;
   let output=child.wait_with_output().map_err(|e|e.to_string())?;let v:Value=serde_json::from_slice(&output.stdout).map_err(|_|format!("Invalid workbench tool response: {}",String::from_utf8_lossy(&output.stderr)))?;
   if !output.status.success()||v["error"].is_string(){return Err(v["error"].as_str().unwrap_or("Workbench tool failed").into())}Ok(v)
  }).await.map_err(|e|e.to_string())?
@@ -337,7 +337,7 @@ pub async fn workbench_call(tool:String,args:Value,project_epoch:u64)->Result<Va
 #[tauri::command]
 pub async fn switch_project(id:String,project_epoch:u64)->Result<u64,String>{
  let source=page_root(project_epoch)?;
- let details=workbench_call("project_locations".into(),json!({"id":id}),project_epoch).await?;
+ let details=workbench_call("project_locations".into(),json!({"id":id}),project_epoch,None).await?;
  let target=PathBuf::from(details["project_directory"].as_str().ok_or("无法读取目标工程目录")?);
  tauri::async_runtime::spawn_blocking(move||{
   {

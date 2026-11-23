@@ -30,7 +30,7 @@ export const MAP_TOOLS=[
  {name:'inspect_captured_scene',description:'Verify a panoramic PNG capture\'s frozen volumetric geometry and list its exact tile bounds, LODs and revisions.',inputSchema:schema({capture_id:id},['capture_id']),annotations:{readOnlyHint:true}},
 ];
 export function mapService(ctx){
- const {root,planning,desktopRequest,saveSnapshot,savePreview,displayRegion}=ctx;
+ const {root,planning,desktopRequest,snapshotPins,saveSnapshot,savePreview,displayRegion}=ctx;
  const viewFile=path.join(root,'map-view.json');
  const construction=index=>constructionView(root,index.world_uuid,planning.read(),index.paper_world_uuid);
  const info=()=>{const index=worldIndex(),projected=construction(index);const {regions,chunks,directory,region_directory,...publicIndex}=index;let view=null;try{view=JSON.parse(fs.readFileSync(viewFile,'utf8'));}catch{}return {...publicIndex,view,visibility_revision:projected?.visibility_revision??'',visibility_tiles:projected?.visibility_tiles??{},visibility_map_tiles:projected?.visibility_map_tiles??{}};};
@@ -76,12 +76,13 @@ export function mapService(ctx){
   const bounds=[cx*16-16,minY,cz*16-16,cx*16+31,minY+63,cz*16+31];
   const visible=args.capture_only?null:construction(index);
   const raw=savedDetailSnapshot(bounds,index),snapshot=projectConstructionSnapshot(raw,visible);
-  const pins=saveSnapshot(snapshot);
+  const pins=args.prepare?snapshotPins(snapshot):saveSnapshot(snapshot);
   const label=tab.label??(tab.view_id?'三维 '+x+' / '+Math.floor(focus)+' / '+z:'三维场景');
   const r={id:'world-view-'+randomUUID(),view_id:tab.view_id,label,bounds,loaded_bounds:bounds,world:snapshot.world,world_uuid:snapshot.uuid,minecraft:snapshot.minecraft,source:snapshot.source,world_revision:index.revision,environment_revision:index.environment_revision,transient:true,surface_y:surface.y,focus_position:[x+.5,focus,z+.5],unknown_chunks:snapshot.unknown_chunks??[],block_entity_count:snapshot.block_entity_count,block_entity_positions:snapshot.block_entity_positions,detail_for_plan_id:args.plan_id,keep_camera:args.keep_camera??false,captured_at:new Date().toISOString(),...pins};
   r.construction_visibility=visible?.visibility_revision??'';
   r.construction_window_key=constructionWindowKey(bounds,visible?.visibility_tiles);
   if(index.void_world) Object.assign(r,{construction_y:Math.floor(focus),pristine_void:index.pristine_void});
+  if(args.prepare)return {kind:'display',region:r,snapshot};
   savePreview(r);
   return args.capture_only?r:displayRegion(r,'display',args.navigation_id,snapshot,args.expected_region_id);
  }
@@ -101,8 +102,9 @@ export function mapService(ctx){
   if(name==='world_volume_tile'){const index=worldIndex();if(args.world_revision&&index.revision!==args.world_revision)throw Error('世界存档已变化，请刷新全景三维');return volumeTile(args.x,args.z,args.level,path.join(root,'volume-cache'),index);}
   if(name==='open_world_scene'){
    const tab=sceneTab(args),index=worldIndex();
-   if(index.pristine_void){const [x,y,z]=index.void_world.spawn;return browse({x,y,z,...tab,label:tab.label??index.world});}
+   if(index.pristine_void){const [x,y,z]=index.void_world.spawn;return browse({x,y,z,...tab,label:tab.label??index.world,prepare:args.prepare});}
    const scene=sceneInfo(index,true,true),initial_camera=savedWorldCamera(index);
+   if(args.prepare)return {kind:'world_scene',scene:{...scene,initial_camera},...tab};
    if(scene.progressive_loading)delete scene.occupied_chunks;
    return desktopRequest({kind:'world_scene',scene:{...scene,initial_camera},...tab});
   }

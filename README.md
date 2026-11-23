@@ -4,15 +4,15 @@ Minecraft 地图规划与创作工作台。先在整张世界地图上划分区�
 
 ## 下载
 
-当前桌面版本 [v0.7.7](https://github.com/xuanmomo233/TerraWeave/releases/tag/v0.7.7)。
+当前桌面版本 [v0.7.8](https://github.com/xuanmomo233/TerraWeave/releases/tag/v0.7.8)。
 
 | 下载 | 使用方式 |
 | --- | --- |
-| [Windows x64 便携开发包](https://github.com/xuanmomo233/TerraWeave/releases/download/v0.7.7/TerraWeave-0.7.7-windows-x64-portable.zip) | 完整解压后双击第一层的 `织境工坊.exe` |
-| [Windows x64 双语安装包](https://github.com/xuanmomo233/TerraWeave/releases/download/v0.7.7/TerraWeave-0.7.7-windows-x64-setup.exe) | 安装向导支持简体中文、English 和自选目录 |
+| [Windows x64 便携开发包](https://github.com/xuanmomo233/TerraWeave/releases/download/v0.7.8/TerraWeave-0.7.8-windows-x64-portable.zip) | 完整解压后双击第一层的 `织境工坊.exe` |
+| [Windows x64 双语安装包](https://github.com/xuanmomo233/TerraWeave/releases/download/v0.7.8/TerraWeave-0.7.8-windows-x64-setup.exe) | 安装向导支持简体中文、English 和自选目录 |
 | [TerraWeave.jar 1.2.0](https://github.com/xuanmomo233/TerraWeave/releases/download/plugin-v1.2.0/TerraWeave.jar) | 所有已验收的 Paper 版本共用同一份 JAR |
 
-v0.7.7 支持 Java 26.3 存档，以及 1.20.1 至 26.3 的建筑方案双向转换。工程可在当前窗口切换。隐藏已施工的规划时，仅更新受影响的图块，三维视图共享已加载的背景模型。工作台按硬件和可用内存调整图块缓存与渲染预算。存档读取和出图可离线完成。需要向 Paper 写入方块时可使用 TerraWeave 插件 1.2.0。
+v0.7.8 的标签可在保存或旧页面仍加载时切换。左侧导航跟随当前页面，当前页稳定后会预读相邻标签的方块数据。「文件」菜单可打开存档、导出文件和预览图片所在的目录，也可从 Java 存档直接扫描目标版本的差异。建筑改动可在 1.20.1 至 26.3 之间转换。需要向 Paper 写入方块时可使用 TerraWeave 插件 1.2.0。
 
 ## 启动与目录
 

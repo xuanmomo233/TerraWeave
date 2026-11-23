@@ -45,8 +45,9 @@ const fixtureMap=mapService({
  savePreview:region=>savedViews.set(region.id,region),
  displayRegion:(region,kind,navigation_id)=>send({kind,region,navigation_id,snapshot:viewSnapshots.get(region.snapshot_id)})
 });
-let job={request:{id:'qa-map',kind:'map'}},reply,view,sequence=0,barrierWait=null,modelReads=0,clipboardText='',selectionDelay=0,browseReads=0,fullscreen=false,sceneAckHold,detailWait,residencyFixture;const captures=[],openedPackFolders=[],desktopQueue=[];
+let job={request:{id:'qa-map',kind:'map'}},reply,view,sequence=0,barrierWait=null,modelReads=0,clipboardText='',selectionDelay=0,browseReads=0,fullscreen=false,sceneAckHold,detailWait,residencyFixture,previewHold;const captures=[],openedPackFolders=[],openedProjectFolders=[],desktopQueue=[];
 const tileReads={started:0,completed:0,failed:0};
+const preparedTabs=[];
 const capacityProbe=Promise.withResolvers();
 let probedRenderer;
 const pickedDirectories=[path.join(fixture,'带空格的 存档'),null];
@@ -70,6 +71,7 @@ async function bridge(command,args){
  }
  if(command==='workbench_clipboard'){if(args.text!==undefined){clipboardText=args.text;return '';}return clipboardText;}
  if(command==='open_pack_folder'){assert.ok(['resourcepacks','shaderpacks'].includes(args.kind));openedPackFolders.push(args.kind);return null;}
+ if(command==='open_project_folder'){openedProjectFolders.push(args);return null;}
  if(command==='read_asset'){
   if(failedTexture&&args.name.endsWith('block/magenta_glazed_terracotta.png'))throw Error('模拟贴图读取异常');
   if(args.name.endsWith('item/barrier.png')&&barrierWait)await barrierWait;
@@ -131,8 +133,12 @@ async function bridge(command,args){
   if(tool==='delete_draft'){draftFixture.delete(d.id);return {id:d.id,deleted:true};}
   if(tool==='edit_draft'){hiddenEditRequests++;return d;}
   if(tool==='undo_draft'||tool==='redo_draft'){draftUndoRequests++;return d;}
-  if(tool==='preview_draft'){
-   draftPreviewArgs=input;
+  if(tool==='preview_draft'||tool==='prepare_tab_view'){
+   if(tool==='preview_draft')draftPreviewArgs=input;
+   if(previewHold?.id===d.id){
+    const held=previewHold;previewHold=undefined;
+    held.started.resolve();await held.release.promise;
+   }
    const lower=d.id==='qa-independent'&&!d.visible?draftFixture.get('qa-attached'):null;
    const plans=planner.read();
    const parent=lower&&plans.objects.find(p=>p.id===lower.plan_id);
@@ -143,9 +149,11 @@ async function bridge(command,args){
    const snapshot=lowerVisible?{...local.snapshot,blocks:{...local.snapshot.blocks,[changeKey]:lowerMaterial}}:local.snapshot;
    const hash=snapshot===local.snapshot?local.region.snapshot_hash:snapshotHash(snapshot);
    const camera=input.keep_camera?await send({kind:'scene_view'}):undefined;
-   const result=await send({kind:'display',camera,snapshot,expected_region_id:input.expected_region_id,region:{...local.region,id:d.id+'-'+d.revision,snapshot_hash:hash,
+   const request={kind:'display',camera,snapshot,expected_region_id:input.expected_region_id,region:{...local.region,id:d.id+'-'+d.revision,snapshot_hash:hash,
     label:d.label,source:'design_draft',draft_id:d.id,draft_revision:d.revision,preview_mode:input.mode??'target',reveal_changes:input.reveal_changes,
-    design_visible:d.design_visible,overlapping_drafts,overlap_candidates,diff:input.reveal_changes?[{coordinate:changeFocus,kind:'added'}]:[]}});
+    design_visible:d.design_visible,overlapping_drafts,overlap_candidates,diff:input.reveal_changes?[{coordinate:changeFocus,kind:'added'}]:[]}};
+   if(tool==='prepare_tab_view'){preparedTabs.push(d.id);return {...request,ticket:'qa-ticket'};}
+   const result=await send(request);
    if(lower)overlapPreview={block:snapshot.blocks[changeKey],expectedRegion:input.expected_region_id};
    return result;
   }
@@ -162,7 +170,14 @@ async function bridge(command,args){
  if(tool==='list_captures')return [...captures,...await callTool(tool,input)];
  if(tool==='get_scene_view')return send({kind:'scene_view'});
  if(tool==='capture_current_view')return send({kind:'capture_viewport',width:input.width??1280,height:input.height??800});
- if(tool==='preview_draft'&&input.draft_id==='qa-missing-draft')throw Error('草稿已删除或不存在');
+ if((tool==='preview_draft'||tool==='prepare_tab_view')&&input.draft_id==='qa-missing-draft')throw Error('草稿已删除或不存在');
+ if(tool==='commit_tab_view')return {committed:true};
+ if(tool==='prepare_tab_view'){
+  if(input.kind==='panorama')return {kind:'world_scene',scene:await callTool('world_scene_info'),view_id:input.view_id,label:input.label};
+  const region=savedViews.get(input.region_id)??{...local.region,id:input.region_id??'qa-world-detail',transient:true,view_id:input.view_id,
+   detail_for_plan_id:input.plan_id,label:input.label??local.region.label};
+  return {kind:'display',region,snapshot:viewSnapshots.get(region.snapshot_id)??local.snapshot,ticket:'qa-ticket'};
+ }
  if(tool==='world_scene_info'&&residencyFixture){
   if(!input.preview)return residencyFixture;
   return {...residencyFixture,preview_index:true,occupied_chunks:[...residencyFixture.occupied_chunks,[20,20,64,64]]};
@@ -218,6 +233,12 @@ try{
  assert.ok(await page.getByRole('menuitem',{name:/关闭当前标签页/}).isDisabled());
  const fileCommands=await page.getByRole('menuitem').allTextContents();
  assert.ok(fileCommands.every(label=>!/(?:…|\.\.\.)/.test(label)),'File menu commands should use plain labels');
+ const folderOpened=response=>response.url().endsWith('/__bridge')&&response.request().postDataJSON()?.command==='open_project_folder';
+ for(const [label,kind] of [['打开导出目录','exports'],['打开存档目录','save'],['打开预览图片目录','captures']]){
+  await Promise.all([page.waitForResponse(folderOpened),page.getByRole('menuitem',{name:label,exact:true}).click()]);
+  assert.equal(openedProjectFolders.at(-1)?.kind,kind);
+  await page.locator('[data-menu="file"]').click();
+ }
  await page.keyboard.press('Escape');
  await page.locator('[data-menu="file"]').press('ArrowDown');
  assert.equal(await page.locator(':focus').innerText(),'切换工程');
@@ -239,8 +260,8 @@ try{
  await page.keyboard.press('Escape');
  assert.ok(await page.locator('#create-project-dialog').isVisible());
  await page.locator('#create-project-cancel').click();
- for(const id of ['create-project-dialog','new-world-dialog','world-source-dialog','new-region-dialog',
-  'render-settings-dialog','locate-position-dialog','draft-action-dialog','map-height-dialog','appearance-dialog']){
+ for(const id of ['create-project-dialog','new-world-dialog','world-source-dialog','design-conversion-dialog',
+  'world-version-dialog','render-settings-dialog','locate-position-dialog','draft-action-dialog','map-height-dialog','appearance-dialog']){
   const dialog=page.locator('#'+id);
   await dialog.evaluate(element=>element.showModal());
   const bounds=await dialog.locator('.dialog-actions > button:visible').evaluateAll(buttons=>buttons.map(button=>{
@@ -427,6 +448,8 @@ try{
  const batchCaptures=captures.filter(c=>c!==currentImage);
  assert.equal(batchCaptures.length,2);
  await captureRow(currentImage.capture_id).click();
+ await Promise.all([page.waitForResponse(folderOpened),page.locator('#capture-folder').click()]);
+ assert.equal(openedProjectFolders.at(-1)?.captureId,currentImage.capture_id);
  await removeCapture.click();
  await page.locator('#draft-action-cancel').click();
  assert.ok(await captureRow(currentImage.capture_id).isVisible());
@@ -738,6 +761,7 @@ try{
  await independent.click({button:'right'});await draftMenu('打开方案').click();
  const draftTab=page.locator('#document-tabs [role="tab"]').filter({hasText:'独立方案验收'});
  await draftTab.waitFor({state:'visible'});
+ assert.equal(await independent.getAttribute('aria-current'),'true');
  const beforeRename=await send({kind:'scene_view'});
  await independent.click({button:'right'});await draftMenu('重命名').click();
  await page.locator('#draft-action-name').fill('已命名岸线方案');
@@ -771,6 +795,27 @@ try{
  assert.deepEqual(returned.position,beforeTab.position);
  assert.ok(Math.hypot(...returned.target.map((n,i)=>n-beforeTab.target[i]))<1e-6);
  assert.equal(await page.locator('#layer-number').inputValue(),String(selectedLayer));
+ await attached.locator('.name').click();
+ const attachedTab=page.locator('[data-key="draft:qa-attached"] .tab-open'),independentTab=page.locator('[data-key="draft:qa-independent"] .tab-open');
+ await page.waitForFunction(()=>document.querySelector('[data-key="draft:qa-attached"] .tab-open')?.getAttribute('aria-selected')==='true');
+ const paused={id:'qa-independent',started:Promise.withResolvers(),release:Promise.withResolvers()};
+ previewHold=paused;
+ try{
+  await independentTab.click();
+  await paused.started.promise;
+  assert.equal(await independentTab.getAttribute('aria-selected'),'true');
+  assert.ok(await page.locator('#tab-loading').isVisible());
+  await attachedTab.click();
+  await page.waitForFunction(()=>document.querySelector('[data-key="draft:qa-attached"] .tab-open')?.getAttribute('aria-selected')==='true'&&
+   document.querySelector('#tab-loading').hidden&&document.querySelector('#view-badge').textContent.includes('关联方案验收'));
+ }finally{paused.release.resolve();}
+ await page.waitForFunction(()=>document.querySelector('[data-key="draft:qa-attached"] .tab-open')?.getAttribute('aria-selected')==='true'&&
+  !document.querySelector('[aria-busy="true"].tab-open')&&document.querySelector('#status').textContent.includes('关联方案验收'));
+ assert.equal(await attached.getAttribute('aria-current'),'true');
+ const beforePrefetch=preparedTabs.filter(id=>id==='qa-independent').length;
+ for(let i=0;i<80&&preparedTabs.filter(id=>id==='qa-independent').length===beforePrefetch;i++)await new Promise(resolve=>setTimeout(resolve,75));
+ assert.ok(preparedTabs.filter(id=>id==='qa-independent').length>beforePrefetch,'An idle foreground view must prefetch its neighbor');
+ assert.equal(await attachedTab.getAttribute('aria-selected'),'true');
  await page.locator('#world-map-tab').click();
  await page.waitForFunction(()=>!document.querySelector('#map-host').hidden);
  const readsBeforeVisibility=panelReads;
@@ -1030,6 +1075,14 @@ try{
  assert.deepEqual(localAgain.position,residentReturned.position);
  assert.equal(localAgain.render_stats.model_tiles_baked,panoramaAgain.render_stats.model_tiles_baked);
  assert.equal(modelReads,switchReads);
+ const otherSnapshot={...localRequest.snapshot,blocks:{...localRequest.snapshot.blocks}};
+ const neighborCell=Object.keys(otherSnapshot.blocks)[0];
+ otherSnapshot.blocks[neighborCell]=otherSnapshot.blocks[neighborCell]==='minecraft:stone'?'minecraft:air':'minecraft:stone';
+ const otherRegion={...localRequest.region,id:'qa-local-neighbor-tab',view_id:'qa-neighbor-tab',snapshot_hash:snapshotHash(otherSnapshot)};
+ await send({kind:'display',region:otherRegion,snapshot:otherSnapshot,camera:residentReturned});
+ const warmSwitch=await send({kind:'display_cached',region:localRequest.region,camera:residentReturned});
+ assert.equal(warmSwitch.snapshot_reused,true);
+ assert.equal(warmSwitch.local_mesh_update.rebuilt_chunks,0);
  console.log('局部 → 全景 → 局部，复用 130 个背景图块，新增读取和网格重建均为 0。含桌面消息往返 '+Math.round(performance.now()-switchStart)+' ms');
  const anchor=planner.read().objects.find(plan=>plan.name===anchorName);
  const hold={started:Promise.withResolvers(),release:Promise.withResolvers()};

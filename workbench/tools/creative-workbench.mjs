@@ -8,13 +8,15 @@ import {PROJECT,ROOT} from './workspace-paths.mjs';
 import {identifyWorld,worldSource,saveWorldSource,relocateWorldSource,worldLinkForBackup} from './world-source.mjs';
 import {backupProject,restoreProjectBackup} from './project-backup.mjs';
 import {DESIGN_CONVERSION_TOOLS,designConversion} from './design-conversion.mjs';
+import {WORLD_VERSION_AUDIT_TOOL,auditWorldVersion} from './world-version-audit.mjs';
+import {TAB_VIEW_TOOLS,tabViewService} from './tab-view-service.mjs';
 import {createProject,currentProject,listProjects,primaryRoot,primaryWorld,projectFor,projectLocations,renameProject} from './project-catalog.mjs';
 import {writeVoidWorld} from './void-world.mjs';
 import {planBounds,planningFocusY} from './planning-core.mjs';
 import {savedDetailSnapshot,savedBlocks} from './render-context.mjs';
 import {normalizeBlockState} from './block-states.mjs';
 import {DESIGN_TOOLS,designService} from './design-service.mjs';
-import {projectStore} from './project-store.mjs';
+import {projectStore,snapshotBytes} from './project-store.mjs';
 import {planningService,PLANNING_TOOLS} from './planning-service.mjs';
 import {mapService,MAP_TOOLS} from './map-service.mjs';
 import {worldIndex} from './world-surface.mjs';
@@ -27,9 +29,10 @@ export {PROJECT,ROOT};
 const store=projectStore(ROOT);
 const planning=planningService(ROOT,()=>store.listRegions(),()=>worldSource()?.world_uuid);
 const invocation=new AsyncLocalStorage();
-const metadataWrites=new Set([...PLANNING_TOOLS.filter(t=>!t.annotations?.readOnlyHint).map(t=>t.name),'save_map_view','save_workspace','update_draft','backup_project','relocate_world_source','convert_design_export']);
+const metadataWrites=new Set([...PLANNING_TOOLS.filter(t=>!t.annotations?.readOnlyHint).map(t=>t.name),'save_map_view','save_workspace','update_draft','backup_project','relocate_world_source','convert_design_export','open_region','commit_tab_view']);
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
+const snapshotPins=snapshot=>{const digest=hash(snapshotBytes(snapshot));return {snapshot_id:digest,snapshot_hash:digest};};
 const valid=id=>typeof id==='string'&&/^[a-zA-Z0-9-]{1,99}$/.test(id);
 const read=p=>JSON.parse(fs.readFileSync(p,'utf8'));
 function atomic(file,value){fs.mkdirSync(path.dirname(file),{recursive:true});const pending=file+'.pending-'+randomUUID();fs.writeFileSync(pending,JSON.stringify(value),{flag:'wx'});fs.renameSync(pending,file);}
@@ -94,7 +97,9 @@ export async function desktopRequest(request,{start=true,timeout=120000,root=ROO
  else if(!desktopStatus(root).running)return null;
  const id=Date.now()+'-'+randomUUID();
  const queued=path.join(root,'requests',id+'.json'),deadline=Date.now()+timeout;
- atomic(queued,{...request,id,expires_at_ms:deadline});
+ const viewEpoch=invocation.getStore()?.viewEpoch;
+ const ownsView=['display','display_cached','display_delta','select','map','world_scene'].includes(request.kind);
+ atomic(queued,{...request,...(ownsView&&viewEpoch?{view_epoch:viewEpoch}:{}),id,expires_at_ms:deadline});
  if(request.kind==='show')fs.writeFileSync(path.join(root,'wake-window'),'');
  const response=path.join(root,'responses',id+'.json');
  let checkOwner=Date.now()+250;
@@ -115,14 +120,14 @@ export async function desktopRequest(request,{start=true,timeout=120000,root=ROO
  throw Error('桌面请求已超时 '+id);
 }
 function saveSnapshot(snapshot){return store.saveSnapshot(snapshot);}
-async function displayRegion(r,kind='display',navigation_id,preparedSnapshot,expected_region_id){
+async function displayRegion(r,kind='display',navigation_id,preparedSnapshot,expected_region_id,preferCached=false){
  const request={kind,region_id:r.id,snapshot_hash:r.snapshot_hash,navigation_id,expected_region_id,view_metadata:{entity_id:r.entity_id,is_current_revision:r.is_current_revision,revision_count:r.revision_count,last_verified_at:r.last_verified_at}};
  let previous;
  if(kind==='display'&&r.transient){
   try{previous=region();}catch{}
  }
  let shortcut;
- if(previous?.snapshot_hash===r.snapshot_hash)shortcut={...request,kind:'display_cached'};
+ if(preferCached||previous?.snapshot_hash===r.snapshot_hash)shortcut={...request,kind:'display_cached'};
  else if(previous&&preparedSnapshot&&previous.world_uuid===r.world_uuid){
   let oldSnapshot;
   try{oldSnapshot=loadRegionData(previous.id).snapshot;}
@@ -174,7 +179,7 @@ export const TOOLS=[
  {name:'set_selection',description:'Mark inclusive bounds within a displayed snapshot and persist the region for discussion and screenshots.',inputSchema:schema({bounds,region_id:regionId,label:{type:'string'}},['bounds'])},
  {name:'list_regions',description:'List stable logical region items, not every internal refresh version.',inputSchema:schema({include_archived:{type:'boolean'}}),annotations:{readOnlyHint:true}},
  {name:'archive_region',description:'Archive or restore a region item without deleting its saved data.',inputSchema:schema({region_id:regionId,archived:{type:'boolean'}},['region_id'])},
- {name:'open_region',description:'Display an exact persisted marked region and its pinned snapshot.',inputSchema:schema({region_id:regionId},['region_id'])},
+ {name:'open_region',description:'Display an exact persisted marked region and its pinned snapshot.',inputSchema:schema({region_id:regionId,reuse_geometry:{type:'boolean'}},['region_id'])},
  {name:'refresh_region',description:'Read the marked region from the configured save again, retaining its bounds, title and planning notes.',inputSchema:schema({region_id:regionId})},
  {name:'update_region',description:'Save the region title and planning notes without changing its pinned block snapshot.',inputSchema:schema({region_id:regionId,label:{type:'string'},notes:{type:'string'}})},
  {name:'inspect_region',description:'Get exact marked-region identity, snapshot SHA256, bounds and material counts. Defaults to the user current saved region.',inputSchema:schema({region_id:regionId}),annotations:{readOnlyHint:true}},
@@ -183,7 +188,7 @@ export const TOOLS=[
  {name:'list_captures',description:'List saved preview captures, region identities and view metadata.',inputSchema:schema({}),annotations:{readOnlyHint:true}},
  {name:'delete_captures',description:'Delete specific saved preview groups and collect snapshots with no remaining references.',inputSchema:schema({capture_ids:{type:'array',items:{type:'string'},minItems:1}},['capture_ids']),annotations:{destructiveHint:true}},
  {name:'read_capture',description:'Return the actual PNG image content for a saved capture, checking the original image hashes.',inputSchema:schema({capture_id:{type:'string'}},['capture_id']),annotations:{readOnlyHint:true}},
- ...DESIGN_TOOLS,...DESIGN_CONVERSION_TOOLS,
+ ...DESIGN_TOOLS,...DESIGN_CONVERSION_TOOLS,WORLD_VERSION_AUDIT_TOOL,...TAB_VIEW_TOOLS,
  ...PLANNING_TOOLS,...MAP_TOOLS,
 ];
 TOOLS.find(t=>t.name==='capture_views').inputSchema.properties.show_grid={type:'boolean'};
@@ -208,8 +213,46 @@ const designs=designService({folder,atomic,read,readRegion:loadRegionData,readRe
  currentWorldRevision:uuid=>{const world=worldIndex();return world.world_uuid===uuid?world.revision:undefined;},
  currentConstruction:uuid=>{const world=worldIndex();return world.world_uuid===uuid?maps.construction(world):null;},
  exportWorldUuid:uuid=>{const source=worldSource();return source?.world_uuid===uuid?source.paper_world_uuid??uuid:uuid;},
- saveSnapshot,savePreview:store.savePreview,displayRegion,readSavedPositions,normalizeState:normalizeBlockState,prepareBlockAssets:ensureVanillaAssets,validateBounds,validateEdits,planning,captureDetail:args=>maps.browse(args)});
-const maps=mapService({root:ROOT,planning,desktopRequest,saveSnapshot,savePreview:store.savePreview,displayRegion});
+ snapshotPins,saveSnapshot,savePreview:store.savePreview,displayRegion,readSavedPositions,normalizeState:normalizeBlockState,prepareBlockAssets:ensureVanillaAssets,validateBounds,validateEdits,planning,captureDetail:args=>maps.browse(args)});
+const maps=mapService({root:ROOT,planning,desktopRequest,snapshotPins,saveSnapshot,savePreview:store.savePreview,displayRegion});
+const tabViews=tabViewService({
+ folder,atomic,read,
+ stamp(){const w=worldIndex();return JSON.stringify([w.revision,w.environment_revision,planning.read().revision,
+  fs.readdirSync(folder('drafts')).filter(name=>name.endsWith('.json')).sort().map(name=>{
+   const stat=fs.statSync(path.join(ROOT,'drafts',name),{throwIfNoEntry:false});return [name,stat?.mtimeMs,stat?.size];
+  })]);},
+ async prepare(args){
+  const w=worldIndex();
+  if(!w.pristine_void)await ensureVanillaAssets(w.minecraft);
+  ensurePackAnimationMetadata(path.join(PROJECT,'assets'));
+  if(args.kind==='panorama')return maps.execute('open_world_scene',{view_id:args.view_id,label:args.label,prepare:true});
+  if(args.kind==='draft')return designs.execute('preview_draft',{draft_id:args.draft_id,mode:args.mode,reveal_changes:args.reveal_changes,reuse_preview_id:args.region_id,prepare:true});
+  if(args.region_id){
+   try{
+    const cached=loadRegionData(args.region_id);
+    if(args.kind==='region'||cached.region.world_revision===w.revision&&
+      (cached.region.construction_visibility??'')===(maps.construction(w)?.visibility_revision??''))
+     return {kind:'display',...cached,saved:true};
+   }catch(error){if(args.kind!=='detail'||error.code!=='ENOENT')throw error;}
+  }
+  if(args.kind!=='detail'||!Array.isArray(args.point)||args.point.length!==3)throw Error('没有可重新打开的三维位置');
+  const [x,y,z]=args.point;
+  return maps.browse({x:Math.floor(x),y,z:Math.floor(z),view_id:args.view_id,label:args.label,plan_id:args.plan_id,prepare:true});
+ },
+ commit(view){
+  const r=view.region;
+  if(view.saved){
+   if(region(r.id).snapshot_hash!==r.snapshot_hash)return {stale:true};
+  }else{
+   const pins=saveSnapshot(view.snapshot);
+   if(pins.snapshot_hash!==r.snapshot_hash)throw Error('预览快照不一致');
+   store.savePreview(r);
+  }
+  atomic(path.join(ROOT,'current-region.json'),{id:r.id});
+  if(!view.saved)store.compact();
+  return {region_id:r.id,snapshot_hash:r.snapshot_hash};
+ }
+});
 const convertDesign=designConversion({folder,atomic});
 TOOLS.push({name:'world_source',description:'Read the configured local Anvil save.',inputSchema:schema({}),annotations:{readOnlyHint:true}});
 TOOLS.push(
@@ -281,7 +324,9 @@ async function execute(name,args){
   ensurePackAnimationMetadata(path.join(PROJECT,'assets'));
  }
  if(name==='world_source')return worldSource();
+ if(TAB_VIEW_TOOLS.some(tool=>tool.name===name))return tabViews(name,args);
  if(DESIGN_CONVERSION_TOOLS.some(tool=>tool.name===name))return convertDesign(name,args);
+ if(name==='audit_world_version')return auditWorldVersion({targetVersion:args.target_version,folder,atomic});
  if(name==='restore_project_backup')return restoreProjectBackup(args.directory);
  if(name==='backup_project'){
   let identity;
@@ -383,7 +428,7 @@ async function execute(name,args){
  if(name==='load_region')return loadSaved(args.bounds,args.label);
  if(name==='list_regions')return store.listRegions(args.include_archived).map(publicRegion);
  if(name==='archive_region')return store.archive(args.region_id,args.archived??true);
- if(name==='open_region')return displayRegion(loadRegionData(args.region_id).region);
+ if(name==='open_region')return args.reuse_geometry===true?displayRegion(region(args.region_id),'display',undefined,undefined,undefined,true):displayRegion(loadRegionData(args.region_id).region);
  if(name==='refresh_region'){const r=liveContext(loadRegionData(args.region_id).region);if(r.transient)return refreshTransient(r);return loadSaved(r.loaded_bounds,r.label,r.bounds,{notes:r.notes,entity_id:r.entity_id});}
  if(name==='update_region'){
   const old=loadRegionData(args.region_id).region,label=args.label??old.label,notes=args.notes??old.notes??'';
@@ -432,15 +477,15 @@ async function invokeTool(name,args={}){
  if(args.physics!==undefined&&typeof args.physics!=='boolean')throw Error('Physics must be true or false');
  if(name==='load_region'){validateBounds(args.bounds);if(args.bounds.some((v,i)=>i<3&&args.bounds[i+3]-v>=128))throw Error('Preview spans at most 128 blocks along each axis');}
  if(tool.annotations?.readOnlyHint)return execute(name,args);
- if(['create_project','open_project','rename_project','save_editor_state','restore_project_backup'].includes(name))return execute(name,args);
+ if(['create_project','open_project','rename_project','save_editor_state','restore_project_backup','audit_world_version'].includes(name))return execute(name,args);
  fs.mkdirSync(ROOT,{recursive:true});const lock=path.join(ROOT,'operation.lock');let fd;
  const deadline=Date.now()+170000;
  while(fd===undefined){try{fd=fs.openSync(lock,'wx');}catch(error){if(error.code!=='EEXIST')throw error;let owner;try{owner=fs.readFileSync(lock,'utf8');}catch{}if(/^\d+$/.test(owner??'')){let alive=true;try{process.kill(Number(owner),0);}catch(e){if(e.code==='ESRCH')alive=false;}if(!alive){try{if(fs.readFileSync(lock,'utf8')===owner)fs.unlinkSync(lock);}catch{}continue;}}if(Date.now()>deadline)throw Error('工作台操作仍未结束，请稍后重试');await sleep(100);}}
- try{fs.writeSync(fd,String(process.pid));store.initialize();const result=await execute(name,args);if(!metadataWrites.has(name))try{store.compact();}catch(e){if(result&&!Array.isArray(result))result.storage_warning=e.message;}return result;}finally{fs.closeSync(fd);fs.unlinkSync(lock);}
+ try{fs.writeSync(fd,String(process.pid));store.initialize();const result=await execute(name,args);if(!metadataWrites.has(name)&&!result?.preview_reused)try{store.compact();}catch(e){if(result&&!Array.isArray(result))result.storage_warning=e.message;}return result;}finally{fs.closeSync(fd);fs.unlinkSync(lock);}
 }
 async function handle(q){
  if(q.id===undefined)return null;const ok=result=>({jsonrpc:'2.0',id:q.id,result});
- if(q.method==='initialize')return ok({protocolVersion:'2025-06-18',capabilities:{tools:{}},serverInfo:{name:'TerraWeave',version:'0.7.7'},instructions:'TerraWeave offline map planning and saved-world preview. For AI construction, assign every authored area to a planning object before drafting. Use planning_state and inspect_plan to reuse a suitable plan, or save_plan to create one. Pass its plan_id to create_draft and use the same plan for refinements of the same area. Use separate plans for independently hideable parts. After applying, check the committed write receipt and that hiding and showing the plan updates its built blocks, then restore the prior visibility. Use export_draft to hand off an immutable revision to the separate world writer MCP. open_world_scene renders complete block models and textures with a free camera; do not replace visible scenery with colored voxels. get_scene_view reads the actual user camera. capture_world_scene defaults to that observed view and freezes block states, model geometry and texture atlas; explicit angles/custom cameras remain available. inspect_captured_scene verifies its exact source. show_invisible reveals barrier glyphs without changing world blocks. planning_state and inspect_plan provide selected map geometry and notes; save_plan supports areas/routes/markers independent of chunk size. Hide/show is separate from deletion. capture_map freezes map planning geometry. browse_world/open_plan_detail enter a saved-world detail view; create_draft with plan_id supports sparse world-scale designs. capture_views supports precise cameras and cutaways. Distinguish saved-world renders, live blocks, planning and drafts; workbench lighting/animation differs from Minecraft-client screenshots. Repeated navigation reuses bounded caches.'});
+ if(q.method==='initialize')return ok({protocolVersion:'2025-06-18',capabilities:{tools:{}},serverInfo:{name:'TerraWeave',version:'0.7.8'},instructions:'TerraWeave offline map planning and saved-world preview. For AI construction, assign every authored area to a planning object before drafting. Use planning_state and inspect_plan to reuse a suitable plan, or save_plan to create one. Pass its plan_id to create_draft and use the same plan for refinements of the same area. Use separate plans for independently hideable parts. After applying, check the committed write receipt and that hiding and showing the plan updates its built blocks, then restore the prior visibility. Use export_draft to hand off an immutable revision to the separate world writer MCP. open_world_scene renders complete block models and textures with a free camera; do not replace visible scenery with colored voxels. get_scene_view reads the actual user camera. capture_world_scene defaults to that observed view and freezes block states, model geometry and texture atlas; explicit angles/custom cameras remain available. inspect_captured_scene verifies its exact source. show_invisible reveals barrier glyphs without changing world blocks. planning_state and inspect_plan provide selected map geometry and notes; save_plan supports areas/routes/markers independent of chunk size. Hide/show is separate from deletion. capture_map freezes map planning geometry. browse_world/open_plan_detail enter a saved-world detail view; create_draft with plan_id supports sparse world-scale designs. capture_views supports precise cameras and cutaways. Distinguish saved-world renders, live blocks, planning and drafts; workbench lighting/animation differs from Minecraft-client screenshots. Repeated navigation reuses bounded caches.'});
  if(q.method==='ping')return ok({});if(q.method==='tools/list')return ok({tools:TOOLS});
  if(q.method==='tools/call')try{
   const r=await callTool(q.params.name,q.params.arguments??{}),content=[{type:'text',text:JSON.stringify(r)}];
@@ -453,6 +498,6 @@ if(process.argv[1]&&pathToFileURL(path.resolve(process.argv[1])).href===import.m
  if(process.argv[2]==='--stdio'){
   let pending='',chain=Promise.resolve();process.stdin.setEncoding('utf8');process.stdin.on('data',chunk=>{pending+=chunk;if(pending.length>4*1024*1024){process.stdin.destroy();process.exitCode=1;return;}let n;while((n=pending.indexOf('\n'))>=0){const line=pending.slice(0,n);pending=pending.slice(n+1);if(!line.trim())continue;chain=chain.then(async()=>{try{const r=await handle(JSON.parse(line));if(r)process.stdout.write(JSON.stringify(r)+'\n');}catch{process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:null,error:{code:-32700,message:'Invalid JSON'}})+'\n');}});}});
  }else{
-  try{let q;if(process.argv[2]==='--json'){let input='';process.stdin.setEncoding('utf8');for await(const chunk of process.stdin)input+=chunk;q=JSON.parse(input);}else q={tool:process.argv[2]??'workbench_status',args:JSON.parse(process.argv[3]??'{}')};process.stdout.write(JSON.stringify(await callTool(q.tool,q.args??{}))+'\n');}catch(e){process.stdout.write(JSON.stringify({error:e.message})+'\n');process.exitCode=1;}
+  try{let q;if(process.argv[2]==='--json'){let input='';process.stdin.setEncoding('utf8');for await(const chunk of process.stdin)input+=chunk;q=JSON.parse(input);}else q={tool:process.argv[2]??'workbench_status',args:JSON.parse(process.argv[3]??'{}')};process.stdout.write(JSON.stringify(await callTool(q.tool,q.args??{},{viewEpoch:q.view_epoch}))+'\n');}catch(e){process.stdout.write(JSON.stringify({error:e.message})+'\n');process.exitCode=1;}
  }
 }
