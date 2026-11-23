@@ -58,8 +58,8 @@ const info=revision=>({revision,occupied_chunks:[[0,0,0,15]],helper_chunks:[]});
 const tile={x:0,z:0,groups:[{state:'minecraft:stone',mask:0,fluid_mask:0,positions:[0]}]};
 class Harness extends TexturedWorld{
  constructor(call,material=new THREE.MeshBasicMaterial()){super(new THREE.Scene(),call,async()=>[{geometry:new THREE.BoxGeometry(),material}]);this.createdAtlases=[];this.createdGroups=[];}
- createAtlas(){const texture=new THREE.Texture(),atlas={texture};this.createdAtlases.push(atlas);return atlas;}
- bake(data,origin,resources){const group=new THREE.Group();group.userData={tile:data,origin};const mesh=new THREE.Mesh(new THREE.BoxGeometry(),new THREE.MeshBasicMaterial());group.add(mesh);this.createdGroups.push(group);(resources?.lookups??this.lookups).set('0,0',new Map([[0,'minecraft:stone']]));return group;}
+ createAtlas(materials){const texture=new THREE.Texture(),rects=new Map(materials.filter(m=>m.map).map(m=>[m.map,{}])),atlas={texture,rects};this.createdAtlases.push(atlas);return atlas;}
+ bake(data,origin,resources){const group=new THREE.Group();group.userData={tile:data,origin};const mesh=new THREE.Mesh(new THREE.BoxGeometry(),new THREE.MeshBasicMaterial());group.add(mesh);this.createdGroups.push(group);(resources?.lookups??this.lookups).set(data.x+','+data.z,new Map([[0,'minecraft:stone']]));return group;}
 }
 test('cancel while textures load cannot create an orphan atlas or resurrect cleared geometry',async()=>{
  const gate=deferred(),waiting=deferred(),texture=new THREE.Texture();Object.defineProperty(texture.userData,'ready',{get(){waiting.resolve();return gate.promise;}});const world=new Harness(async()=>tile,new THREE.MeshBasicMaterial({map:texture}));await world.initialize(info('a'));world.enabled=true;const loading=world.update(0,0,10,[0,0,0],null);await waiting.promise;world.clear();world.enabled=false;gate.resolve();await loading;assert.equal(world.createdAtlases.length,0);assert.equal(world.atlas,null);assert.equal(world.meshes.size,0);assert.equal(world.lookups.size,0);
@@ -97,4 +97,84 @@ test('initial preview only reads the nearest requested tiles even when the targe
  await world.update(4000,16,4000,[0,0,0],null,[4,80,16],undefined,null,10000,2);
  assert.deepEqual(calls,[[0,0],[1,0]]);
  assert.equal(world.meshes.size,2);
+});
+test('a palace-sized background stays resident in a local editing window when the camera moves and turns',async()=>{
+ let reads=0;
+ const world=new Harness(async(name,{x,z})=>{reads++;return {...tile,x,z};});
+ await world.initialize({revision:'palace',occupied_chunks:Array.from({length:130},(_,x)=>[x*2,0])});
+ world.enabled=true;
+ const origin=[0,0,0],cut=[0,0,0,16,16,16];
+ await world.update(0,0,0,origin,cut);
+ const meshes=world.meshes,atlas=world.atlas;
+ await world.update(4100,0,0,origin,cut,[4100,100,0],undefined,{intersectsBox:box=>box.min.x>=4000});
+ assert.equal(world.allTilesResident,true);
+ assert.equal(world.meshes,meshes);
+ assert.equal(world.atlas,atlas);
+ assert.equal(world.createdGroups.length,130);
+ assert.equal(reads,130);
+ world.clear();
+});
+test('turning to a newly visible area keeps off-screen meshes when they still fit the budget',async()=>{
+ const reads=[];
+ const world=new Harness(async(name,{x,z})=>{reads.push(x);return {...tile,x,z};});
+ await world.initialize({revision:'large',occupied_chunks:Array.from({length:220},(_,x)=>[x*2,0])});
+ world.enabled=true;
+ const origin=[0,0,0],eye=[0,80,0],first={intersectsBox:box=>box.min.x===0},turned={intersectsBox:box=>box.min.x===3200};
+ await world.update(0,0,0,origin,null,eye,undefined,first);
+ assert.equal(world.meshes.size,64);
+ const seen=world.meshes.get('0,0'),atlas=world.atlas;
+ await world.update(3200,0,0,origin,null,eye,undefined,turned);
+ const revealed=world.meshes.get('100,0');
+ assert.ok(revealed);
+ assert.equal(world.meshes.size,65);
+ await world.update(0,0,0,origin,null,eye,undefined,first);
+ assert.equal(world.meshes.get('0,0'),seen);
+ assert.equal(world.meshes.get('100,0'),revealed);
+ assert.equal(world.atlas,atlas);
+ assert.equal(world.bakedTiles,65);
+ assert.equal(reads.length,65);
+ world.clear();
+});
+test('a preview index cannot be mistaken for a complete scene with different tiles',async()=>{
+ const world=new Harness(async(name,{x,z})=>({...tile,x,z}));
+ await world.initialize({...info('same-revision'),preview_index:true});
+ world.enabled=true;
+ await world.update(0,0,0,[0,0,0],null);
+ await world.initialize({revision:'same-revision',occupied_chunks:[[2,0]]});
+ assert.equal(world.allTilesResident,false);
+ await world.update(0,0,0,[0,0,0],null);
+ assert.equal(world.allTilesResident,true);
+ assert.deepEqual([...world.meshes.keys()],['1,0']);
+ world.clear();
+});
+test('streaming prioritizes visible tiles and retains shared meshes and their block lookups',async()=>{
+ const calls=[];
+ const world=new Harness(async(name,{x,z})=>{calls.push(x);return {...tile,x,z};});
+ await world.initialize({revision:'streamed',occupied_chunks:[[0,0],[2,0],[20,0]]});
+ world.enabled=true;
+ const origin=[0,0,0],first={intersectsBox:box=>box.min.x<64},turned={intersectsBox:box=>box.min.x>=32};
+ await world.update(0,0,0,origin,null,[0,80,0],undefined,first,10000,2);
+ const atlas=world.atlas,retained=world.meshes.get('1,0'),lookup=world.lookups.get('1,0');
+ await world.update(320,0,0,origin,null,[0,80,0],undefined,turned,10000,2);
+ assert.deepEqual([...world.meshes.keys()].sort(),['1,0','10,0']);
+ assert.deepEqual(calls,[0,1,10]);
+ assert.equal(world.createdGroups.length,3);
+ assert.equal(world.atlas,atlas);
+ assert.equal(world.meshes.get('1,0'),retained);
+ assert.equal(world.lookups.get('1,0'),lookup);
+ assert.equal(world.stateAt(32,-64,0),'minecraft:stone');
+ world.clear();
+});
+test('a vertex-limited scene can swap the visible tile without a change in candidate membership',async()=>{
+ const world=new Harness(async(name,{x,z})=>({...tile,x,z}));
+ await world.initialize({revision:'limited',occupied_chunks:[[0,0],[2,0]]});
+ world.enabled=true;
+ const origin=[0,0,0],left={intersectsBox:box=>box.min.x<32},right={intersectsBox:box=>box.min.x>=32};
+ await world.update(0,0,0,origin,null,[0,80,0],undefined,left,36);
+ assert.deepEqual([...world.meshes.keys()],['0,0']);
+ await world.update(0,0,0,origin,null,[0,80,0],undefined,right,36);
+ assert.deepEqual([...world.meshes.keys()],['1,0']);
+ assert.equal(world.loadedVertices,36);
+ assert.equal(world.omittedTiles,1);
+ world.clear();
 });

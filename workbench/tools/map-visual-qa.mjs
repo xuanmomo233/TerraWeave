@@ -26,6 +26,9 @@ const draftFixture=new Map([
  ['qa-independent',{id:'qa-independent',label:'独立方案验收',plan_id:null}],
  ['qa-attached',{id:'qa-attached',label:'关联方案验收',plan_id:planner.read().objects.find(p=>p.name===anchorName).id}]
 ].map(([id,d])=>[id,{...d,revision:1,visible:true,design_visible:true,changed_positions:0,undo_count:0,redo_count:0,counts:{added:0,replaced:0,removed:0}}]));
+const changeFocus=[anchorBounds[0]+2,anchorBounds[1]+2,anchorBounds[2]+2];
+Object.assign(draftFixture.get('qa-independent'),{changed_positions:1,change_focus:changeFocus,counts:{added:1,replaced:0,removed:0}});
+let draftVisibilityGate,draftVisibilityFailure=false,draftPreviewArgs,panelReads=0;
 const savedViews=new Map(),viewSnapshots=new Map();
 let testHeightNavigation=false;
 const fixtureMap=mapService({
@@ -40,7 +43,7 @@ const fixtureMap=mapService({
  savePreview:region=>savedViews.set(region.id,region),
  displayRegion:(region,kind,navigation_id)=>send({kind,region,navigation_id,snapshot:viewSnapshots.get(region.snapshot_id)})
 });
-let job={id:'qa-map',kind:'map'},completion,reply,view,sequence=0,barrierWait=null,modelReads=0,clipboardText='',selectionDelay=0,browseReads=0,fullscreen=false,sceneAckHold,detailWait;const captures=[],openedPackFolders=[];
+let job={id:'qa-map',kind:'map'},completion,reply,view,sequence=0,barrierWait=null,modelReads=0,clipboardText='',selectionDelay=0,browseReads=0,fullscreen=false,sceneAckHold,detailWait,residencyFixture;const captures=[],openedPackFolders=[];
 const tileReads={started:0,completed:0,failed:0};
 const pickedDirectories=[path.join(fixture,'带空格的 存档'),null];
 async function send(request){job={id:'qa-'+(++sequence),...request};return new Promise(resolve=>completion=resolve);}
@@ -83,7 +86,7 @@ async function bridge(command,args){
    packs:openedPackFolders.includes('resourcepacks')?[...settings.packs,'验收材质包.zip']:settings.packs,
    shaders:[...settings.shaders,unsupported,...(openedPackFolders.includes('shaderpacks')?[newShader]:[])]};
  }
- if(tool==='ui_snapshot'){const data=await callTool(tool,input);return {...data,drafts:[...draftFixture.values(),...data.drafts],planning:planner.execute('planning_state',{}),captures:[...captures,...data.captures]};}
+ if(tool==='ui_snapshot'){panelReads++;const data=await callTool(tool,input);return {...data,drafts:[...draftFixture.values(),...data.drafts],planning:planner.execute('planning_state',{}),captures:[...captures,...data.captures]};}
  if(tool==='delete_captures'){
   const deleted_ids=[];
   for(const id of input.capture_ids){
@@ -97,6 +100,10 @@ async function bridge(command,args){
  if(draftFixture.has(input.draft_id)){
   const d=draftFixture.get(input.draft_id);
   if(tool==='update_draft'){
+   if(input.visible!==undefined){
+    if(draftVisibilityGate)await draftVisibilityGate;
+    if(draftVisibilityFailure)throw Error('模拟显示状态保存失败');
+   }
    if(input.label!==undefined)d.label=input.label;
    if(input.visible!==undefined)d.visible=d.design_visible=input.visible;
    d.revision++;
@@ -104,9 +111,11 @@ async function bridge(command,args){
   }
   if(tool==='delete_draft'){draftFixture.delete(d.id);return {id:d.id,deleted:true};}
   if(tool==='preview_draft'){
+   draftPreviewArgs=input;
    const camera=input.keep_camera?await send({kind:'scene_view'}):undefined;
-   return send({kind:'display',camera,snapshot:local.snapshot,region:{...local.region,id:d.id+'-'+d.revision,
-    label:d.label,source:'design_draft',draft_id:d.id,draft_revision:d.revision,preview_mode:'target',design_visible:d.design_visible}});
+   return send({kind:'display',camera,snapshot:local.snapshot,expected_region_id:input.expected_region_id,region:{...local.region,id:d.id+'-'+d.revision,
+    label:d.label,source:'design_draft',draft_id:d.id,draft_revision:d.revision,preview_mode:input.mode??'target',reveal_changes:input.reveal_changes,
+    design_visible:d.design_visible,diff:input.reveal_changes?[{coordinate:changeFocus,kind:'added'}]:[]}});
   }
  }
  if(tool==='select_plan'&&selectionDelay)await new Promise(resolve=>setTimeout(resolve,selectionDelay));
@@ -122,7 +131,18 @@ async function bridge(command,args){
  if(tool==='get_scene_view')return send({kind:'scene_view'});
  if(tool==='capture_current_view')return send({kind:'capture_viewport',width:input.width??1280,height:input.height??800});
  if(tool==='preview_draft'&&input.draft_id==='qa-missing-draft')throw Error('草稿已删除或不存在');
- if(tool==='world_model_tile')modelReads++;
+ if(tool==='world_scene_info'&&residencyFixture){
+  if(!input.preview)return residencyFixture;
+  return {...residencyFixture,preview_index:true,occupied_chunks:[...residencyFixture.occupied_chunks,[20,20,64,64]]};
+ }
+ if(tool==='world_model_tile'){
+  modelReads++;
+  if(residencyFixture&&input.world_revision===residencyFixture.revision){
+   const {x,z}=input;
+   return {x,z,minecraft:local.snapshot.minecraft,bounds:[x*32,-64,z*32,x*32+32,320,z*32+32],
+    groups:[{state:'minecraft:stone',mask:0,positions:[128*1024]}]};
+  }
+ }
  if(TOOLS.find(t=>t.name===tool)?.annotations?.readOnlyHint)return callTool(tool,input);
  if(tool==='open_map')return send({kind:'map'});
  if(tool==='open_world_scene')return send({kind:'world_scene',scene:await callTool('world_scene_info'),view_id:input.view_id,label:input.label});
@@ -695,10 +715,31 @@ try{
  assert.equal(draftFixture.get('qa-independent').label,'已命名岸线方案');
  await page.locator('#world-map-tab').click();
  await page.waitForFunction(()=>!document.querySelector('#map-host').hidden);
- await independent.click({button:'right'});await draftMenu('隐藏方案').click();
+ const readsBeforeVisibility=panelReads;
+ let releaseVisibility;
+ draftVisibilityGate=new Promise(resolve=>releaseVisibility=resolve);
+ await independent.getByRole('button',{name:'隐藏方案',exact:true}).click();
  await page.waitForFunction(()=>document.querySelector('[data-draft-id="qa-independent"]').classList.contains('hidden-object'));
+ assert.equal(draftFixture.get('qa-independent').visible,true,'The row must turn gray while the save is still pending');
+ releaseVisibility();
+ draftVisibilityGate=null;
+ await page.getByText('已隐藏方案预览「已命名岸线方案」',{exact:true}).waitFor();
+ assert.equal(panelReads,readsBeforeVisibility,'Changing visibility must not reload all workspace panels');
+ await independent.getByRole('button',{name:'定位改动',exact:true}).click();
+ await page.waitForFunction(()=>document.querySelector('#draft-diff').classList.contains('active'));
+ assert.equal(draftFixture.get('qa-independent').visible,false);
+ assert.deepEqual(draftPreviewArgs.focus,changeFocus);
+ assert.equal(draftPreviewArgs.reveal_changes,true);
+ await page.locator('#world-map-tab').click();
+ await page.waitForFunction(()=>!document.querySelector('#map-host').hidden);
+ draftVisibilityFailure=true;
+ await independent.getByRole('button',{name:'显示方案',exact:true}).click();
+ await page.getByText(/模拟显示状态保存失败/).waitFor();
+ assert.equal(await independent.evaluate(row=>row.classList.contains('hidden-object')),true);
+ draftVisibilityFailure=false;
  await independent.click({button:'right'});await draftMenu('显示方案').click();
  await page.waitForFunction(()=>!document.querySelector('[data-draft-id="qa-independent"]').classList.contains('hidden-object'));
+ await page.getByText('已显示方案预览「已命名岸线方案」',{exact:true}).waitFor();
  await independent.click({button:'right'});await draftMenu('删除方案').click();
  await page.locator('#draft-action-dialog').waitFor({state:'visible'});
  assert.equal(draftFixture.has('qa-independent'),true);
@@ -837,6 +878,31 @@ try{
  await page.locator('#detail-controls').waitFor();
  await page.waitForFunction(() => document.querySelector('#detail-loading').hidden);
  assert.equal(browseReads, previousReads + 1);
+ const occupied=Array.from({length:130},(_,i)=>[(i%10-5)*2,(Math.floor(i/10)-6)*2,64,64]);
+ residencyFixture={...scene,revision:scene.revision+'-local-residency',bounds:[-160,64,-192,159,64,223],
+  occupied_chunks:occupied,helper_chunks:[],progressive_loading:true};
+ const localRequest={kind:'display',snapshot:local.snapshot,region:{...local.region,id:'qa-local-residency',
+  source:'saved_anvil_detail',transient:true,world_revision:residencyFixture.revision}};
+ await send(localRequest);
+ await page.waitForFunction(()=>document.querySelector('#source-status').textContent==='选区周围的实景模型已载入',null,{timeout:30000});
+ const residentBefore=await send({kind:'scene_view'}),readsBeforeTurn=modelReads;
+ assert.equal(residentBefore.panoramic,false);
+ assert.equal(residentBefore.render_stats.model_tiles,130);
+ const stage=await page.locator('#view').boundingBox(),mx=stage.x+stage.width*.55,my=stage.y+stage.height*.55;
+ await page.mouse.move(mx,my);await page.mouse.down({button:'right'});await page.mouse.move(mx+150,my-23,{steps:8});await page.mouse.up({button:'right'});
+ await page.waitForTimeout(550);
+ const residentTurned=await send({kind:'scene_view'});
+ assert.ok(Math.abs(residentTurned.yaw-residentBefore.yaw)>5,'The local viewport must actually rotate');
+ await send({...localRequest,camera:residentBefore});
+ await page.waitForTimeout(550);
+ const residentReturned=await send({kind:'scene_view'});
+ for(const pose of [residentTurned,residentReturned]){
+  assert.equal(pose.render_stats.model_tiles,130);
+  assert.equal(pose.render_stats.model_tiles_baked,residentBefore.render_stats.model_tiles_baked);
+  assert.equal(pose.render_stats.local_geometry_builds,residentBefore.render_stats.local_geometry_builds);
+  assert.equal(pose.render_stats.loading,false);
+ }
+ assert.equal(modelReads,readsBeforeTurn);
  assert.deepEqual(errors,[]);
- const report={passed:true,scope:'isolated browser with actual saved-world terrain and temporary planning metadata',deviceScaleFactor,startup_terrain:startupTerrain,selection_feedback_ms:instant.ms,rapid_selection_persisted:true,app_context_menu:true,text_copy_paste_menu:true,browser_context_menu_suppressed:true,world_map:true,full_models_and_textures:true,free_camera:true,movement_does_not_refetch_or_rebuild:true,apply_camera_after_editing:true,wheel_sensitivity:true,wheel_burst_limited:true,orbit_wheel_bounded:true,current_view_photo:true,capture_group_deletion:true,capture_input_frozen:true,local_capture_restores_document:true,blur_stops_camera_drag:true,cancel_preserves_plan:true,close_returns_to_map:true,resource_reuse:resourceSamples,panorama_views:3,panorama_surface_to_live_detail:true,large_area:true,polygon_route_marker:true,hide_delete_undo:true,rotation:37,resize_boundary:true,capture_restores_layout:true,scene_preview:true,barrier_icon:true,screenshots:out,errors};fs.writeFileSync(path.join(out,'workflow-report.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report,null,2));
+ const report={passed:true,scope:'isolated browser with actual saved-world terrain and temporary planning metadata',deviceScaleFactor,startup_terrain:startupTerrain,selection_feedback_ms:instant.ms,rapid_selection_persisted:true,app_context_menu:true,text_copy_paste_menu:true,browser_context_menu_suppressed:true,world_map:true,full_models_and_textures:true,free_camera:true,movement_does_not_refetch_or_rebuild:true,local_background_turn_tiles:residentReturned.render_stats.model_tiles,apply_camera_after_editing:true,wheel_sensitivity:true,wheel_burst_limited:true,orbit_wheel_bounded:true,current_view_photo:true,capture_group_deletion:true,capture_input_frozen:true,local_capture_restores_document:true,blur_stops_camera_drag:true,cancel_preserves_plan:true,close_returns_to_map:true,resource_reuse:resourceSamples,panorama_views:3,panorama_surface_to_live_detail:true,large_area:true,polygon_route_marker:true,hide_delete_undo:true,rotation:37,resize_boundary:true,capture_restores_layout:true,scene_preview:true,barrier_icon:true,screenshots:out,errors};fs.writeFileSync(path.join(out,'workflow-report.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report,null,2));
 }finally{await browser?.close();server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}

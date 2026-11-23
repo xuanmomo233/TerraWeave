@@ -19,7 +19,7 @@ export const DESIGN_TOOLS=[
  {name:'redo_draft',description:'Redo a draft edit and optionally display its saved revision. No world writes.',inputSchema:schema({draft_id:id,preview:previewOptions},['draft_id'])},
  {name:'edit_draft',description:'Change or fill draft blocks using their saved world version. Optionally display the saved revision in the same request. No world writes. reset clears the draft overlay.',inputSchema:schema({draft_id:id,blocks:{type:'array',items:block,maxItems:16384},fill:schema({bounds,state},['bounds','state']),reset:{type:'boolean'},preview:previewOptions},['draft_id'])},
  {name:'inspect_draft',description:'Read draft revision, changed coordinates, before/after block states and added/replaced/removed counts.',inputSchema:schema({draft_id:id,offset:integer,limit:integer},['draft_id']),annotations:{readOnlyHint:true}},
- {name:'preview_draft',description:'Display a design at a world-coordinate focus. Large planning designs stream local detail rather than loading their full volume.',inputSchema:schema({draft_id:id,mode:{type:'string',enum:['target','base','diff']},focus:{type:'array',items:{type:'number'},minItems:3,maxItems:3},keep_camera:{type:'boolean'}},['draft_id'])},
+ {name:'preview_draft',description:'Display a design at a world-coordinate focus. With reveal_changes in diff mode, a hidden design can show its comparison markers while its target blocks stay hidden.',inputSchema:schema({draft_id:id,mode:{type:'string',enum:['target','base','diff']},focus:{type:'array',items:{type:'number'},minItems:3,maxItems:3},keep_camera:{type:'boolean'},reveal_changes:{type:'boolean'},expected_region_id:id},['draft_id'])},
  {name:'export_draft',description:'Freeze a draft revision and its before-states as a JSON file for the independent world-writer MCP.',inputSchema:schema({draft_id:id},['draft_id'])},
  {name:'list_history',description:'List persisted world edit history with undo/redo availability.',inputSchema:schema({}),annotations:{readOnlyHint:true}},
 ];
@@ -37,8 +37,13 @@ export function designService(ctx){
  }
  const all=group=>fs.readdirSync(folder(group)).filter(n=>n.endsWith('.json')).map(n=>read(path.join(folder(group),n))).sort((a,b)=>(b.updated_at??b.created_at).localeCompare(a.updated_at??a.created_at));
  const baseFor=d=>d.schema===2?{blocks:d.base_cells??{}}:readRegion(d.base_region_id).snapshot;
- function visibility(d){const state=planning.read(),base=readRegionMetadata(d.base_region_id),parent=state.objects.find(p=>p.id===d.plan_id||!d.plan_id&&base.entity_id&&p.detail_entity_id===base.entity_id);return {revision:state.revision,visible:d.visible!==false&&(!parent||parent.visible!==false&&state.layers.find(l=>l.id===parent.layer_id)?.visible!==false)};}
- const describe=(d,base=baseFor(d))=>{const region=readRegionMetadata(d.base_region_id),{counts,total}=diffChanges(base,d.changes);return {...d,base_cells:undefined,changes:undefined,applied_states:undefined,undo_stack:undefined,redo_stack:undefined,base_entity_id:region.entity_id,visible:d.visible??true,design_visible:visibility(d).visible,undo_count:d.undo_stack?.length??0,redo_count:d.redo_stack?.length??0,counts,changed_positions:total};};
+ function visibility(d,state=planning.read(),base=readRegionMetadata(d.base_region_id)){const parent=state.objects.find(p=>p.id===d.plan_id||!d.plan_id&&base.entity_id&&p.detail_entity_id===base.entity_id);return {visible:d.visible!==false&&(!parent||parent.visible!==false&&state.layers.find(l=>l.id===parent.layer_id)?.visible!==false)};}
+ const describe=(d,base=baseFor(d),plans)=>{
+  const region=readRegionMetadata(d.base_region_id);
+  const focus=d.focus??region.bounds.slice(0,3).map((value,i)=>(value+region.bounds[i+3])/2);
+  const {counts,total,focus:change_focus}=diffChanges(base,d.changes,{rows:false,focus});
+  return {...d,base_cells:undefined,changes:undefined,applied_states:undefined,undo_stack:undefined,redo_stack:undefined,base_entity_id:region.entity_id,visible:d.visible??true,design_visible:visibility(d,plans,region).visible,undo_count:d.undo_stack?.length??0,redo_count:d.redo_stack?.length??0,counts,changed_positions:total,change_focus};
+ };
  const summary=r=>({id:r.id,label:r.label,kind:r.kind,world_uuid:r.world_uuid,created_at:r.created_at,state:r.state,changed:r.changes.length,undoable:r.undoable,undo_count:r.undoable?r.changes.length-(r.undone_keys?.length??0):0,redo_count:r.undoable?r.undone_keys?.length??0:0});
  function coversFocus(b,[x,y,z]){
   return x>=b[0]+8&&x<=b[3]-8&&z>=b[2]+8&&z<=b[5]-8&&(y===undefined||y>=b[1]&&y<=b[4]);
@@ -58,7 +63,8 @@ export function designService(ctx){
   try{return {...result,preview:await preview(d,options,base)};}
   catch(error){return {...result,preview_error:error.message};}
  }
- async function preview(d,{mode='target',focus,keep_camera=false},baseStates){
+ async function preview(d,{mode='target',focus,keep_camera=false,reveal_changes=false,expected_region_id},baseStates){
+  if(expected_region_id&&currentRegion()?.id!==expected_region_id)return {cancelled:true};
   const baseId=d.preview_region_id??d.base_region_id;
   let base=readRegion(baseId);
   const diff=diffChanges(baseStates??(d.schema!==2&&baseId===d.base_region_id?base.snapshot:baseFor(d)),d.changes);
@@ -93,9 +99,10 @@ export function designService(ctx){
   const pins=blocks===base.snapshot.blocks&&context_blocks===base.snapshot.context_blocks
    ?{snapshot_id:base.region.snapshot_id,snapshot_hash:base.region.snapshot_hash}
    :saveSnapshot(snapshot);
-  const r={...base.region,id:'preview-'+d.id+'-'+d.revision+'-'+mode+'-'+pins.snapshot_hash.slice(0,20),entity_id:undefined,view_id:undefined,label:d.label,notes:d.notes??base.region.notes??'',source:'design_draft',draft_id:d.id,draft_revision:d.revision,design_visible:visibilityState.visible,sparse_draft:d.schema===2,detail_for_plan_id:d.plan_id,keep_camera,base_region_id:d.base_region_id,preview_mode:mode,diff:visibilityState.visible?diff.rows.filter(c=>visible(c.coordinate.join(','))):[],counts:diff.counts,...pins};
+  const reveal=mode==='diff'&&reveal_changes;
+  const r={...base.region,id:'preview-'+d.id+'-'+d.revision+'-'+mode+(reveal?'-located':'')+'-'+pins.snapshot_hash.slice(0,20),entity_id:undefined,view_id:undefined,label:d.label,notes:d.notes??base.region.notes??'',source:'design_draft',draft_id:d.id,draft_revision:d.revision,design_visible:visibilityState.visible,sparse_draft:d.schema===2,detail_for_plan_id:d.plan_id,keep_camera,base_region_id:d.base_region_id,preview_mode:mode,reveal_changes:reveal,diff:visibilityState.visible||reveal?diff.rows.filter(c=>visible(c.coordinate.join(','))):[],counts:diff.counts,...pins};
   savePreview(r);
-  const shown=await displayRegion(r,'display',undefined,snapshot);
+  const shown=await displayRegion(r,'display',undefined,snapshot,expected_region_id);
   return {...shown,diff:undefined,changed_positions:diff.total,preview_context_reused:contextReused};
  }
  async function execute(name,args){
@@ -125,7 +132,10 @@ export function designService(ctx){
    const label=args.label??(plan?plan.name:base.region.label)+' · 设计';if(typeof label!=='string'||!label.trim()||label.length>120)throw Error('Draft label must contain 1..120 characters');
    const p=plan?planBounds(plan):null,sparse=!!plan||base.region.transient,d={id:randomUUID(),label,base_region_id:base.region.id,world_uuid:base.region.world_uuid,bounds:sparse?[-30000000,-64,-30000000,30000000,319,30000000]:base.region.bounds,revision:1,changes:{},applied_states:{},created_at:new Date().toISOString(),updated_at:new Date().toISOString(),...(sparse?{schema:2,plan_id:plan?.id,plan_bounds:p,base_cells:{},focus:args.focus??[(base.region.bounds[0]+base.region.bounds[3])/2,(base.region.bounds[1]+base.region.bounds[4])/2,(base.region.bounds[2]+base.region.bounds[5])/2]}:{})};atomic(file('drafts',d.id),d);return {...describe(d),base_reused:baseReused};
   }
-  if(name==='list_drafts')return all('drafts').filter(d=>args.include_archived||!d.archived).map(d=>describe(d));
+  if(name==='list_drafts'){
+   const plans=planning.read();
+   return all('drafts').filter(d=>args.include_archived||!d.archived).map(d=>describe(d,undefined,plans));
+  }
   if(name==='update_draft'){const d=draft(args.draft_id),label=args.label??d.label,notes=args.notes??d.notes??'',visible=args.visible??d.visible??true;if(typeof label!=='string'||!label.trim()||label.length>120||typeof notes!=='string'||notes.length>10000)throw Error('Invalid draft name or notes');if(label===d.label&&notes===(d.notes??'')&&visible===(d.visible??true))return describe(d);const next={...d,label,notes,visible,revision:d.revision+1,updated_at:new Date().toISOString()};atomic(file('drafts',d.id),next);return describe(next);}
   if(name==='archive_draft'){const d={...draft(args.draft_id),archived:args.archived??true,updated_at:new Date().toISOString()};atomic(file('drafts',d.id),d);return describe(d);}
   if(name==='delete_draft'){
@@ -178,7 +188,7 @@ export function designService(ctx){
    atomic(file('drafts',d.id),next);
    return afterEdit(next,options,base);
   }
-  if(name==='preview_draft')return preview(draft(args.draft_id),requestedPreview({mode:args.mode,focus:args.focus,keep_camera:args.keep_camera??false}));
+  if(name==='preview_draft')return preview(draft(args.draft_id),{...requestedPreview({mode:args.mode,focus:args.focus,keep_camera:args.keep_camera??false}),reveal_changes:args.reveal_changes,expected_region_id:args.expected_region_id});
   if(name==='export_draft'){
    const d=draft(args.draft_id);
    const base=baseFor(d);

@@ -2,15 +2,23 @@ export const air=state=>/^minecraft:(air|cave_air|void_air)$/.test(state);
 export const coordinate=block=>[block.x,block.y,block.z];
 export const keyOf=block=>coordinate(block).join(',');
 export const inside=(bounds,p)=>p.length===3&&p.every((v,i)=>Number.isSafeInteger(v)&&v>=bounds[i]&&v<=bounds[i+3]);
-export function diffChanges(base,changes){
+export function diffChanges(base,changes,{rows:includeRows=true,focus}={}){
  const counts={added:0,replaced:0,removed:0},rows=[];
+ let total=0,nearest,nearestDistance=Infinity;
  for(const [key,after]of Object.entries(changes)){
   const before=base.blocks[key];if(before===undefined)throw Error('Draft contains a coordinate absent from its base');if(before===after)continue;
   const kind=air(after)?'removed':air(before)?'added':'replaced';counts[kind]++;
-  rows.push({coordinate:key.split(',').map(Number),before,after,kind});
+  total++;
+  if(!includeRows&&!focus)continue;
+  const coordinate=key.split(',').map(Number);
+  if(includeRows)rows.push({coordinate,before,after,kind});
+  if(focus){
+   const distance=coordinate.reduce((sum,value,i)=>sum+(value-focus[i])**2,0);
+   if(distance<nearestDistance){nearest=coordinate;nearestDistance=distance;}
+  }
  }
  rows.sort((a,b)=>a.coordinate[1]-b.coordinate[1]||a.coordinate[2]-b.coordinate[2]||a.coordinate[0]-b.coordinate[0]);
- return {counts,total:rows.length,rows};
+ return {counts,total,rows,...(focus?{focus:nearest}:{})};
 }
 export function editOverlay(base,marked,previous,blocks,reset=false){
  const next=reset?{}:{...previous};

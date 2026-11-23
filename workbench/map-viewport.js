@@ -35,7 +35,7 @@ export class MapViewport{
  async open(info,planning,view){this.cancelDrag();this.info=info;this.planning=planning;this.autoFocus=!view&&!info.view;this.userMoved=false;if(view)this.view={...view};else if(info.view)this.view={...info.view};else this.fit(info.bounds);this.resize();this.request();this.draw();}
  fit(bounds){if(!bounds)return;this.view={...this.view,x:(bounds[0]+bounds[2])/2,z:(bounds[1]+bounds[3])/2,scale:Math.max((bounds[2]-bounds[0])/Math.max(100,this.width*.78),(bounds[3]-bounds[1])/Math.max(100,this.height*.78),.05),rotation:this.view.rotation};this.request();this.draw();this.notify();}
  focus(plan){this.fit(planBounds(plan));this.view.scale=Math.max(this.view.scale,.15);this.request();this.draw();}
- setPlanning(state){if(this.drag&&this.planning?.revision===state.revision)return;this.cancelDrag();this.planning=state;this.draw();}
+ setPlanning(state,redraw=true){if(this.drag&&this.planning?.revision!==state.revision)this.cancelDrag();this.planning=state;if(redraw)this.draw();}
  setTool(tool){
   this.cancelDrag();
   this.tool=tool;

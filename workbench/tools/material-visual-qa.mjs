@@ -110,6 +110,42 @@ async function exercise({THREE,buildState,awaitTextures,chooseVariantGroups,Chun
  const camera=new THREE.PerspectiveCamera(46,1440/850,.1,256);
  camera.position.set(20,96,47);camera.lookAt(20,64,11);camera.updateMatrixWorld();
  const png=scene=>renderCapture(renderer,scene,camera,1440,850).toDataURL('image/png');
+ const sampledColors=[];
+ {
+  const texture=paint=>{
+   const canvas=document.createElement('canvas');canvas.width=canvas.height=16;
+   const ctx=canvas.getContext('2d');paint(ctx);return new THREE.CanvasTexture(canvas);
+  };
+  const checker=texture(ctx=>{
+   for(let z=0;z<16;z++)for(let x=0;x<16;x++){
+    ctx.fillStyle=(x+z)%2?'#00ff00':'#000000';ctx.fillRect(x,z,1,1);
+   }
+  });
+  const adjacent=texture(ctx=>{ctx.fillStyle='#ff00ff';ctx.fillRect(0,0,16,16);});
+  const materials=[checker,adjacent].map(map=>new THREE.MeshLambertMaterial({map}));
+  const geometry=new THREE.PlaneGeometry(1,1).rotateX(-Math.PI/2).translate(.5,0,.5);
+  const scene=new THREE.Scene();scene.add(new THREE.AmbientLight(0xffffff,1));
+  const tile={x:0,z:0,bounds:[0,-64,0,32,320,32],minecraft,groups:[
+   {state:'minecraft:stone',positions:Array.from({length:1023},(_,i)=>64*1024+i)},
+   {state:'minecraft:red_wool',positions:[64*1024+1023]},
+  ]};
+  const world=new TexturedWorld(scene,async()=>tile,async state=>[{geometry,material:materials[state.endsWith('stone')?0:1]}]);
+  await world.initialize({revision:'mip-fixture',bounds:[0,0,0,31,0,31],occupied_chunks:[[0,0]]});
+  world.enabled=true;
+  await world.update(16,16,1,[0,0,0],null);
+  const firstRect=world.atlas.rects.get(checker);
+  const extra=texture(ctx=>{ctx.fillStyle='#00ffff';ctx.fillRect(0,0,16,16);});
+  require(world.atlas.extend([extra]),'A free aligned atlas cell should accept another texture');
+  require(world.atlas.rects.get(checker)===firstRect,'Extending the atlas moved a loaded texture');
+  const probe=new THREE.OrthographicCamera(-16,16,16,-16,.1,80);
+  probe.up.set(0,0,-1);probe.position.set(16,24,16);probe.lookAt(16,0,16);probe.updateMatrixWorld();
+  const output=renderCapture(renderer,scene,probe,64,64);
+  const rgba=output.getContext('2d').getImageData(20,20,3,3).data;
+  for(let i=0;i<rgba.length;i+=4)sampledColors.push(Array.from(rgba.slice(i,i+3)));
+  require(sampledColors.every(([r,g,b])=>r<8&&g>100&&g<230&&b<8),'Distant tiles must average within their own texture '+JSON.stringify(sampledColors));
+  world.clear();world.markerMaterial.dispose();geometry.dispose();extra.dispose();
+  for(const material of materials){material.map.dispose();material.dispose();}
+ }
  chunks.animate(0);lod.animate(0);
  const before={local:png(localScene),panoramic:png(worldScene)};
  const atlasBefore=lod.atlas.canvas.toDataURL(),textureBefore=animated.image.toDataURL();

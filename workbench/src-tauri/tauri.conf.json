@@ -1,6 +1,6 @@
 {
   "productName": "织境工坊",
-  "version": "0.7.5",
+  "version": "0.7.6",
   "identifier": "io.terraweave.workbench",
   "build": {
     "beforeDevCommand": "npm run dev",

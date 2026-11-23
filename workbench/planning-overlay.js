@@ -34,8 +34,10 @@ export class PlanningOverlay{
  }
  update(state,enabled,height,terrainKey){
   const key=enabled&&state?[state.revision,state.selected_id,terrainKey].join(':'):'';
-  if(this.key===key)return false;
+  const planning=key?state:null;
+  if(this.key===key&&this.planning===planning)return false;
   this.key=key;
+  this.planning=planning;
   this.paths=key?state.objects.filter(plan=>plan.visible!==false&&
    state.layers.find(layer=>layer.id===plan.layer_id)?.visible!==false).map(plan=>({
     points:plan.points.map(([x,z])=>[x,(plan.min_y??height(x,z))+1.05,z]),

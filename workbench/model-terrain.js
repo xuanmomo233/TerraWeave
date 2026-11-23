@@ -33,7 +33,7 @@ function texture(t,minecraft){
  if(maps.has(key))return maps.get(key);
  const map=new THREE.Texture();
  map.userData.source=t;
- map.magFilter=THREE.NearestFilter;map.minFilter=THREE.NearestFilter;map.colorSpace=THREE.SRGBColorSpace;map.generateMipmaps=false;
+ map.magFilter=THREE.NearestFilter;map.minFilter=THREE.NearestMipmapLinearFilter;map.colorSpace=THREE.SRGBColorSpace;map.generateMipmaps=true;
  map.userData.ready=invoke('read_asset',{name:'minecraft/textures/'+t+'.png',minecraft,includeAnimation:true}).then(result=>{
   // The browser QA adapter also accepts static data URLs.
   const asset=result.startsWith('data:')?{url:result}:JSON.parse(result);

@@ -1,12 +1,12 @@
 const maxChanges = 512;
 
-export function snapshotDelta(before, after) {
+export function snapshotDelta(before, after, limit=maxChanges) {
  if (!before || !after || before.uuid !== after.uuid || before.world !== after.world ||
      before.minecraft !== after.minecraft || !!before.context_blocks !== !!after.context_blocks ||
      JSON.stringify(before.block_entities??{})!==JSON.stringify(after.block_entities??{}) ||
      !before.bounds.every((n,i) => n === after.bounds[i])) return null;
 
- let remaining = maxChanges;
+ let remaining = limit;
  function compare(from, to) {
   const changes = [];
   for (const key in to) {

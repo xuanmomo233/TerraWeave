@@ -6,7 +6,9 @@ const $=id=>document.getElementById(id),call=callWorkbench;
 const label={area:'区域',route:'路线',marker:'标记'},icon=name=>'<svg class="icon"><use href="#i-'+name+'"/></svg>';
 function node(tag,value,className){const e=document.createElement(tag);e.textContent=value;if(className)e.className=className;return e;}
 export function mountMapWorkspace(context){
- let active=true,info=null,state=null,drafts=[],selectedLayer='buildings',busy=false,visibilityTimer,operations=0,selectionEpoch=0,pendingSelection;const visibility=new Map();
+ let active=true,info=null,state=null,displayedState=null,drafts=[],selectedLayer='buildings',busy=false,operations=0,selectionEpoch=0,pendingSelection;
+ const visibility=new Map();
+ let visibilityPreview;
  let detailNavigation=null,cancelDetail=null;
  let welcomeDismissed=false;
  $('continue-map-planning').onclick=()=>{welcomeDismissed=true;$('map-welcome').hidden=true;};
@@ -65,16 +67,75 @@ export function mountMapWorkspace(context){
   context.sketchChanged?.();
  }
  function visible(value){active=value;$('map-host').hidden=!value;context.canvas.hidden=value;$('map-controls').hidden=!value;$('detail-controls').hidden=value;$('detail-switches').hidden=value;$('detail-axis').hidden=value;$('map-tools').hidden=!value;$('detail-tools').hidden=value;$('map-inspector').hidden=!value;$('inspector').hidden=value;$('project-tree').hidden=true;$('planning-tree').hidden=false;$('world-map-tab').classList.toggle('active',value);context.editor.mapActive(value);context.sketchChanged?.();if(value){$('empty-view').hidden=true;$('source-state').textContent='地图规划';$('source-status').textContent='已保存世界地表 + 规划';$('view-badge').textContent='地图总览';$('control-hint').textContent='拖动平移 · 右键旋转 · 滚轮缩放 · 双击进入三维';viewport.resize();} }
- function adopt(next){if(state&&next.revision<state.revision)return;state=next;if(pendingSelection!==undefined&&(!pendingSelection||state.objects.some(p=>p.id===pendingSelection)))state.selected_id=pendingSelection;for(const [key,pending]of visibility){const [kind,id]=key.split(':');const item=(kind==='layer'?state.layers:state.objects).find(p=>p.id===id);if(item)item.visible=pending.value;}}
- function paint(){if(!state)return;$('map-welcome').hidden=welcomeDismissed||!info||!!info.world_uuid;viewport.setPlanning(state);tree();properties();context.editor.mapActive(active);if(active)context.editor.planningHistory(state);}
- async function selectPlan(id){const ticket=++selectionEpoch;pendingSelection=id??null;state.selected_id=pendingSelection;viewport.setPlanning(state);$('planning-tree').querySelectorAll('[data-plan-id]').forEach(row=>row.classList.toggle('selected',row.dataset.planId===state.selected_id));properties();context.editor.mapActive(active);try{const next=await call('select_plan',id?{plan_id:id}:{});if(ticket===selectionEpoch){pendingSelection=undefined;adopt(next);paint();}}catch(error){if(ticket===selectionEpoch){pendingSelection=undefined;await refresh();say(String(error));}}}
- function toggleVisibility(kind,id,value){const key=kind+':'+id,pending={value};visibility.set(key,pending);const item=(kind==='layer'?state.layers:state.objects).find(p=>p.id===id);if(item)item.visible=value;paint();return run(async()=>{try{return await call(kind==='layer'?'update_layer':'save_plan',kind==='layer'?{layer_id:id,visible:value}:{plan_id:id,visible:value});}finally{if(visibility.get(key)===pending)visibility.delete(key);}});}
- async function refresh(data){if(!info)info=await call('world_map_info');const snapshot=data??await call('ui_snapshot');adopt(snapshot.planning);drafts=snapshot.drafts.filter(d=>!d.archived);if(!state.layers.some(l=>l.id===selectedLayer))selectedLayer=state.layers[0]?.id;paint();const r=context.getRegion?.(),d=drafts.find(d=>d.id===r?.draft_id);if(!active&&d&&r.design_visible!==d.design_visible){clearTimeout(visibilityTimer);visibilityTimer=setTimeout(()=>{if(!active&&context.getRegion?.()?.draft_id===d.id)call('preview_draft',{draft_id:d.id,mode:r.preview_mode??'target',keep_camera:true}).catch(()=>{});},250);}}
- async function open(viewOverride){returnToMap();const [nextInfo,data]=await Promise.all([call('world_map_info'),call('ui_snapshot')]);info=nextInfo;adopt(data.planning);drafts=data.drafts.filter(d=>!d.archived);await viewport.open(info,state,viewOverride??info.view);updateHeightLabel(viewport.view);paint();say('地图总览已就绪 · 在整张地图上划区、连接道路和添加标记');return {world_uuid:info.world_uuid,planning_revision:state.revision,map_bounds:info.bounds};}
+ function adopt(next){if(state&&next.revision<state.revision)return;state=next;if(pendingSelection!==undefined&&(!pendingSelection||state.objects.some(p=>p.id===pendingSelection)))state.selected_id=pendingSelection;}
+ function isVisible(kind,item){return visibility.get(kind+':'+item.id)?.value??item.visible!==false;}
+ function shownPlanning(){
+  const items=(kind,list)=>list.map(item=>isVisible(kind,item)!==(item.visible!==false)?{...item,visible:isVisible(kind,item)}:item);
+  return {...state,layers:items('layer',state.layers),objects:items('plan',state.objects)};
+ }
+ function parentOf(d){return state.objects.find(p=>p.id===d.plan_id||!d.plan_id&&d.base_entity_id&&p.detail_entity_id===d.base_entity_id);}
+ function draftVisible(d){const p=parentOf(d),layer=p&&state.layers.find(l=>l.id===p.layer_id);return isVisible('draft',d)&&(!p||isVisible('plan',p))&&(!layer||isVisible('layer',layer));}
+ function adoptDrafts(items){
+  const previous=new Map(drafts.map(d=>[d.id,d]));
+  drafts=items.filter(d=>!d.archived).map(d=>previous.get(d.id)?.revision>d.revision?previous.get(d.id):d);
+ }
+ function paint(){
+  if(!state)return;
+  $('map-welcome').hidden=welcomeDismissed||!info||!!info.world_uuid;
+  displayedState=shownPlanning();
+  tree();
+  viewport.setPlanning(displayedState,active);
+  properties();
+  context.editor.mapActive(active);
+  if(active)context.editor.planningHistory(state);
+  const d=drafts.find(d=>d.id===context.getRegion?.()?.draft_id);
+  if(d)context.paintDraftVisibility?.(d.id,draftVisible(d));
+ }
+ async function selectPlan(id){const ticket=++selectionEpoch;pendingSelection=id??null;state.selected_id=pendingSelection;displayedState=shownPlanning();viewport.setPlanning(displayedState,active);$('planning-tree').querySelectorAll('[data-plan-id]').forEach(row=>row.classList.toggle('selected',row.dataset.planId===state.selected_id));properties();context.editor.mapActive(active);try{const next=await call('select_plan',id?{plan_id:id}:{});if(ticket===selectionEpoch){pendingSelection=undefined;adopt(next);paint();}}catch(error){if(ticket===selectionEpoch){pendingSelection=undefined;await refresh();say(String(error));}}}
+ function syncDraftVisibility(){
+  const r=context.getRegion?.(),d=drafts.find(d=>d.id===r?.draft_id);
+  if(active||!d||r.preview_mode==='base'||r.design_visible===draftVisible(d)||visibilityPreview)return;
+  const p=parentOf(d);
+  if(visibility.has('draft:'+d.id)||p&&(visibility.has('plan:'+p.id)||visibility.has('layer:'+p.layer_id)))return;
+  const request=call('preview_draft',{draft_id:d.id,mode:r.preview_mode??'target',keep_camera:true,reveal_changes:r.reveal_changes??false,expected_region_id:r.id});
+  visibilityPreview=request;
+  request.then(result=>{
+   visibilityPreview=null;
+   if(!result.cancelled)syncDraftVisibility();
+  },error=>{visibilityPreview=null;say('三维预览更新失败 · '+String(error));});
+ }
+ async function toggleVisibility(kind,item,value=!isVisible(kind,item)){
+  const key=kind+':'+item.id,pending={value};
+  visibility.set(key,pending);
+  paint();
+  const name=kind==='layer'?item.name:kind==='plan'?item.name:item.label;
+  const noun=kind==='draft'?'方案预览':kind==='plan'?'规划标记':'图层标记';
+  const action=(value?'显示':'隐藏')+noun+'「'+name+'」';
+  say('正在'+action);
+  const [tool,idKey]=kind==='layer'?['update_layer','layer_id']:kind==='plan'?['save_plan','plan_id']:['update_draft','draft_id'];
+  try{
+   const result=await call(tool,{[idKey]:item.id,visible:value});
+   if(kind==='draft'){
+    drafts=drafts.map(d=>d.id===result.id&&d.revision<=result.revision?result:d);
+    context.editor.updateDraftSummary?.(result);
+   }else adopt(result);
+   if(visibility.get(key)===pending){visibility.delete(key);say('已'+action);}
+  }catch(error){
+   if(visibility.get(key)===pending){visibility.delete(key);say('保存显示状态失败 · '+String(error));}
+  }
+  paint();
+  syncDraftVisibility();
+ }
+ async function refresh(data){if(!info)info=await call('world_map_info');const snapshot=data??await call('ui_snapshot');adopt(snapshot.planning);adoptDrafts(snapshot.drafts);if(!state.layers.some(l=>l.id===selectedLayer))selectedLayer=state.layers[0]?.id;paint();syncDraftVisibility();}
+ async function open(viewOverride){returnToMap();const [nextInfo,data]=await Promise.all([call('world_map_info'),call('ui_snapshot')]);info=nextInfo;adopt(data.planning);adoptDrafts(data.drafts);displayedState=shownPlanning();await viewport.open(info,displayedState,viewOverride??info.view);updateHeightLabel(viewport.view);paint();say('地图总览已就绪 · 在整张地图上划区、连接道路和添加标记');return {world_uuid:info.world_uuid,planning_revision:state.revision,map_bounds:info.bounds};}
  async function run(fn,refreshDrafts=true){operations++;busy=true;formBusy(true);try{const r=await fn();if(r?.layers&&r?.objects){adopt(r);paint();if(refreshDrafts&&drafts.length)await refresh();}else await refresh();say('规划已保存 · Ctrl+Z 可撤销');return r;}catch(e){await refresh();say(String(e));}finally{operations--;busy=operations>0;formBusy(busy);}}
  function tree(){
-  if(!state)return;const root=$('planning-tree'),query=$('tree-search').value.toLowerCase().trim();root.replaceChildren();const bytes=Number($('storage-summary').dataset.bytes);$('storage-summary').textContent=state.objects.length+' 项规划 · '+drafts.length+' 个方案'+(Number.isFinite(bytes)?' · '+(bytes/1048576).toFixed(1)+' MB':'');
-  for(const layer of state.layers){
+  if(!state)return;const root=$('planning-tree'),query=$('tree-search').value.toLowerCase().trim();
+  const previousFocus=root.contains(document.activeElement)?document.activeElement:null;
+  const previousRow=previousFocus?.closest('[data-layer-id],[data-plan-id],[data-draft-id]');
+  const scrollTop=root.scrollTop,display=displayedState??shownPlanning();
+  root.replaceChildren();const bytes=Number($('storage-summary').dataset.bytes);$('storage-summary').textContent=state.objects.length+' 项规划 · '+drafts.length+' 个方案'+(Number.isFinite(bytes)?' · '+(bytes/1048576).toFixed(1)+' MB':'');
+  for(const layer of display.layers){
    const title=document.createElement('div');
    title.className='planning-layer'+(selectedLayer===layer.id?' selected':'');
    title.dataset.layerId=layer.id;
@@ -91,7 +152,7 @@ export function mountMapWorkspace(context){
    const eye=document.createElement('button'),visibility=layer.visible?'隐藏图层':'显示图层';
    eye.innerHTML=icon('eye');eye.style.opacity=layer.visible?1:.35;
    eye.title=visibility;eye.setAttribute('aria-label',visibility);
-   eye.onclick=()=>toggleVisibility('layer',layer.id,!layer.visible);
+   eye.className='eye';eye.onclick=()=>toggleVisibility('layer',layer);
    const menu=(x,y)=>context.editor.showMenu([
     {label:'重命名图层',action:()=>layerAction('rename',layer)},
     {label:visibility,action:eye.onclick},
@@ -107,28 +168,39 @@ export function mountMapWorkspace(context){
     }else if(e.key==='Enter'){e.preventDefault();name.click();}
    };
    title.append(name,eye);root.append(title);
-   for(const p of state.objects.filter(p=>p.layer_id===layer.id&&p.name.toLowerCase().includes(query))){const row=document.createElement('div');row.dataset.planId=p.id;row.className='planning-object'+(p.id===state.selected_id?' selected':'')+(!p.visible||!layer.visible?' hidden-object':'');const swatch=node('span','','swatch');swatch.style.background=p.color;const text=node('span',p.name,'name');text.title=label[p.type]+' · '+p.name;text.onclick=()=>{const choose=()=>{selectPlan(p.id);viewport.focus(p);};if(!active)open().then(choose);else choose();};const pe=document.createElement('button');pe.className='eye';pe.innerHTML=icon('eye');pe.style.opacity=p.visible?1:.3;pe.title=p.visible?'隐藏规划':'显示规划';pe.onclick=()=>toggleVisibility('plan',p.id,!p.visible);row.append(swatch,text,pe);root.append(row);row.oncontextmenu=e=>{e.preventDefault();selectPlan(p.id);context.editor.showMenu([{label:'聚焦规划',action:()=>viewport.focus(p)},{label:'进入三维细化',action:()=>enterDetail()},null,{label:p.visible?'隐藏规划':'显示规划',action:()=>toggleVisibility('plan',p.id,!p.visible)},{label:'重命名',action:()=>$('plan-name').select()},{label:'删除规划',key:'Delete',action:()=>run(()=>call('delete_plan',{plan_id:p.id}))}],e.clientX,e.clientY);};
+   for(const p of display.objects.filter(p=>p.layer_id===layer.id&&p.name.toLowerCase().includes(query))){const row=document.createElement('div');row.dataset.planId=p.id;row.className='planning-object'+(p.id===state.selected_id?' selected':'')+(!p.visible||!layer.visible?' hidden-object':'');const swatch=node('span','','swatch');swatch.style.background=p.color;const text=node('span',p.name,'name');text.title=label[p.type]+' · '+p.name;const focus=()=>{const choose=()=>{selectPlan(p.id);viewport.focus(p);};if(!active)open().then(choose);else choose();};text.onclick=focus;const pe=document.createElement('button');pe.className='eye';pe.innerHTML=icon('eye');pe.style.opacity=p.visible?1:.3;pe.title=p.visible?'隐藏规划':'显示规划';pe.setAttribute('aria-label',pe.title);pe.onclick=()=>toggleVisibility('plan',p);row.append(swatch,text,pe);root.append(row);row.oncontextmenu=e=>{e.preventDefault();selectPlan(p.id);context.editor.showMenu([{label:'聚焦规划',action:focus},{label:'进入三维细化',action:()=>enterDetail()},null,{label:p.visible?'隐藏规划':'显示规划',action:()=>toggleVisibility('plan',p)},{label:'重命名',action:()=>$('plan-name').select()},{label:'删除规划',key:'Delete',action:()=>run(()=>call('delete_plan',{plan_id:p.id}))}],e.clientX,e.clientY);};
     for(const d of drafts.filter(d=>d.plan_id===p.id||!d.plan_id&&p.detail_entity_id&&d.base_entity_id===p.detail_entity_id))draftRow(d,root);
    }
   }
   const independent=drafts.filter(d=>!state.objects.some(p=>d.plan_id===p.id||!d.plan_id&&p.detail_entity_id&&d.base_entity_id===p.detail_entity_id));if(independent.length){root.append(node('div','独立设计方案','planning-layer'));for(const d of independent)draftRow(d,root);}
+  root.scrollTop=scrollTop;
+  if(previousRow){
+   const attr=['data-layer-id','data-plan-id','data-draft-id'].find(key=>previousRow.hasAttribute(key));
+   const row=root.querySelector('['+attr+'="'+CSS.escape(previousRow.getAttribute(attr))+'"]');
+   const button=previousFocus.classList.contains('draft-locate')?'.draft-locate':'.eye';
+   (previousFocus===previousRow?row:row?.querySelector(button))?.focus({preventScroll:true});
+  }
  }
  function draftRow(d,root){
   const child=document.createElement('div');
-  child.className='planning-object draft'+(d.design_visible===false?' hidden-object':'');
+  child.className='planning-object draft'+(!draftVisible(d)?' hidden-object':'');
   child.dataset.draftId=d.id;
   child.setAttribute('role','treeitem');
   child.tabIndex=0;
   const open=()=>context.editor.run(()=>call('preview_draft',{draft_id:d.id}));
-  const toggle=()=>context.editor.run(()=>call('update_draft',{draft_id:d.id,visible:d.visible===false}));
-  const visibility=d.visible===false?'显示方案':'隐藏方案';
+  const toggle=()=>toggleVisibility('draft',d);
+  const ownVisible=isVisible('draft',d),visibility=ownVisible?'隐藏方案':'显示方案';
+  const locate=()=>context.editor.run(()=>call('preview_draft',{draft_id:d.id,mode:'diff',focus:d.change_focus,reveal_changes:true}),'正在定位改动…');
   const name=node('span',d.label+' · r'+d.revision,'name');
   name.onclick=open;
   const eye=document.createElement('button');
-  eye.className='eye';eye.innerHTML=icon('eye');eye.title=visibility;eye.setAttribute('aria-label',visibility);
-  eye.style.opacity=d.visible===false?.3:1;eye.onclick=toggle;
+  eye.className='eye';eye.innerHTML=icon('eye');eye.title=visibility+(!draftVisible(d)&&ownVisible?' · 上级规划或图层已隐藏':' · 控制方案预览');eye.setAttribute('aria-label',visibility);
+  eye.style.opacity=ownVisible?1:.3;eye.onclick=toggle;
+  const locator=document.createElement('button');
+  locator.className='draft-locate';locator.innerHTML=icon('pin');locator.title='定位改动'+(d.change_focus?' · '+d.change_focus.join(' / '):'');locator.setAttribute('aria-label','定位改动');locator.onclick=locate;
   const menu=(x,y)=>context.editor.showMenu([
    {label:'打开方案',action:open},
+   ...(d.changed_positions?[{label:'定位改动',action:locate}]:[]),
    {label:'重命名',action:()=>context.editor.openDraftAction('rename',d)},
    {label:visibility,action:toggle},
    null,
@@ -142,7 +214,9 @@ export function mountMapWorkspace(context){
     const rect=child.getBoundingClientRect();menu(rect.left,rect.bottom);
    }else if(event.key==='Enter'){event.preventDefault();open();}
   };
-  child.append(name,eye);root.append(child);
+  child.append(name);
+  if(d.changed_positions)child.append(locator);
+  child.append(eye);root.append(child);
  }
  function layerAction(action,layer){
   if(!layer)return;
@@ -164,7 +238,7 @@ export function mountMapWorkspace(context){
    'plan-name':selected.name,'plan-notes':selected.notes,'plan-color':selected.color,'plan-width':selected.width,
    'plan-min-y':selected.min_y??'','plan-max-y':selected.max_y??'','plan-layer':selected.layer_id
   });
-  $('plan-visible').checked=selected.visible;
+  $('plan-visible').checked=isVisible('plan',selected);
   $('plan-width-label').hidden=selected.type!=='route';
   const b=planBounds(selected),format=n=>Math.round(n*100)/100;
   $('plan-geometry').textContent=selected.points.length+' 个控制点\n范围 X '+format(b[0])+'–'+format(b[2])+' / Z '+format(b[1])+'–'+format(b[3])+'\n跨度 '+format(b[2]-b[0])+' × '+format(b[3]-b[1])+' m'+
@@ -249,7 +323,7 @@ export function mountMapWorkspace(context){
   viewport.setSlice($('map-slice-y').valueAsNumber);
   heightDialog.close();
  };
- $('plan-visible').onchange=()=>{if(state?.selected_id)toggleVisibility('plan',state.selected_id,$('plan-visible').checked);};$('delete-plan').onclick=()=>{if(state.selected_id)run(()=>call('delete_plan',{plan_id:state.selected_id}));};$('plan-detail').onclick=()=>enterDetail();
+ $('plan-visible').onchange=()=>{const selected=state?.objects.find(p=>p.id===state.selected_id);if(selected)toggleVisibility('plan',selected,$('plan-visible').checked);};$('delete-plan').onclick=()=>{if(state.selected_id)run(()=>call('delete_plan',{plan_id:state.selected_id}));};$('plan-detail').onclick=()=>enterDetail();
  $('add-layer').onclick=()=>run(()=>call('create_layer',{name:'规划图层 '+(state?.layers.length+1)}));$('rename-layer').onclick=()=>run(()=>call('update_layer',{layer_id:selectedLayer,name:$('layer-name').value}));$('delete-layer').onclick=()=>layerAction('delete',state.layers.find(l=>l.id===selectedLayer));
  $('tree-search').addEventListener('input',tree);
  async function capture(request){
@@ -258,5 +332,5 @@ export function mountMapWorkspace(context){
   if(request.world_revision!==undefined&&map.revision!==request.world_revision)throw Error('存档地表已变化，请重新请求截图');
   return viewport.capture(request,map,plans);
  }
- return {get active(){return active;},open,refresh,panorama,showDetail(){visible(false);},acceptsDetail:id=>!id||detailNavigation===id,completeDetail,chooseTool,createPlanning,draftHeight,sketch:viewport.sketch,redrawSketch:()=>viewport.drawSketch(),locate:(point,focus)=>viewport.locate(point,focus),enterDetail,fit(){const p=state?.objects.find(p=>p.id===state.selected_id);viewport.fit(p?planBounds(p):info?.bounds);},north(){viewport.view.rotation=0;viewport.request();viewport.draw();viewport.notify();},undo:redo=>run(()=>call(redo?'redo_plan':'undo_plan')),deleteSelected:()=>$('delete-plan').onclick(),save:()=>state?.selected_id?$('save-plan').onclick():context.editor.run(()=>call('save_workspace')),capture,getView:()=>({...viewport.view}),getState:()=>state,getSelected:()=>state?.objects.find(p=>p.id===state.selected_id),selectLocal:chooseTool};
+ return {get active(){return active;},open,refresh,panorama,showDetail(){visible(false);},acceptsDetail:id=>!id||detailNavigation===id,completeDetail,chooseTool,createPlanning,draftHeight,sketch:viewport.sketch,redrawSketch:()=>viewport.drawSketch(),locate:(point,focus)=>viewport.locate(point,focus),enterDetail,fit(){const p=state?.objects.find(p=>p.id===state.selected_id);viewport.fit(p?planBounds(p):info?.bounds);},north(){viewport.view.rotation=0;viewport.request();viewport.draw();viewport.notify();},undo:redo=>run(()=>call(redo?'redo_plan':'undo_plan')),deleteSelected:()=>$('delete-plan').onclick(),save:()=>state?.selected_id?$('save-plan').onclick():context.editor.run(()=>call('save_workspace')),capture,getView:()=>({...viewport.view}),getState:()=>displayedState,getSelected:()=>state?.objects.find(p=>p.id===state.selected_id),selectLocal:chooseTool};
 }
