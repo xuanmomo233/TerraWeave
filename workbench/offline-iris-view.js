@@ -130,7 +130,7 @@ function frameData(camera,region,snapshot,lod,inputs,width,height,start){
  const shadowProjection=new Matrix4().makeOrthographic(-d,d,d,-d,-100.05,156);
  const p=camera.position.toArray().map((n,i)=>n+snapshot.bounds[i]);
  const eye=p.map(Math.floor),key=eye.join(',');
- const eyeBlock=region.panorama?lod.stateAt(...eye):snapshot.blocks[key]??lod.stateAt(...eye);
+ const eyeBlock=(!region.panorama?snapshot.blocks[key]:undefined)??(lod.enabled?lod.stateAt(...eye):undefined);
  const biome=biomeAt(inputs.world,p),swamp=biome==='minecraft:swamp'||biome==='minecraft:mangrove_swamp';
  const temperatures={'minecraft:forest':.7,'minecraft:birch_forest':.6,'minecraft:taiga':.25,'minecraft:snowy_plains':0,'minecraft:desert':2,'minecraft:mangrove_swamp':.8,'minecraft:swamp':.8};
  return {width,height,near:camera.near,far:camera.far,view:camera.matrixWorldInverse.toArray(),
@@ -167,6 +167,7 @@ export class OfflineIrisView{
   return this.active&&!document.hidden&&!this.canvas.hidden&&!this.pending&&now>=this.nextFrameAt;
  }
  configure(id){
+  this.setView(null);
   if(this.ownsAtlas)this.atlas?.texture.dispose();
   this.atlas=null;this.ownsAtlas=false;
   this.shader=id?.toLowerCase().endsWith('.zip')?id:null;
@@ -175,21 +176,32 @@ export class OfflineIrisView{
   this.canvas.hidden=true;this.error.hidden=!this.active;
   this.error.textContent='正在加载原版光影…';
  }
- async draw(data,{exportFrame=false}={}){
+ setView(key){
+  if(this.viewKey===key)return;
+  this.viewKey=key;this.viewEpoch=(this.viewEpoch??0)+1;
+  this.queued=null;this.presented=null;this.canvas.hidden=true;this.error.hidden=true;
+ }
+ async draw(data,{exportFrame=false,current=()=>true}={}){
   const {key,snapshot,region,camera,lod}=data;
   const animationTime=data.animationTime??performance.now();
-  const environment=data.environment_revision??lod.info?.environment_revision??region.environment_revision;
+  const environment=data.environment_revision??(lod.enabled?lod.info?.environment_revision:undefined)??region.environment_revision;
   const source=data.world_revision??(lod.enabled?lod.info?.revision:undefined);
-  const lightKey=JSON.stringify([this.shader,region.world_uuid,environment,source,lod.signature,snapshot.bounds]);
+  const coverage=lod.enabled?lod.coverageKey:'';
+  const lightKey=JSON.stringify([this.shader,region.world_uuid,environment,source,coverage,snapshot.bounds]);
   if(this.inputsKey!==lightKey){
    this.inputs=await callWorkbench('offline_iris_inputs',{shader:this.shader,revision:source,environment_revision:environment,chunk_positions:lightPositions(data)});
    this.inputsKey=lightKey;
   }
   const inputs=this.inputs;
   if(inputs.world.world_uuid!==region.world_uuid)throw Error('原版光影输入与当前存档不一致');
-  const renderKey=key+':'+inputs.world.environment_revision;
+  if(!current())return;
+  const renderKey=key+':'+coverage+':'+inputs.world.environment_revision;
   if(this.key!==renderKey){
    const prepared=await collectScene(data,inputs,animationTime);
+   if(!current()){
+    if(prepared.ownsAtlas)prepared.atlas.texture.dispose();
+    return;
+   }
    try{await invoke('iris_prepare',{pack:inputs.pack,scene:prepared.scene});}
    catch(error){if(prepared.ownsAtlas)prepared.atlas.texture.dispose();throw error;}
    if(this.ownsAtlas)this.atlas?.texture.dispose();
@@ -198,6 +210,7 @@ export class OfflineIrisView{
    this.missing=prepared.missing;
    this.key=renderKey;
   }
+  if(!current())return;
   const scale=exportFrame?1:Math.min(1,1920/Math.max(data.width,data.height));
   const width=Math.max(1,Math.floor(data.width*scale)),height=Math.max(1,Math.floor(data.height*scale));
   const frameCamera=exportFrame?camera:camera.clone();
@@ -208,6 +221,7 @@ export class OfflineIrisView{
   if(exportFrame){frame.reset_history=true;frame.samples=8;}
   const rgba=await invoke('iris_draw',{frame});
   this.atlasVersion=atlasVersion;
+  if(!current())return;
   if(exportFrame){
    const output=document.createElement('canvas');
    output.width=width;output.height=height;
@@ -226,10 +240,14 @@ export class OfflineIrisView{
   return this.canvas;
  }
  show(data){
-  if(data.region.panorama&&!data.lod.meshes.size)return;
+  this.setView(data.key);
+  if(!(data.lod.enabled&&data.lod.meshes.size)&&
+    (data.region.panorama||!data.chunks.meshes().length))return;
   if(this.pending){this.queued=data;return;}
+  const epoch=this.viewEpoch,current=()=>this.viewEpoch===epoch;
   this.nextFrameAt=performance.now()+1000/30;
-  this.pending=this.draw(data).catch(e=>{
+  this.pending=this.draw(data,{current}).catch(e=>{
+   if(!current())return;
    this.presented=null;
    this.present?.();
    this.canvas.hidden=true;
@@ -239,7 +257,7 @@ export class OfflineIrisView{
   }).finally(()=>{
    this.pending=null;
    const next=this.queued;this.queued=null;
-   if(next&&this.active&&!this.canvas.hidden)this.show(next);
+   if(next&&this.active&&next.key===this.viewKey)this.show(next);
   });
  }
  async capture(data){

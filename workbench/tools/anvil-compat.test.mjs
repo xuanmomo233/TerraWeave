@@ -5,13 +5,17 @@ import path from 'node:path';
 import {test} from 'node:test';
 import {deflateSync,gzipSync} from 'node:zlib';
 import {decodeAnvilLz4} from './anvil-lz4.mjs';
-import {identifyWorld} from './world-source.mjs';
-import {decodeSurfaceChunk,readWorldChunk,worldIndex} from './world-surface.mjs';
+import {identifyWorld,saveWorldSource,worldSource} from './world-source.mjs';
+import {decodeSurfaceChunk,readWorldChunk,sampleSurface,surfaceTile,worldIndex} from './world-surface.mjs';
 import {javaReleases} from '../minecraft-version.js';
 import {blockEntityAppearance} from './block-entity-appearance.mjs';
+import {normalizeAnvilPalette} from './anvil-block-palette.mjs';
+import {normalizeBlockState} from './block-states.mjs';
 import {savedDetailSnapshot} from './render-context.mjs';
 import {modelTile} from './world-models.mjs';
 import {snapshotBytes} from './project-store.mjs';
+import {constructionView,registerConstructionSource} from './construction-view.mjs';
+import {blockConverter} from './design-conversion.mjs';
 
 const short=n=>Buffer.from([n>>>8,n&255]);
 const int=n=>{const b=Buffer.alloc(4);b.writeInt32BE(n);return b;};
@@ -93,6 +97,130 @@ test('26.2 overworld resolves modern regions, decodes external chunks and preser
  const tile=modelTile(0,0,path.join(world,'model-cache'),index);
  assert.equal(tile.minecraft,'26.2');
  assert.equal(tile.groups.find(group=>group.block_entity).block_entity.front.color,0xb02e26);
+});
+
+test('26.3 reads default and explicit block palettes in a world with older chunks',t=>{
+ const world=fs.mkdtempSync(path.join(os.tmpdir(),'terraweave-26.3-'));
+ t.after(()=>fs.rmSync(world,{recursive:true}));
+ const directory=path.join(world,'dimensions/minecraft/overworld/region');
+ fs.mkdirSync(directory,{recursive:true});
+ const version=javaReleases['26.3'];
+ const level=compound(num('DataVersion',version),
+  tag(10,'Version',compound(str('Name','26.3'),num('Id',version))));
+ fs.writeFileSync(path.join(world,'level.dat'),gzipSync(root(compound(tag(10,'Data',level)))));
+ const chunk=(dataVersion,states)=>deflateSync(root(compound(num('DataVersion',dataVersion),
+  str('Status','minecraft:full'),tag(9,'sections',list(10,compound(
+   tag(1,'Y',Buffer.from([19])),tag(10,'block_states',compound(...states))
+  ))))));
+ const indices=Buffer.alloc(256*8);
+ indices.writeBigUInt64BE(0x2_1_0n);
+ const payloads=[
+  chunk(version,[tag(9,'palette',list(10,
+   compound(str('','minecraft:poplar_log')),
+   compound(str('id','minecraft:poplar_log'),tag(10,'properties',compound(str('axis','x')))),
+   compound(str('','minecraft:oak_stairs')))),
+   tag(12,'data',Buffer.concat([int(256),indices]))]),
+  chunk(version,[tag(9,'palette',list(8,text('minecraft:grass_block')))]),
+  chunk(javaReleases['26.2'],[tag(9,'palette',list(10,compound(str('Name','minecraft:stone'))))])
+ ];
+ const mca=Buffer.alloc((2+payloads.length)*4096);
+ for(const [cx,payload] of payloads.entries()){
+  const sector=cx+2,offset=sector*4096;
+  mca.writeUInt32BE(sector<<8|1,cx*4);
+  mca.writeUInt32BE(payload.length+1,offset);
+  mca[offset+4]=2;payload.copy(mca,offset+5);
+ }
+ fs.writeFileSync(path.join(directory,'r.0.0.mca'),mca);
+ const index=worldIndex(identifyWorld(world));
+ assert.equal(index.minecraft,'26.3');
+ const expected=['minecraft:poplar_log[axis=y]','minecraft:poplar_log[axis=x]',
+  'minecraft:oak_stairs[facing=north,half=bottom,shape=straight,waterlogged=false]'];
+ assert.deepEqual(sampleSurface(1,0,true,world),{y:319,state:expected[0]});
+ const snap=savedDetailSnapshot([0,304,0,32,304,0],index);
+ assert.deepEqual([0,1,2,16,32].map(x=>snap.blocks[x+',304,0']),[...expected,'minecraft:grass_block[snowy=false]','minecraft:stone']);
+ const colors=surfaceTile(0,0,0,path.join(world,'map-cache'),index,304);
+ assert.deepEqual([0,1,2,16,32].map(x=>colors.availability[x]),[2,2,2,2,2]);
+ const models=modelTile(0,0,path.join(world,'model-cache'),index);
+ assert.ok(expected.every(state=>models.groups.some(group=>group.state===state)));
+});
+
+test('26.3 authoring and Anvil use actual defaults, including properties absent from the model',()=>{
+ const cases=[
+  ['acacia_fence','acacia_fence[east=false,north=false,south=false,waterlogged=false,west=false]'],
+  ['andesite_wall','andesite_wall[east=none,north=none,south=none,up=true,waterlogged=false,west=none]'],
+  ['poplar_trapdoor[waterlogged=true]','poplar_trapdoor[facing=north,half=bottom,open=false,powered=false,waterlogged=true]'],
+  ['stone','stone']
+ ];
+ for(const [input,expected] of cases)assert.equal(normalizeBlockState(input,'26.3'),'minecraft:'+expected);
+ assert.throws(()=>normalizeBlockState('poplar_log[axis=diagonal]','26.3'),/属性/);
+ assert.throws(()=>normalizeBlockState('not_a_real_block','26.3'),/不存在/);
+ const chunk=normalizeAnvilPalette({DataVersion:5023,sections:[{block_states:{palette:[
+  {id:'minecraft:stone',properties:{}},'minecraft:acacia_fence'
+ ]}}],block_entities:[{id:'minecraft:piston',blockState:{id:'minecraft:poplar_trapdoor',properties:{waterlogged:'true'}}}]});
+ assert.deepEqual(chunk.sections[0].block_states.palette[0],{Name:'minecraft:stone'});
+ assert.equal(chunk.sections[0].block_states.palette[1].Properties.north,'false');
+ assert.equal(blockEntityAppearance(chunk.block_entities[0]).state,'minecraft:'+cases[2][1]);
+});
+
+test('all supported version pairs convert a common fully specified building block',()=>{
+ const state='minecraft:oak_stairs[facing=east,half=top,shape=inner_left,waterlogged=true]';
+ const versions=Object.keys(javaReleases);
+ for(const source of versions)for(const target of versions){
+  assert.deepEqual(blockConverter(source,target)(state),{state,kind:'exact'},source+' → '+target);
+ }
+});
+
+test('conversion adapts verified aliases and requires explicit substitutes for unavailable states',()=>{
+ assert.deepEqual(blockConverter('1.20.1','26.3')('minecraft:grass'),
+  {state:'minecraft:short_grass',kind:'adapted'});
+ assert.deepEqual(blockConverter('26.3','1.20.1')('minecraft:iron_chain[axis=x,waterlogged=true]'),
+  {state:'minecraft:chain[axis=x,waterlogged=true]',kind:'adapted'});
+ assert.equal(blockConverter('1.20.1','26.3')('minecraft:barrier').state,'minecraft:barrier[waterlogged=false]');
+ assert.match(blockConverter('26.3','1.20.1')('minecraft:barrier[waterlogged=true]').reason,/waterlogged=true/);
+ assert.match(blockConverter('26.1','1.21.11')('minecraft:note_block[instrument=trumpet]').reason,/trumpet/);
+ const state='minecraft:poplar_log[axis=z]';
+ assert.match(blockConverter('26.3','1.20.1')(state).reason,/目标版本没有/);
+ assert.equal(blockConverter('26.3','1.20.1',{[state]:'minecraft:oak_log[axis=z]'})(state).state,'minecraft:oak_log[axis=z]');
+ assert.match(blockConverter('26.3','1.20.1',{[state]:'minecraft:oak_log[facing=east]'})(state).reason,/替换后的方块/);
+});
+
+test('modern Paper metadata identifies the overworld and preserves an older project ID',t=>{
+ const rootDir=fs.mkdtempSync(path.join(os.tmpdir(),'terraweave-paper-uuid-'));
+ t.after(()=>fs.rmSync(rootDir,{recursive:true}));
+ const game=path.join(rootDir,'world'),project=path.join(rootDir,'project');
+ const overworld=path.join(game,'dimensions','minecraft','overworld');
+ fs.mkdirSync(path.join(overworld,'region'),{recursive:true});
+ const level=tag(10,'Data',compound(num('DataVersion',javaReleases['26.3'])));
+ fs.writeFileSync(path.join(game,'level.dat'),gzipSync(root(compound(level))));
+ const local=saveWorldSource(game,undefined,project).world_uuid;
+ assert.match(local,/^local-/);
+ const metadata=path.join(overworld,'data','paper','metadata.dat');
+ fs.mkdirSync(path.dirname(metadata),{recursive:true});
+ const bits=Buffer.from('56393027df574faf867c38deb58b6e9c','hex');
+ const writeUuid=()=>fs.writeFileSync(metadata,gzipSync(root(compound(tag(10,'data',compound(
+  tag(11,'uuid',Buffer.concat([int(4),bits]))
+ ))))));
+ writeUuid();
+ const uuid='56393027-df57-4faf-867c-38deb58b6e9c';
+ assert.equal(identifyWorld(game).world_uuid,uuid);
+ assert.equal(worldSource(project).world_uuid,local);
+ assert.equal(worldSource(project).paper_world_uuid,uuid);
+ saveWorldSource(game,local,project);
+ const ledger=path.join(rootDir,'writer-ledger'),operation='00000000-0000-4000-8000-000000000001';
+ fs.mkdirSync(ledger);
+ fs.mkdirSync(path.join(project,'exports'));
+ fs.mkdirSync(path.join(project,'drafts'));
+ fs.writeFileSync(path.join(project,'drafts','draft.json'),JSON.stringify({id:'draft',world_uuid:local,plan_id:'plan'}));
+ const exportPath=path.join(project,'exports','draft.json'),design={draft_id:'draft',world_uuid:uuid,plan_id:'plan'};
+ fs.writeFileSync(exportPath,JSON.stringify(design));
+ registerConstructionSource(exportPath,design,ledger);
+ fs.writeFileSync(path.join(ledger,operation+'.json'),JSON.stringify({
+  id:operation,kind:'apply',order:1,...design,batches:[{changes:[{x:0,y:70,z:0,before:'minecraft:air',after:'minecraft:stone'}]}]
+ }));
+ const planning={objects:[{id:'plan',visible:false}],layers:[]};
+ assert.equal(constructionView(project,local,planning,uuid)?.block(0,70,0,'minecraft:stone'),'minecraft:air');
+ bits[15]^=255;writeUuid();
+ assert.match(worldSource(project).error,/UUID 已变化/);
 });
 
 test('reads an actual lz4-java compressed block and rejects a corrupted checksum',()=>{

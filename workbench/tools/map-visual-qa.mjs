@@ -25,10 +25,12 @@ planner.execute('select_plan',{});
 const draftFixture=new Map([
  ['qa-independent',{id:'qa-independent',label:'独立方案验收',plan_id:null}],
  ['qa-attached',{id:'qa-attached',label:'关联方案验收',plan_id:planner.read().objects.find(p=>p.name===anchorName).id}]
-].map(([id,d])=>[id,{...d,revision:1,visible:true,design_visible:true,changed_positions:0,undo_count:0,redo_count:0,counts:{added:0,replaced:0,removed:0}}]));
+].map(([id,d])=>[id,{...d,world_uuid:'qa-overlap-world',revision:1,visible:true,design_visible:true,changed_positions:0,undo_count:0,redo_count:0,counts:{added:0,replaced:0,removed:0}}]));
 const changeFocus=[anchorBounds[0]+2,anchorBounds[1]+2,anchorBounds[2]+2];
 Object.assign(draftFixture.get('qa-independent'),{changed_positions:1,change_focus:changeFocus,counts:{added:1,replaced:0,removed:0}});
-let draftVisibilityGate,draftVisibilityFailure=false,draftPreviewArgs,panelReads=0;
+Object.assign(draftFixture.get('qa-attached'),{changed_positions:1});
+let draftVisibilityGate,draftVisibilityFailure=false,draftPreviewArgs,panelReads=0,overlapPreview,snapshotHold;
+let lowerMaterial='minecraft:oak_planks',failedTexture=false,hiddenEditRequests=0,draftUndoRequests=0;
 const savedViews=new Map(),viewSnapshots=new Map();
 let testHeightNavigation=false;
 const fixtureMap=mapService({
@@ -43,13 +45,23 @@ const fixtureMap=mapService({
  savePreview:region=>savedViews.set(region.id,region),
  displayRegion:(region,kind,navigation_id)=>send({kind,region,navigation_id,snapshot:viewSnapshots.get(region.snapshot_id)})
 });
-let job={id:'qa-map',kind:'map'},completion,reply,view,sequence=0,barrierWait=null,modelReads=0,clipboardText='',selectionDelay=0,browseReads=0,fullscreen=false,sceneAckHold,detailWait,residencyFixture;const captures=[],openedPackFolders=[];
+let job={request:{id:'qa-map',kind:'map'}},reply,view,sequence=0,barrierWait=null,modelReads=0,clipboardText='',selectionDelay=0,browseReads=0,fullscreen=false,sceneAckHold,detailWait,residencyFixture;const captures=[],openedPackFolders=[],desktopQueue=[];
 const tileReads={started:0,completed:0,failed:0};
+const capacityProbe=Promise.withResolvers();
+let probedRenderer;
 const pickedDirectories=[path.join(fixture,'带空格的 存档'),null];
-async function send(request){job={id:'qa-'+(++sequence),...request};return new Promise(resolve=>completion=resolve);}
+function send(request){
+ const queued={id:'qa-'+(++sequence),...request};
+ return new Promise((resolve,reject)=>{
+  const timeout=setTimeout(()=>reject(Error('Desktop fixture request timed out: '+queued.id+' '+queued.kind+' '+(queued.region?.id??''))),60000);
+  timeout.unref();
+  desktopQueue.push({request:queued,resolve(result){clearTimeout(timeout);resolve(result);}});
+ });
+}
 async function bridge(command,args){
+ if(command==='render_capacity'){probedRenderer=args.renderer;return capacityProbe.promise;}
  if(command==='pick_world_directory')return pickedDirectories.shift()??null;
- if(command==='workbench_poll')return job;
+ if(command==='workbench_poll')return (job??=desktopQueue.shift())?.request??null;
  if(command==='workbench_heartbeat'||command==='workbench_show')return null;
  if(command==='workbench_window_action'){
   if(args.action==='enter-fullscreen')fullscreen=true;
@@ -59,6 +71,7 @@ async function bridge(command,args){
  if(command==='workbench_clipboard'){if(args.text!==undefined){clipboardText=args.text;return '';}return clipboardText;}
  if(command==='open_pack_folder'){assert.ok(['resourcepacks','shaderpacks'].includes(args.kind));openedPackFolders.push(args.kind);return null;}
  if(command==='read_asset'){
+  if(failedTexture&&args.name.endsWith('block/magenta_glazed_terracotta.png'))throw Error('模拟贴图读取异常');
   if(args.name.endsWith('item/barrier.png')&&barrierWait)await barrierWait;
   const file=path.resolve(PROJECT,'assets',args.name);
   if(!file.startsWith(path.join(PROJECT,'assets')+path.sep))throw Error('Invalid fixture asset');
@@ -70,9 +83,10 @@ async function bridge(command,args){
  }
  if(command==='workbench_read_image'){const own=captures.find(c=>c.capture_id===args.captureId);if(own)return 'data:image/png;base64,'+fs.readFileSync(own.images[args.index].path).toString('base64');const c=await callTool('read_capture',{capture_id:args.captureId});return 'data:image/png;base64,'+fs.readFileSync(c.images[args.index].path).toString('base64');}
  if(command==='workbench_complete'){
-  reply=args.result;const request=job;job=null;const result={...request?.region,...args.result.result,desktop_acknowledged:true};
+  assert.equal(args.id,job?.request.id,'Only the claimed desktop request can complete');
+  reply=args.result;const {request,resolve}=job;job=null;const result={...request.region,...args.result.result,desktop_acknowledged:true};
   if(result.images?.[0]?.data_url){const dir=path.join(out,request.id);fs.mkdirSync(dir,{recursive:true});result.images=result.images.map((img,i)=>{const file=path.join(dir,'view-'+i+'.png');fs.writeFileSync(file,Buffer.from(img.data_url.split(',')[1],'base64'));return {...img,data_url:undefined,path:file,width:request.width,height:request.height};});result.capture_id=request.id;captures.unshift({...result,scene_geometry:undefined});}
-  completion?.(result);completion=null;
+  resolve?.(result);
   if(request.kind==='scene_view'&&sceneAckHold)await sceneAckHold;
   return null;
  }
@@ -86,7 +100,12 @@ async function bridge(command,args){
    packs:openedPackFolders.includes('resourcepacks')?[...settings.packs,'验收材质包.zip']:settings.packs,
    shaders:[...settings.shaders,unsupported,...(openedPackFolders.includes('shaderpacks')?[newShader]:[])]};
  }
- if(tool==='ui_snapshot'){panelReads++;const data=await callTool(tool,input);return {...data,drafts:[...draftFixture.values(),...data.drafts],planning:planner.execute('planning_state',{}),captures:[...captures,...data.captures]};}
+ if(tool==='ui_snapshot'){
+  panelReads++;const data=await callTool(tool,input);
+  const snapshot={...data,drafts:[...draftFixture.values(),...data.drafts],planning:planner.execute('planning_state',{}),captures:[...captures,...data.captures]};
+  if(snapshotHold){const hold=snapshotHold;snapshotHold=null;hold.started.resolve();await hold.release.promise;}
+  return snapshot;
+ }
  if(tool==='delete_captures'){
   const deleted_ids=[];
   for(const id of input.capture_ids){
@@ -110,12 +129,25 @@ async function bridge(command,args){
    return d;
   }
   if(tool==='delete_draft'){draftFixture.delete(d.id);return {id:d.id,deleted:true};}
+  if(tool==='edit_draft'){hiddenEditRequests++;return d;}
+  if(tool==='undo_draft'||tool==='redo_draft'){draftUndoRequests++;return d;}
   if(tool==='preview_draft'){
    draftPreviewArgs=input;
+   const lower=d.id==='qa-independent'&&!d.visible?draftFixture.get('qa-attached'):null;
+   const plans=planner.read();
+   const parent=lower&&plans.objects.find(p=>p.id===lower.plan_id);
+   const lowerVisible=!!lower&&lower.visible&&parent?.visible!==false&&plans.layers.find(l=>l.id===parent?.layer_id)?.visible!==false;
+   const overlapping_drafts=lower?[{id:lower.id,revision:lower.revision,visible:lowerVisible}]:[];
+   const overlap_candidates=lower?[{id:lower.id,revision:lower.revision}]:undefined;
+   const changeKey=changeFocus.join(',');
+   const snapshot=lowerVisible?{...local.snapshot,blocks:{...local.snapshot.blocks,[changeKey]:lowerMaterial}}:local.snapshot;
+   const hash=snapshot===local.snapshot?local.region.snapshot_hash:snapshotHash(snapshot);
    const camera=input.keep_camera?await send({kind:'scene_view'}):undefined;
-   return send({kind:'display',camera,snapshot:local.snapshot,expected_region_id:input.expected_region_id,region:{...local.region,id:d.id+'-'+d.revision,
+   const result=await send({kind:'display',camera,snapshot,expected_region_id:input.expected_region_id,region:{...local.region,id:d.id+'-'+d.revision,snapshot_hash:hash,
     label:d.label,source:'design_draft',draft_id:d.id,draft_revision:d.revision,preview_mode:input.mode??'target',reveal_changes:input.reveal_changes,
-    design_visible:d.design_visible,diff:input.reveal_changes?[{coordinate:changeFocus,kind:'added'}]:[]}});
+    design_visible:d.design_visible,overlapping_drafts,overlap_candidates,diff:input.reveal_changes?[{coordinate:changeFocus,kind:'added'}]:[]}});
+   if(lower)overlapPreview={block:snapshot.blocks[changeKey],expectedRegion:input.expected_region_id};
+   return result;
   }
  }
  if(tool==='select_plan'&&selectionDelay)await new Promise(resolve=>setTimeout(resolve,selectionDelay));
@@ -713,6 +745,32 @@ try{
  await page.locator('#document-tabs [role="tab"]').filter({hasText:'已命名岸线方案'}).waitFor({state:'visible'});
  assert.deepEqual((await send({kind:'scene_view'})).position,beforeRename.position);
  assert.equal(draftFixture.get('qa-independent').label,'已命名岸线方案');
+ const customized=beforeRename.position.map((value,i)=>value+[13,5,-9][i]);
+ for(const [i,axis]of ['x','y','z'].entries())await page.locator('#camera-'+axis).fill(String(customized[i]));
+ await page.locator('#set-camera-angle').click();
+ await page.evaluate(()=>document.activeElement.blur());
+ await page.keyboard.press('e');
+ assert.ok(await page.locator('[data-tool="erase"]').evaluate(e=>e.classList.contains('active')));
+ const beforeTab=await send({kind:'scene_view'});
+ assert.deepEqual(beforeTab.position,customized);
+ await page.keyboard.press('v');
+ const selectedLayer=Number(await page.locator('#layer-number').inputValue())-3;
+ await page.locator('#layer-number').fill(String(selectedLayer));
+ await page.locator('#layer-number').dispatchEvent('change');
+ let cutCommitted=false;
+ for(let i=0;i<60;i++){
+  if((await send({kind:'scene_view'})).render_stats.local_geometry_builds>beforeTab.render_stats.local_geometry_builds){cutCommitted=true;break;}
+  await page.waitForTimeout(40);
+ }
+ assert.equal(cutCommitted,true);
+ await page.locator('#world-map-tab').click();
+ await page.waitForFunction(()=>!document.querySelector('#map-host').hidden);
+ await page.locator('#document-tabs [role="tab"]').filter({hasText:'已命名岸线方案'}).click();
+ await page.waitForFunction(()=>!document.querySelector('#draft-fill').disabled);
+ const returned=await send({kind:'scene_view'});
+ assert.deepEqual(returned.position,beforeTab.position);
+ assert.ok(Math.hypot(...returned.target.map((n,i)=>n-beforeTab.target[i]))<1e-6);
+ assert.equal(await page.locator('#layer-number').inputValue(),String(selectedLayer));
  await page.locator('#world-map-tab').click();
  await page.waitForFunction(()=>!document.querySelector('#map-host').hidden);
  const readsBeforeVisibility=panelReads;
@@ -730,6 +788,55 @@ try{
  assert.equal(draftFixture.get('qa-independent').visible,false);
  assert.deepEqual(draftPreviewArgs.focus,changeFocus);
  assert.equal(draftPreviewArgs.reveal_changes,true);
+ const lowerPreviewApplied=async (expected,previous)=>{
+  for(let attempt=0;attempt<100;attempt++){
+   if(overlapPreview?.block===expected&&overlapPreview.expectedRegion===previous?.region_id)return;
+   await new Promise(resolve=>setTimeout(resolve,30));
+  }
+  assert.fail('Changing an overlapping draft did not refresh the current preview');
+ };
+ await lowerPreviewApplied('minecraft:oak_planks');
+ const locatedPose=await send({kind:'scene_view'});
+ assert.equal(await page.locator('#draft-fill').isDisabled(),true);
+ assert.equal(await page.locator('[data-tool="paint"]').isDisabled(),true);
+ assert.equal(await page.locator('[data-tool="erase"]').isDisabled(),true);
+ await page.keyboard.press('e');
+ assert.equal(hiddenEditRequests,0);
+ lowerMaterial='minecraft:gold_block';
+ draftFixture.get('qa-attached').revision++;
+ await send({kind:'planning_update'});
+ await lowerPreviewApplied('minecraft:gold_block',locatedPose);
+ await attached.getByRole('button',{name:'隐藏方案',exact:true}).click();
+ await lowerPreviewApplied(local.snapshot.blocks[changeFocus.join(',')],locatedPose);
+ assert.deepEqual((await send({kind:'scene_view'})).position,locatedPose.position);
+ await attached.getByRole('button',{name:'显示方案',exact:true}).click();
+ await lowerPreviewApplied('minecraft:gold_block',locatedPose);
+ assert.deepEqual((await send({kind:'scene_view'})).position,locatedPose.position);
+ const anchorId=draftFixture.get('qa-attached').plan_id;
+ const eye=page.locator('[data-plan-id="'+anchorId+'"] .eye');
+ const selectedBeforeHide=planner.read().selected_id;
+ await eye.click();
+ await page.getByText('已隐藏规划「'+anchorName+'」',{exact:true}).waitFor();
+ await lowerPreviewApplied(local.snapshot.blocks[changeFocus.join(',')],locatedPose);
+ assert.equal(planner.read().selected_id,selectedBeforeHide);
+ await page.keyboard.press('Control+z');
+ await lowerPreviewApplied('minecraft:gold_block',locatedPose);
+ assert.equal(planner.read().objects.find(p=>p.id===anchorId).visible,true);
+ assert.equal(draftUndoRequests,0);
+ const beforeFailedRender=await send({kind:'scene_view'});
+ const badgeBeforeFailure=await page.locator('#view-badge').textContent();
+ failedTexture=true;
+ const [failX,,failZ,,failY]=local.snapshot.bounds,failKey=[failX+3,failY,failZ+3].join(',');
+ const broken={...local.snapshot,blocks:{...local.snapshot.blocks,[failKey]:'minecraft:magenta_glazed_terracotta[facing=south]'}};
+ await send({kind:'display',region:{...local.region,id:'qa-material-failure',label:'不可加载的视图',snapshot_hash:snapshotHash(broken)},snapshot:broken});
+ assert.equal(reply.ok,false);
+ assert.match(reply.error,/模拟贴图读取异常/);
+ failedTexture=false;
+ const afterFailedRender=await send({kind:'scene_view'});
+ assert.equal(afterFailedRender.region_id,beforeFailedRender.region_id);
+ assert.deepEqual(afterFailedRender.position,beforeFailedRender.position);
+ assert.equal(afterFailedRender.render_stats.local_geometry_builds,beforeFailedRender.render_stats.local_geometry_builds);
+ assert.equal(await page.locator('#view-badge').textContent(),badgeBeforeFailure);
  await page.locator('#world-map-tab').click();
  await page.waitForFunction(()=>!document.querySelector('#map-host').hidden);
  draftVisibilityFailure=true;
@@ -802,11 +909,16 @@ try{
  assert.deepEqual([planner.read().objects.find(p=>p.id===heightPlan.id).min_y,planner.read().objects.find(p=>p.id===heightPlan.id).max_y],[58,62]);
  await page.screenshot({path:path.join(out,'map-y-slice.png')});
  testHeightNavigation=true;
+ await page.waitForFunction(()=>document.querySelector('#map-loading').hidden);
+ const warmMapView=(await send({kind:'scene_view'})).view,warmMapReads=tileReads.started;
  await page.locator('#plan-detail').click();
  await page.waitForFunction(()=>document.querySelector('#source-state').textContent==='存档三维'&&!document.querySelector('#new-region').disabled);
  assert.equal((await send({kind:'scene_view'})).target[1],60);
  await page.locator('#world-map-tab').click();
- await page.waitForFunction(()=>!document.querySelector('#map-host').hidden&&document.querySelector('#map-height').textContent==='Y · 59');
+ await page.waitForFunction(()=>document.querySelector('#status').textContent.startsWith('地图总览已就绪')&&document.querySelector('#map-loading').hidden&&document.querySelector('#map-height').textContent==='Y · 59');
+ assert.deepEqual((await send({kind:'scene_view'})).view,warmMapView);
+ assert.equal(tileReads.started-warmMapReads,0,'Reopening the same map slice should reuse the rendered terrain tiles');
+ console.log('地图切片 → 局部三维 → 原地图 · 地形新增读取 '+(tileReads.started-warmMapReads));
  await page.locator('[data-map-tool="select"]').click();
  const centerClick=()=>page.mouse.dblclick(mapCenter.x+mapCenter.width/2,mapCenter.y+mapCenter.height/2);
  await centerClick();
@@ -903,6 +1015,65 @@ try{
   assert.equal(pose.render_stats.loading,false);
  }
  assert.equal(modelReads,readsBeforeTurn);
+ const switchReads=modelReads,switchStart=performance.now();
+ await send({kind:'world_scene',scene:residencyFixture,camera:residentReturned});
+ const panoramaAgain=await send({kind:'scene_view'});
+ assert.equal(panoramaAgain.panoramic,true);
+ assert.equal(panoramaAgain.render_stats.model_tiles,130);
+ assert.equal(panoramaAgain.render_stats.model_tiles_baked,residentBefore.render_stats.model_tiles_baked);
+ const switchBack=await send({kind:'display_cached',region:localRequest.region,camera:residentReturned});
+ assert.equal(switchBack.snapshot_reused,true);
+ assert.equal(switchBack.geometry_reused,true);
+ assert.equal(switchBack.local_mesh_update.rebuilt_chunks,0);
+ const localAgain=await send({kind:'scene_view'});
+ assert.equal(localAgain.region_id,localRequest.region.id);
+ assert.deepEqual(localAgain.position,residentReturned.position);
+ assert.equal(localAgain.render_stats.model_tiles_baked,panoramaAgain.render_stats.model_tiles_baked);
+ assert.equal(modelReads,switchReads);
+ console.log('局部 → 全景 → 局部，复用 130 个背景图块，新增读取和网格重建均为 0。含桌面消息往返 '+Math.round(performance.now()-switchStart)+' ms');
+ const anchor=planner.read().objects.find(plan=>plan.name===anchorName);
+ const hold={started:Promise.withResolvers(),release:Promise.withResolvers()};
+ snapshotHold=hold;
+ try{
+  const capture=await send({kind:'capture_map',width:256,height:256,view:{x:0,z:0,scale:1,rotation:0},planning_revision:planner.read().revision});
+  assert.equal(capture.images.length,1);
+  await Promise.race([hold.started.promise,new Promise((_,reject)=>setTimeout(()=>reject(Error('Capture panel refresh did not start')),10000).unref())]);
+  planner.execute('save_plan',{plan_id:anchor.id,visible:false,preserve_selection:true});
+  const update=await send({kind:'planning_update'});
+  assert.equal(update.planning_updated,true);
+  assert.equal(await page.locator('[data-plan-id="'+anchor.id+'"] .eye').getAttribute('aria-label'),'显示规划');
+ }finally{hold.release.resolve();}
+ await send({kind:'scene_view'});
+ assert.equal(await page.locator('[data-plan-id="'+anchor.id+'"] .eye').getAttribute('aria-label'),'显示规划');
+ console.log('截图面板旧快照延迟返回时，单次规划提交通知正确隐藏。');
+ // Keep hardware discovery pending through startup and ordinary navigation.
+ const fallback=localAgain.render_stats.render_capacity;
+ assert.equal(fallback.hardware,null);
+ const actualRenderer=await page.locator('#view>canvas').first().evaluate(canvas=>{
+  const gl=canvas.getContext('webgl2'),debug=gl.getExtension('WEBGL_debug_renderer_info');
+  return debug?gl.getParameter(debug.UNMASKED_RENDERER_WEBGL):null;
+ });
+ assert.equal(probedRenderer??null,actualRenderer);
+ assert.equal(fallback.resident_tiles,192);
+ assert.ok(fallback.background_vertex_budget<fallback.max_vertices);
+ const larger=225;
+ residencyFixture={...scene,revision:scene.revision+'-capacity',bounds:[0,64,0,479,64,479],
+  occupied_chunks:Array.from({length:larger},(_,i)=>[2*(i%15),2*Math.floor(i/15),64,64]),helper_chunks:[]};
+ await send({kind:'world_scene',scene:residencyFixture});
+ const underFallback=await send({kind:'scene_view'});
+ assert.ok(underFallback.render_stats.model_tiles<=fallback.resident_tiles);
+ capacityProbe.resolve({system_total_mib:65536,system_available_mib:32768,dedicated_mib:12288,unified:false});
+ let expanded;
+ for(let deadline=Date.now()+30000;Date.now()<deadline;){
+  expanded=await send({kind:'scene_view'});
+  if(expanded.render_stats.model_tiles===larger&&!expanded.render_stats.loading)break;
+  await new Promise(resolve=>setTimeout(resolve,100));
+ }
+ const effective=expanded.render_stats.render_capacity;
+ assert.ok(effective.max_vertices>fallback.max_vertices&&effective.cpu_tiles>fallback.cpu_tiles);
+ assert.equal(effective.background_vertex_budget,effective.max_vertices);
+ assert.equal(expanded.render_stats.model_tiles,larger);
+ console.log('异步硬件探测 · 首屏沿用默认预算 · 全景驻留 '+underFallback.render_stats.model_tiles+' → '+larger+' 图块');
  assert.deepEqual(errors,[]);
- const report={passed:true,scope:'isolated browser with actual saved-world terrain and temporary planning metadata',deviceScaleFactor,startup_terrain:startupTerrain,selection_feedback_ms:instant.ms,rapid_selection_persisted:true,app_context_menu:true,text_copy_paste_menu:true,browser_context_menu_suppressed:true,world_map:true,full_models_and_textures:true,free_camera:true,movement_does_not_refetch_or_rebuild:true,local_background_turn_tiles:residentReturned.render_stats.model_tiles,apply_camera_after_editing:true,wheel_sensitivity:true,wheel_burst_limited:true,orbit_wheel_bounded:true,current_view_photo:true,capture_group_deletion:true,capture_input_frozen:true,local_capture_restores_document:true,blur_stops_camera_drag:true,cancel_preserves_plan:true,close_returns_to_map:true,resource_reuse:resourceSamples,panorama_views:3,panorama_surface_to_live_detail:true,large_area:true,polygon_route_marker:true,hide_delete_undo:true,rotation:37,resize_boundary:true,capture_restores_layout:true,scene_preview:true,barrier_icon:true,screenshots:out,errors};fs.writeFileSync(path.join(out,'workflow-report.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report,null,2));
+ const report={passed:true,scope:'isolated browser with actual saved-world terrain and temporary planning metadata',deviceScaleFactor,startup_terrain:startupTerrain,selection_feedback_ms:instant.ms,rapid_selection_persisted:true,app_context_menu:true,text_copy_paste_menu:true,browser_context_menu_suppressed:true,world_map:true,full_models_and_textures:true,free_camera:true,movement_does_not_refetch_or_rebuild:true,local_background_turn_tiles:residentReturned.render_stats.model_tiles,cross_view:{resident_tiles:panoramaAgain.render_stats.model_tiles,snapshot_reused:switchBack.snapshot_reused,local_chunks_rebuilt:switchBack.local_mesh_update.rebuilt_chunks,background_tiles_rebuilt:localAgain.render_stats.model_tiles_baked-residentReturned.render_stats.model_tiles_baked,background_tile_reads:localAgain.render_stats.model_tiles_read-residentReturned.render_stats.model_tiles_read},capture_visibility_refresh:true,capacity:{fallback:underFallback.render_stats.render_capacity,hardware:effective,tiles_before:underFallback.render_stats.model_tiles,tiles_after:expanded.render_stats.model_tiles},apply_camera_after_editing:true,wheel_sensitivity:true,wheel_burst_limited:true,orbit_wheel_bounded:true,current_view_photo:true,capture_group_deletion:true,capture_input_frozen:true,local_capture_restores_document:true,blur_stops_camera_drag:true,cancel_preserves_plan:true,close_returns_to_map:true,resource_reuse:resourceSamples,panorama_views:3,panorama_surface_to_live_detail:true,large_area:true,polygon_route_marker:true,hide_delete_undo:true,rotation:37,resize_boundary:true,capture_restores_layout:true,scene_preview:true,barrier_icon:true,screenshots:out,errors};fs.writeFileSync(path.join(out,'workflow-report.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report,null,2));
 }finally{await browser?.close();server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}

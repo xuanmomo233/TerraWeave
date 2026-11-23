@@ -6,6 +6,53 @@ import {test} from 'node:test';
 import {mapToScreen,screenToMap,validatePlan,planBounds} from './planning-core.mjs';
 import {planningService} from './planning-service.mjs';
 import {decodeSurfaceChunk,parseNbt} from './world-surface.mjs';
+import {MapViewport} from '../map-viewport.js';
+
+test('returning from 3D resumes missing surface tiles and reuses each unaffected bitmap',async()=>{
+ let release;
+ const gate=new Promise(resolve=>{release=resolve;}),reads=[],draws=[];
+ const viewport=new MapViewport({getContext:()=>({})},async(name,args)=>{
+  reads.push(args);await gate;return {revision:args.world_revision,projection:args.visibility_key};
+ },{},true);
+ viewport.image=data=>({...data});viewport.draw=()=>draws.push(true);viewport.resize=()=>false;
+ viewport.view={x:128,z:32,scale:.5,rotation:0};viewport.width=512;viewport.height=64;
+ const terrain={world_uuid:'map',revision:'save',bounds:[0,0,255,63],visibility_revision:'',visibility_map_tiles:{}};
+ viewport.setTerrain(terrain);
+ assert.equal(reads.length,2);
+ viewport.setActive(false);
+ const hiddenDraws=draws.length;
+ release();await new Promise(setImmediate);
+ assert.equal(reads.length,2);assert.equal(draws.length,hiddenDraws);
+ viewport.setActive(true);await viewport.settle();
+ assert.equal(reads.length,4);assert.ok(reads.every(t=>t.world_revision==='save'));
+ const original=new Map(viewport.tiles);
+ viewport.setActive(false);
+ viewport.setTerrain({...terrain,visibility_revision:'hidden',visibility_map_tiles:{'0:2,0':'hidden'}},false);
+ viewport.setActive(true);await viewport.settle();
+ assert.equal(reads.length,5);assert.equal(reads.at(-1).x,2);
+ for(const t of viewport.visibleKeys().filter(t=>t.x!==2))assert.equal(viewport.tiles.get(t.key),original.get(t.key));
+ viewport.setTerrain(terrain);await viewport.settle();assert.equal(reads.length,5);
+});
+
+test('capturing a visible map tile shares an in-flight read and its decoded image',async t=>{
+ let reads=0,decoded=0,release;
+ const gate=new Promise(resolve=>{release=resolve;});
+ const canvas=()=>({getContext:()=>new Proxy({},{get:()=>()=>{}}),toDataURL:()=>'data:image/png;base64,'});
+ const previous=globalThis.document;
+ globalThis.document={createElement:canvas};
+ t.after(()=>{if(previous===undefined)delete globalThis.document;else globalThis.document=previous;});
+ const viewport=new MapViewport(canvas(),async()=>{reads++;await gate;return {bounds:[0,0,64,64],revision:'tile'};},{},true);
+ viewport.draw=()=>{};viewport.image=()=>({decoded:++decoded});
+ viewport.width=viewport.height=64;viewport.view={x:32,z:32,scale:.5,rotation:0};
+ const info={revision:'save',bounds:[0,0,63,63],visibility_revision:'',visibility_map_tiles:{}};
+ viewport.setTerrain(info);
+ const capture=viewport.capture({view:viewport.view,width:64,height:64},info,{revision:1,layers:[],objects:[]});
+ assert.equal(reads,1);
+ release();
+ const result=await capture;
+ assert.equal(reads,1);assert.equal(decoded,1);
+ assert.deepEqual(result.tile_revisions,[{x:0,z:0,level:0,revision:'tile'}]);
+});
 
 test('map rotation and zoom preserve exact world positions in both directions',()=>{
  for(const rotation of [0,37,90,180,285])for(const scale of [.25,4,100]){const view={x:12000,z:-7000,scale,rotation},p=[12743.5,-9122.25],screen=mapToScreen(p,view,1300,760),actual=screenToMap(screen,view,1300,760);assert.ok(Math.abs(actual[0]-p[0])<1e-7);assert.ok(Math.abs(actual[1]-p[1])<1e-7);}

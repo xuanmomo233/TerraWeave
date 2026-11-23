@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod workbench;
 mod ui_worker;
+mod render_capacity;
 mod clipboard;
 #[cfg(windows)] mod windows_dependencies;
 #[cfg(windows)] mod iris_context;
@@ -86,8 +87,8 @@ fn open_local_directory(directory:&Path)->Result<(),String>{
   .map(|_|()).map_err(|e|format!("无法打开目录：{e}"))
 }
 #[tauri::command]
-async fn open_project_folder(id:String,kind:String)->Result<(),String>{
- let details=workbench::workbench_call("project_locations".into(),serde_json::json!({"id":id})).await?;
+async fn open_project_folder(id:String,kind:String,project_epoch:u64)->Result<(),String>{
+ let details=workbench::workbench_call("project_locations".into(),serde_json::json!({"id":id}),project_epoch).await?;
  let directory=match kind.as_str(){
   "project"=>details["project_directory"].as_str(),
   "save" if details["error"].is_null()=>details["directory"].as_str(),
@@ -106,6 +107,13 @@ fn center_view_cursor(window:tauri::Window,x:i32,y:i32)->Result<(),String>{
  Ok(())
 }
 #[tauri::command]
+async fn pick_design_export(window:tauri::Window)->Result<Option<String>,String>{
+ let dialog=window.dialog().file().set_title("选择建筑方案").add_filter("建筑方案", &["json"]).set_parent(&window);
+ let picked=tauri::async_runtime::spawn_blocking(move||dialog.blocking_pick_file()).await.map_err(|e|e.to_string())?;
+ picked.map(|entry|entry.into_path().map_err(|e|e.to_string()).and_then(|path|
+  path.into_os_string().into_string().map_err(|_|"该文件路径无法转换为文本".into()))).transpose()
+}
+#[tauri::command]
 async fn pick_world_directory(window: tauri::Window, initial_path: String, title: Option<String>) -> Result<Option<String>, String> {
  let title=title.unwrap_or_else(||"选择 Minecraft 世界存档目录".into());
  let dialog = window.dialog().file().set_title(title).set_parent(&window);
@@ -121,7 +129,7 @@ fn main(){
   println!("{}",workbench::project().display());
   return;
  }
- let _instance=match workbench::claim_instance(){Ok(file)=>file,Err(_)=>{workbench::show_existing();return;}};
+ if workbench::claim_instance().is_err(){workbench::show_existing();return;}
  #[cfg(windows)]
  if let Err(message)=windows_dependencies::ensure_webview(&workbench::project()){
   windows_dependencies::show_error(&message);
@@ -133,7 +141,7 @@ fn main(){
  tauri::Builder::default().plugin(tauri_plugin_dialog::init()).setup(|app|{
   if let Some(window)=app.get_webview_window("main"){workbench::monitor_window(window);}
   Ok(())
- }).invoke_handler(tauri::generate_handler![pick_world_directory,center_view_cursor,iris_native::iris_check_pack,iris_native::iris_prepare,iris_native::iris_draw,iris_native::iris_report,read_asset,open_pack_folder,open_project_folder,clipboard::workbench_clipboard,workbench::workbench_heartbeat,workbench::workbench_poll,workbench::workbench_complete,workbench::workbench_call,workbench::workbench_show,workbench::workbench_read_image,workbench::workbench_window_action]).run(context).expect("TerraWeave startup failed");
+ }).invoke_handler(tauri::generate_handler![render_capacity::render_capacity,pick_world_directory,pick_design_export,center_view_cursor,iris_native::iris_check_pack,iris_native::iris_prepare,iris_native::iris_draw,iris_native::iris_report,read_asset,open_pack_folder,open_project_folder,clipboard::workbench_clipboard,workbench::switch_project,workbench::workbench_heartbeat,workbench::workbench_poll,workbench::workbench_complete,workbench::workbench_call,workbench::workbench_show,workbench::workbench_read_image,workbench::workbench_window_action]).run(context).expect("TerraWeave startup failed");
 }
 #[cfg(test)]mod tests{
  use super::*;

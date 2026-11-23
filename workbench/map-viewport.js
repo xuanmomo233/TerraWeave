@@ -5,9 +5,10 @@ import {wheelSteps,wheelZoomFactor,readWheelSensitivity} from './viewport-wheel.
 import {PlanningSketch,planningModes,planningPoint,drawPlanningTarget,nearestHandle} from './planning-sketch.js';
 
 const clamp=(v,min,max)=>Math.max(min,Math.min(max,v));
+const tileVisibility=(info,key)=>info?.visibility_map_tiles?info.visibility_map_tiles[key]??'':info?.visibility_revision??'';
 export class MapViewport{
  constructor(canvas,call,events={},offscreen=false){
-  this.canvas=canvas;this.ctx=canvas.getContext('2d');this.call=call;this.events=events;this.view={x:0,z:0,scale:4,rotation:0};this.tiles=new Map();this.pending=new Set();this.queue=[];this.running=0;this.tool='select';this.sketch=new PlanningSketch();this.drag=null;this.width=1;this.height=1;this.active=true;
+  this.canvas=canvas;this.ctx=canvas.getContext('2d');this.call=call;this.events=events;this.view={x:0,z:0,scale:4,rotation:0};this.tiles=new Map();this.pending=new Set();this.fetching=new Map();this.queue=[];this.tool='select';this.sketch=new PlanningSketch();this.drag=null;this.width=1;this.height=1;this.active=true;
   if(offscreen)return;
   const readAppearance=()=>{
    const style=getComputedStyle(document.documentElement);
@@ -31,11 +32,33 @@ export class MapViewport{
   canvas.addEventListener('contextmenu',e=>e.preventDefault());canvas.addEventListener('pointerdown',e=>this.down(e));canvas.addEventListener('pointermove',e=>this.move(e));canvas.addEventListener('pointerup',e=>this.up(e));canvas.addEventListener('pointercancel',()=>this.cancelDrag());canvas.addEventListener('lostpointercapture',()=>this.cancelDrag());window.addEventListener('blur',()=>this.cancelDrag());canvas.addEventListener('dblclick',e=>this.double(e));canvas.addEventListener('wheel',e=>this.wheel(e),{passive:false});
   canvas.addEventListener('pointerleave',()=>{this.sketch.hover(null);this.drawSketch();});
  }
- resize(){const r=this.canvas.parentElement.getBoundingClientRect();if(!r.width||!r.height)return;this.width=Math.max(1,Math.floor(r.width));this.height=Math.max(1,Math.floor(r.height));const d=Math.min(devicePixelRatio,2);this.canvas.width=Math.floor(this.width*d);this.canvas.height=Math.floor(this.height*d);this.ctx.setTransform(d,0,0,d,0,0);this.request();this.draw();}
- async open(info,planning,view){this.cancelDrag();this.info=info;this.planning=planning;this.autoFocus=!view&&!info.view;this.userMoved=false;if(view)this.view={...view};else if(info.view)this.view={...info.view};else this.fit(info.bounds);this.resize();this.request();this.draw();}
+ resize(){
+  if(!this.active)return false;
+  const r=this.canvas.parentElement.getBoundingClientRect();
+  if(!r.width||!r.height)return false;
+  const width=Math.max(1,Math.floor(r.width)),height=Math.max(1,Math.floor(r.height)),d=Math.min(devicePixelRatio,2);
+  const pixelsX=Math.floor(width*d),pixelsY=Math.floor(height*d);
+  if(this.width===width&&this.height===height&&this.canvas.width===pixelsX&&this.canvas.height===pixelsY)return false;
+  this.width=width;this.height=height;this.canvas.width=pixelsX;this.canvas.height=pixelsY;
+  this.ctx.setTransform(d,0,0,d,0,0);this.request();this.draw();return true;
+ }
+ setActive(value){
+  if(this.active===value)return;
+  this.active=value;
+  if(value){if(!this.resize()){this.request();this.draw();}}
+  else{this.queue=[];this.events.progress?.(0);}
+ }
+ async open(info,planning,view){this.cancelDrag();this.setTerrain(info,false);this.planning=planning;this.autoFocus=!view&&!info.view;this.userMoved=false;if(view)this.view={...view};else if(info.view)this.view={...info.view};else this.fit(info.bounds);if(!this.resize()){this.request();this.draw();}}
  fit(bounds){if(!bounds)return;this.view={...this.view,x:(bounds[0]+bounds[2])/2,z:(bounds[1]+bounds[3])/2,scale:Math.max((bounds[2]-bounds[0])/Math.max(100,this.width*.78),(bounds[3]-bounds[1])/Math.max(100,this.height*.78),.05),rotation:this.view.rotation};this.request();this.draw();this.notify();}
  focus(plan){this.fit(planBounds(plan));this.view.scale=Math.max(this.view.scale,.15);this.request();this.draw();}
  setPlanning(state,redraw=true){if(this.drag&&this.planning?.revision!==state.revision)this.cancelDrag();this.planning=state;if(redraw)this.draw();}
+ setTerrain(info,redraw=true){
+  const prior=this.info;
+  this.info=info;
+  if(prior?.revision===info.revision&&prior?.visibility_revision===info.visibility_revision)return;
+  this.previousTerrain=prior?.revision===info.revision?prior:undefined;
+  if(redraw){this.request();this.draw();}
+ }
  setTool(tool){
   this.cancelDrag();
   this.tool=tool;
@@ -98,20 +121,70 @@ export class MapViewport{
   const cursor=this.sketch.cursor;
   if(cursor)drawPlanningTarget(ctx,project(cursor),cursor,w,h);
  }
- notify(){this.events.view?.({...this.view});clearTimeout(this.saveTimer);this.saveTimer=setTimeout(()=>this.events.saveView?.({...this.view}),450);}
+ notify(){this.events.view?.({...this.view});clearTimeout(this.saveTimer);this.saveTimer=setTimeout(()=>this.saveView()?.catch(error=>this.events.error?.(String(error))),450);}
+ saveView(){
+  if(!this.saveTimer)return;
+  clearTimeout(this.saveTimer);
+  this.saveTimer=undefined;
+  return this.events.saveView?.({...this.view});
+ }
  visibleKeys(){if(!this.info)return[];const corners=[[0,0],[this.width,0],[this.width,this.height],[0,this.height]].map(p=>screenToMap(p,this.view,this.width,this.height)),xs=corners.map(p=>p[0]),zs=corners.map(p=>p[1]),level=clamp(Math.floor(Math.log2(this.view.scale))+1,0,10),span=64*2**level,b=this.info.bounds;if(!b)return[];const list=[];
   const slice_y=this.view.slice_y??undefined;
-  for(let z=Math.floor(Math.max(Math.min(...zs),b[1])/span);z<=Math.floor(Math.min(Math.max(...zs),b[3])/span);z++)for(let x=Math.floor(Math.max(Math.min(...xs),b[0])/span);x<=Math.floor(Math.min(Math.max(...xs),b[2])/span);x++)list.push({x,z,level,slice_y,key:[this.info.revision,slice_y??'surface',level,x,z].join(':')});
+  for(let z=Math.floor(Math.max(Math.min(...zs),b[1])/span);z<=Math.floor(Math.min(Math.max(...zs),b[3])/span);z++)for(let x=Math.floor(Math.max(Math.min(...xs),b[0])/span);x<=Math.floor(Math.min(Math.max(...xs),b[2])/span);x++){
+   const base=[this.info.revision,slice_y??'surface',level,x,z].join(':');
+   const tile=level+':'+x+','+z,visible=tileVisibility(this.info,tile);
+   const projection=this.info.visibility_map_tiles?{visibility_key:visible}:{visibility_revision:visible};
+   list.push({x,z,level,slice_y,world_revision:this.info.revision,projection,key:base+':'+visible,previous:base+':'+tileVisibility(this.previousTerrain,tile)});
+  }
   return list.sort((a,b)=>Math.hypot((a.x+.5)*span-this.view.x,(a.z+.5)*span-this.view.z)-Math.hypot((b.x+.5)*span-this.view.x,(b.z+.5)*span-this.view.z)).slice(0,256);
  }
- request(){const wanted=this.visibleKeys();this.wanted=new Set(wanted.map(t=>t.key));for(const t of wanted)if(!this.tiles.has(t.key)&&!this.pending.has(t.key)){this.pending.add(t.key);this.queue.push(t);}this.events.progress?.(this.pending.size);this.pump();}
- pump(){while(this.running<2&&this.queue.length){const t=this.queue.shift();if(!this.wanted?.has(t.key)){this.pending.delete(t.key);continue;}this.running++;this.call('world_map_tile',{x:t.x,z:t.z,level:t.level,slice_y:t.slice_y}).then(data=>{this.tiles.set(t.key,{data,image:this.image(data)});while(this.tiles.size>256)this.tiles.delete(this.tiles.keys().next().value);}).catch(e=>this.events.error?.(String(e))).finally(()=>{this.running--;this.pending.delete(t.key);if(!this.pending.size&&this.autoFocus&&!this.userMoved&&!this.capturing){this.autoFocus=false;this.fitContent();}this.draw();this.events.progress?.(this.pending.size);this.pump();});}}
- fitContent(){const b=[Infinity,Infinity,-Infinity,-Infinity];let count=0;for(const tile of this.tiles.values())for(let i=0;i<tile.data.heights.length;i++)if(tile.data.heights[i]!==null){const x=tile.data.bounds[0]+i%64*tile.data.step,z=tile.data.bounds[1]+Math.floor(i/64)*tile.data.step;b[0]=Math.min(b[0],x);b[1]=Math.min(b[1],z);b[2]=Math.max(b[2],x+tile.data.step);b[3]=Math.max(b[3],z+tile.data.step);count++;}if(count){const padding=Math.max(80,(b[2]-b[0])*.12,(b[3]-b[1])*.12);this.fit([b[0]-padding,b[1]-padding,b[2]+padding,b[3]+padding]);}}
+ request(){
+  if(!this.active)return;
+  const wanted=this.visibleKeys();
+  this.wanted=new Set(wanted.map(t=>t.key));
+  this.queue=wanted.filter(t=>!this.tiles.has(t.key)&&!this.pending.has(t.key));
+  this.pump();
+ }
+ rememberTile(key,tile){
+  this.tiles.delete(key);this.tiles.set(key,tile);
+  if(this.tiles.size>256)for(const candidate of this.tiles.keys()){
+   if(!this.wanted?.has(candidate)){this.tiles.delete(candidate);break;}
+  }
+ }
+ loadTile(t){
+  if(this.tiles.has(t.key))return Promise.resolve(this.tiles.get(t.key));
+  if(!this.fetching.has(t.key)){
+   const request=this.call('world_map_tile',{x:t.x,z:t.z,level:t.level,slice_y:t.slice_y,world_revision:t.world_revision,...t.projection})
+    .then(data=>({data,image:this.image(data)})).finally(()=>this.fetching.delete(t.key));
+   this.fetching.set(t.key,request);
+  }
+  return this.fetching.get(t.key);
+ }
+ pump(){
+  if(!this.active)return;
+  while(this.pending.size<2&&this.queue.length){
+   const t=this.queue.shift();
+   if(this.tiles.has(t.key))continue;
+   this.pending.add(t.key);
+   this.loadTile(t).then(tile=>{
+    this.rememberTile(t.key,tile);
+    if(this.active&&!this.capturing&&this.wanted.has(t.key))this.draw();
+   }).catch(e=>{if(this.active&&this.wanted.has(t.key))this.events.error?.(String(e));}).finally(()=>{
+    this.pending.delete(t.key);this.pump();
+   });
+  }
+  const remaining=this.queue.length+[...this.pending].filter(key=>this.wanted.has(key)).length;
+  this.events.progress?.(remaining);
+  if(!remaining&&this.wanted.size&&this.autoFocus&&!this.userMoved&&!this.capturing){
+   this.autoFocus=false;this.fitContent();
+  }
+ }
+ fitContent(){const b=[Infinity,Infinity,-Infinity,-Infinity];let count=0;for(const tile of [...this.wanted].map(key=>this.tiles.get(key)).filter(Boolean))for(let i=0;i<tile.data.heights.length;i++)if(tile.data.heights[i]!==null){const x=tile.data.bounds[0]+i%64*tile.data.step,z=tile.data.bounds[1]+Math.floor(i/64)*tile.data.step;b[0]=Math.min(b[0],x);b[1]=Math.min(b[1],z);b[2]=Math.max(b[2],x+tile.data.step);b[3]=Math.max(b[3],z+tile.data.step);count++;}if(count){const padding=Math.max(80,(b[2]-b[0])*.12,(b[3]-b[1])*.12);this.fit([b[0]-padding,b[1]-padding,b[2]+padding,b[3]+padding]);}}
  image(tile){const canvas=document.createElement('canvas');canvas.width=canvas.height=tile.size;const data=new Uint8ClampedArray(tile.size*tile.size*4);for(let i=0;i<tile.colors.length;i++){const color=tile.colors[i],known=tile.availability?.[i]??(tile.heights[i]===null?0:2);if(!known)continue;const y=tile.heights[i],left=tile.heights[i%tile.size?i-1:i],up=tile.heights[i>=tile.size?i-tile.size:i],shade=y===null?1:clamp(1+(y-(left??y))*.018+(y-(up??y))*.018,.55,1.3);data[i*4]=known===1?24:Math.min(255,(color>>16&255)*shade);data[i*4+1]=known===1?32:Math.min(255,(color>>8&255)*shade);data[i*4+2]=known===1?42:Math.min(255,(color&255)*shade);data[i*4+3]=255;}canvas.getContext('2d').putImageData(new ImageData(data,tile.size,tile.size),0,0);return canvas;}
- draw(capture=false){const c=this.ctx,w=this.width,h=this.height;if(!w||!h)return;c.save();c.setTransform(this.canvas.width/w,0,0,this.canvas.height/h,0,0);c.clearRect(0,0,w,h);const theme=capture?null:this.appearance;c.fillStyle=theme?.background??'#1a2532';c.fillRect(0,0,w,h);
+ draw(capture=false){const c=this.ctx,w=this.width,h=this.height;if(!this.active||!w||!h)return;c.save();c.setTransform(this.canvas.width/w,0,0,this.canvas.height/h,0,0);c.clearRect(0,0,w,h);const theme=capture?null:this.appearance;c.fillStyle=theme?.background??'#1a2532';c.fillRect(0,0,w,h);
   c.strokeStyle='#263342';c.lineWidth=1;for(let x=-h;x<w+h;x+=22){c.beginPath();c.moveTo(x,0);c.lineTo(x+h,h);c.stroke();}
   c.save();c.translate(w/2,h/2);c.rotate(this.view.rotation*Math.PI/180);c.scale(1/this.view.scale,1/this.view.scale);c.translate(-this.view.x,-this.view.z);c.imageSmoothingEnabled=false;
-  for(const t of this.visibleKeys()){const tile=this.tiles.get(t.key);if(tile){const b=tile.data.bounds;c.drawImage(tile.image,b[0],b[1],b[2]-b[0],b[3]-b[1]);}}
+  for(const t of this.visibleKeys()){const tile=this.tiles.get(t.key)??(!capture?this.tiles.get(t.previous):null);if(tile){const b=tile.data.bounds;c.drawImage(tile.image,b[0],b[1],b[2]-b[0],b[3]-b[1]);}}
   c.restore();
   for(const p of this.planning?.objects??[]){const layer=this.planning.layers.find(l=>l.id===p.layer_id);if(p.visible===false||layer?.visible===false)continue;const points=p.points.map(point=>mapToScreen(point,this.view,w,h)),selected=p.id===this.planning.selected_id;
    c.beginPath();points.forEach((point,i)=>i?c.lineTo(...point):c.moveTo(...point));if(p.type==='area')c.closePath();c.strokeStyle=selected?'#e6f2ff':p.color;c.lineWidth=p.type==='route'?Math.max(2,p.width/this.view.scale):selected?2.5:1.5;if(p.type==='area'){c.fillStyle=p.color+'30';c.fill();}if(p.type==='marker'){c.fillStyle=p.color;c.arc(points[0][0],points[0][1],6,0,Math.PI*2);c.fill();}c.stroke();
@@ -177,7 +250,14 @@ export class MapViewport{
   target.info=info;target.planning=planning;target.view={...request.view};
   target.width=target.canvas.width=request.width;
   target.height=target.canvas.height=request.height;
-  if(info.revision===this.info?.revision)target.tiles=new Map(this.tiles);
+  if(info.revision===this.info?.revision){
+   target.tiles=new Map(this.tiles);
+   target.loadTile=async t=>{
+    const tile=await this.loadTile(t);
+    this.rememberTile(t.key,tile);
+    return tile;
+   };
+  }
   await target.settle();
   target.draw(true);
   const {width,height,view}=target,corners=[[0,0],[width,0],[width,height],[0,height]].map(p=>screenToMap(p,view,width,height));

@@ -9,7 +9,7 @@ export const PLANNING_TOOLS=[
  {name:'create_layer',description:'Create a map planning layer. It is independent of Minecraft chunk size.',inputSchema:schema({name:id,color:id},['name'])},
  {name:'update_layer',description:'Rename or show/hide a planning layer.',inputSchema:schema({layer_id:id,name:id,visible:{type:'boolean'},color:id},['layer_id'])},
  {name:'delete_layer',description:'Delete a planning layer and its objects. Optional forget_history permanently removes its undo references; world blocks are unchanged.',inputSchema:schema({layer_id:id,forget_history:{type:'boolean'}},['layer_id'])},
- {name:'save_plan',description:'Create/update a world-scale area polygon, road polyline or point marker. No block-volume or chunk-size restriction.',inputSchema:schema({plan_id:id,layer_id:id,type:{type:'string',enum:['area','route','marker']},name:id,notes:id,points:{type:'array',items:point},color:id,width:{type:'number'},visible:{type:'boolean'},min_y:{type:['integer','null']},max_y:{type:['integer','null']}},[])},
+ {name:'save_plan',description:'Create/update a world-scale area polygon, road polyline or point marker. No block-volume or chunk-size restriction.',inputSchema:schema({plan_id:id,layer_id:id,type:{type:'string',enum:['area','route','marker']},name:id,notes:id,points:{type:'array',items:point},color:id,width:{type:'number'},visible:{type:'boolean'},preserve_selection:{type:'boolean'},min_y:{type:['integer','null']},max_y:{type:['integer','null']}},[])},
  {name:'delete_plan',description:'Delete a planning object with undo; world blocks are unchanged.',inputSchema:schema({plan_id:id},['plan_id'])},
  {name:'select_plan',description:'Select a planning object for the user/Codex discussion context.',inputSchema:schema({plan_id:id})},
  {name:'inspect_plan',description:'Read exact planning geometry, bounds, purpose, layer and associated local designs.',inputSchema:schema({plan_id:id}),annotations:{readOnlyHint:true}},
@@ -59,7 +59,7 @@ export function planningService(root,listRegions,worldIdentity){
    }
    if(!s.layers.some(l=>l.id===plan.layer_id))throw Error('Choose a planning layer');
    s.objects=old?s.objects.map(p=>p.id===old.id?plan:p):[...s.objects,plan];
-   s.selected_id=plan.id;
+   if(!args.preserve_selection)s.selected_id=plan.id;
    return s;
   });
   if(name==='delete_plan')return mutate(s=>{s.objects=s.objects.filter(p=>p.id!==args.plan_id);if(s.selected_id===args.plan_id)s.selected_id=null;return s;});

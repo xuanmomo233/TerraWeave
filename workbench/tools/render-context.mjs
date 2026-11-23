@@ -86,6 +86,37 @@ export function savedDetailSnapshot(bounds,index){
   block_entity_count:block_entity_positions.length,block_entity_positions,block_entities,unknown_chunks
  };
 }
+export function projectConstructionSnapshot(snapshot,view){
+ if(!view)return snapshot;
+ const {bounds}=snapshot;
+ let {blocks,context_blocks,block_entities,block_entity_positions}=snapshot;
+ const changedEntities=new Set();
+ for(let cz=Math.floor((bounds[2]-1)/16);cz<=Math.floor((bounds[5]+1)/16);cz++)
+ for(let cx=Math.floor((bounds[0]-1)/16);cx<=Math.floor((bounds[3]+1)/16);cx++){
+  for(const [x,y,z,resolve] of view.chunk(cx,cz)){
+   const key=x+','+y+','+z,inside=Object.hasOwn(blocks,key);
+   const current=inside?blocks[key]:context_blocks?.[key];
+   if(current===undefined)continue;
+   const state=resolve(current);
+   if(state===current)continue;
+   if(inside){
+    if(blocks===snapshot.blocks)blocks={...blocks};
+    blocks[key]=state;
+    if(block_entities?.[key])changedEntities.add(key);
+   }else{
+    if(context_blocks===snapshot.context_blocks)context_blocks={...context_blocks};
+    context_blocks[key]=state;
+   }
+  }
+ }
+ if(blocks===snapshot.blocks&&context_blocks===snapshot.context_blocks)return snapshot;
+ if(changedEntities.size){
+  block_entities=Object.fromEntries(Object.entries(block_entities).filter(([key])=>!changedEntities.has(key)));
+  block_entity_positions=block_entity_positions?.filter(position=>!changedEntities.has(position.join(',')));
+ }
+ return {...snapshot,blocks,context_blocks,block_entities,block_entity_positions,
+  block_entity_count:block_entity_positions?.length??snapshot.block_entity_count};
+}
 export function savedBlocks(keys,index){
  const {block}=savedChunkReader(index.directory,index.void_world),result={};
  for(const key of keys){

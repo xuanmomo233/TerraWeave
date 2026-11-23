@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import {spawn} from 'node:child_process';
+import {execFile,spawn} from 'node:child_process';
+import {promisify} from 'node:util';
 import {randomUUID} from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -7,6 +8,9 @@ import {setTimeout as wait} from 'node:timers/promises';
 import {SERVER,serverRequest,serverStatus} from './test-server.mjs';
 import {bridgeTransport,worldWriter} from './world-writer.mjs';
 import {javaReleases} from '../minecraft-version.js';
+import {identifyWorld} from './world-source.mjs';
+import {worldIndex} from './world-surface.mjs';
+import {savedBlocks} from './render-context.mjs';
 
 const [directory,plugin,java21,java25,...requested]=process.argv.slice(2);
 if(!directory||!plugin||!java21||!java25)
@@ -34,6 +38,28 @@ async function bounded(check,child,description,timeout=45_000){
   await wait(250);
  }
  throw Error('Timed out waiting for '+description);
+}
+
+async function exportPaperDraft(server,worldDirectory,position){
+ const project=path.join(server,'workbench-'+randomUUID());
+ fs.mkdirSync(project);
+ // Older builds already saved local IDs for worlds opened without uid.dat.
+ const localId='local-'+'a'.repeat(32);
+ fs.writeFileSync(path.join(project,'world-source.json'),JSON.stringify({directory:worldDirectory,world_uuid:localId}));
+ const code=`
+  import assert from 'node:assert/strict';
+  import {callTool} from './tools/creative-workbench.mjs';
+  const point=JSON.parse(process.argv[1]);
+  const workbench=(name,args)=>callTool(name,args,{origin:'desktop'});
+  const plans=await workbench('save_plan',{type:'marker',name:'Paper 26.3 导出验收',layer_id:'markers',points:[[point[0],point[2]]]});
+  const draft=await workbench('create_draft',{plan_id:plans.selected_id,focus:point});
+  assert.equal(draft.world_uuid,process.argv[2]);
+  await workbench('edit_draft',{draft_id:draft.id,blocks:[{x:point[0],y:point[1],z:point[2],state:'minecraft:poplar_log[axis=z]'}]});
+  console.log(JSON.stringify(await workbench('export_draft',{draft_id:draft.id})));
+ `;
+ const {stdout}=await promisify(execFile)(process.execPath,['--input-type=module','-e',code,JSON.stringify(position),localId],
+  {cwd:new URL('..',import.meta.url),env:{...process.env,TERRAWEAVE_STATE:project},windowsHide:true,timeout:120_000});
+ return JSON.parse(fs.readFileSync(JSON.parse(stdout).path,'utf8'));
 }
 
 async function run(record){
@@ -73,6 +99,7 @@ async function run(record){
   send('forceload add 0 0');
   await bounded(async()=>Object.keys((await call('read_blocks',{positions})).blocks).length===3,child,phase);
   phase='seed exact block entity data';
+  for(const p of positions)send(`setblock ${key(p).replaceAll(',',' ')} minecraft:air`);
   for(const [x,y,z] of positions)send(`setblock ${x} ${y-1} ${z} minecraft:stone`);
   const count=dataVersion>=3837?'count':'Count';
   const amount=n=>n+(count==='Count'?'b':'');
@@ -96,10 +123,12 @@ async function run(record){
   assert.match(baseline[key(positions[2])].payload.snbt,/Patterns|patterns/);
   for(const entry of Object.values(baseline))assert.match(entry.payload.snbt,/terraweave:matrix_proof/);
 
-  const writer=worldWriter({directory:path.join(server,'ledger'),send:bridgeTransport(bridge,{timeout:30_000})});
+  const transport=bridgeTransport(bridge,{timeout:30_000});
+  const writer=worldWriter({directory:path.join(server,'ledger'),send:transport});
+  const targetBlock=version==='26.3'?'minecraft:poplar_log[axis=x]':'minecraft:stone';
   const design={schema:1,world_uuid:identity.world_uuid,draft_id:randomUUID(),draft_revision:1,minecraft:version,
    label:'TerraWeave Paper version matrix',base:Object.fromEntries(positions.map(p=>[key(p),baseline[key(p)].state])),
-   changes:Object.fromEntries(positions.map(p=>[key(p),'minecraft:stone'])),previously_applied:{}};
+   changes:Object.fromEntries(positions.map(p=>[key(p),targetBlock])),previously_applied:{}};
   const verify=(result,changed,conflicts=0)=>{
    assert.equal(result.complete,true,result.error);
    assert.equal(result.changed,changed,JSON.stringify(result.conflicts));
@@ -107,15 +136,29 @@ async function run(record){
    assert.equal(result.undoable,true);
    return result;
   };
+  if(version==='26.3'){
+   phase='reject a mismatched version';
+   const [x,y,z]=positions[0],block={x,y,z,before:baseline[key(positions[0])].state,state:targetBlock};
+   await assert.rejects(transport(randomUUID(),{action:'apply_blocks',world_uuid:identity.world_uuid,minecraft:'26.2',blocks:[block]}),/版本.*不一致/);
+   await assert.rejects(call('apply_blocks',{minecraft:'26.2',blocks:[block]}),/version differs/);
+   assert.deepEqual(await entities(),baseline);
+  }
   phase='apply';
   const applied=verify(await writer.apply(design),3);
-  assert.ok(Object.values(await entities()).every(e=>e.state==='minecraft:stone'&&e.payload===null));
+  assert.ok(Object.values(await entities()).every(e=>e.state===targetBlock&&e.payload===null));
+  if(version==='26.3'){
+   phase='read the 26.3 save after durable apply';
+   const index=worldIndex(identifyWorld(path.join(server,identity.world)));
+   assert.equal(index.data_version,dataVersion);
+   assert.equal(index.world_uuid,identity.world_uuid);
+   assert.deepEqual(savedBlocks(positions.map(key),index),design.changes);
+  }
   phase='undo';
   verify(await writer.reverse(applied.operation_id,'undo'),3);
   assert.deepEqual(await entities(),baseline);
   phase='redo and undo again';
   verify(await writer.reverse(applied.operation_id,'redo'),3);
-  assert.ok(Object.values(await entities()).every(e=>e.state==='minecraft:stone'&&e.payload===null));
+  assert.ok(Object.values(await entities()).every(e=>e.state===targetBlock&&e.payload===null));
   verify(await writer.reverse(applied.operation_id,'undo'),3);
   assert.deepEqual(await entities(),baseline);
   phase='NBT conflict';
@@ -130,7 +173,21 @@ async function run(record){
   send('execute if entity @e[type=minecraft:item,x=4,y=70,z=2,distance=..12] run say TERRAWAVE_UNEXPECTED_ITEM_DROP');
   await call('status');
   assert.doesNotMatch(fs.readFileSync(log,'utf8'),/\[Server\] TERRAWAVE_UNEXPECTED_ITEM_DROP/);
-  return {version,build:record.build,channel:record.channel,status:'pass',nbt:['chest','barrel','banner'],conflictProtection:true,log};
+  if(version==='26.3'){
+   phase='apply an exported workbench draft';
+   const position=[10,72,10],coordinate=key(position),worldDirectory=path.join(server,identity.world);
+   const readSaved=()=>savedBlocks([coordinate],worldIndex(identifyWorld(worldDirectory)))[coordinate];
+   const before=readSaved(),exported=await exportPaperDraft(server,worldDirectory,position);
+   assert.equal(exported.world_uuid,identity.world_uuid);
+   assert.equal(exported.minecraft,version);
+   assert.equal(readSaved(),before);
+   const committed=verify(await writer.apply(exported),1);
+   assert.equal(readSaved(),'minecraft:poplar_log[axis=z]');
+   verify(await writer.reverse(committed.operation_id,'undo'),1);
+   assert.equal(readSaved(),before);
+  }
+  return {version,build:record.build,channel:record.channel,status:'pass',nbt:['chest','barrel','banner'],conflictProtection:true,
+   ...(version==='26.3'?{diskDataVersion:dataVersion,writtenBlock:targetBlock,versionMismatchRejected:true,workbenchExportAppliedAndUndone:true}:{}),log};
  }catch(error){
   return {version,build:record.build,channel:record.channel,status:'fail',phase,error:error.message,log};
  }finally{

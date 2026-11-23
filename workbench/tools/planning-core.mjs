@@ -1,5 +1,16 @@
 export function pointInPolygon(point,points){let inside=false;for(let i=0,j=points.length-1;i<points.length;j=i++){const a=points[i],b=points[j];if((a[1]>point[1])!==(b[1]>point[1])&&point[0]<(b[0]-a[0])*(point[1]-a[1])/(b[1]-a[1])+a[0])inside=!inside;}return inside;}
 export function planBounds(plan){const xs=plan.points.map(p=>p[0]),zs=plan.points.map(p=>p[1]);return [Math.min(...xs),Math.min(...zs),Math.max(...xs),Math.max(...zs)];}
+export function constructionWindowKey(bounds,tiles){
+ if(!tiles||!bounds)return '';
+ const keys=[];
+ for(let z=Math.floor(bounds[2]/32);z<=Math.floor(bounds[5]/32);z++){
+  for(let x=Math.floor(bounds[0]/32);x<=Math.floor(bounds[3]/32);x++){
+   const key=x+','+z;
+   if(tiles[key])keys.push(key+'='+tiles[key]);
+  }
+ }
+ return keys.join('|');
+}
 export function planningHeight(min,max){
  if(min==null&&max==null)return {min_y:null,max_y:null};
  const min_y=min??max,max_y=max??min;

@@ -3,6 +3,7 @@ import path from 'node:path';
 import readline from 'node:readline';
 import {pathToFileURL} from 'node:url';
 import {bridgeTransport,worldWriter} from './world-writer.mjs';
+import {registerConstructionSource} from './construction-view.mjs';
 
 const id={type:'string'};
 const tool=(name,description,properties,required)=>({name,description,inputSchema:{type:'object',properties,required,additionalProperties:false}});
@@ -13,11 +14,11 @@ const tools=[
  tool('undo_world_write','Reverse committed cells using current before-state checks.',{operation_id:id},['operation_id']),
  tool('redo_world_write','Reapply cells that were successfully undone.',{operation_id:id},['operation_id'])
 ];
-let service;
+let service,directory;
 function configured(){
  const bridge=process.env.TERRAWEAVE_WRITE_BRIDGE;
  if(!bridge)throw Error('请为写入 MCP 设置 TERRAWEAVE_WRITE_BRIDGE，指向已配置的配套插件数据目录');
- const directory=process.env.TERRAWEAVE_WRITER_STATE??path.join(bridge,'writer-state');
+ directory=process.env.TERRAWEAVE_WRITER_STATE??path.join(bridge,'writer-state');
  return service??=worldWriter({directory,send:bridgeTransport(bridge)});
 }
 export function callWriter(name,args={}){
@@ -29,7 +30,9 @@ export function callWriter(name,args={}){
  if(name==='apply_exported_design'){
   const file=path.resolve(args.export_path),stat=fs.statSync(file);
   if(!stat.isFile()||stat.size>64*1024*1024)throw Error('方案文件超出写入上限');
-  return writer.apply(JSON.parse(fs.readFileSync(file,'utf8')),args.operation_id);
+  const design=JSON.parse(fs.readFileSync(file,'utf8'));
+  registerConstructionSource(file,design,directory);
+  return writer.apply(design,args.operation_id);
  }
  if(name==='world_write_status')return writer.status(args.operation_id);
  if(name==='list_world_writes')return writer.history();

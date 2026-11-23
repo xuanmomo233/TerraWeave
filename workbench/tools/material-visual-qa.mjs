@@ -129,7 +129,12 @@ async function exercise({THREE,buildState,awaitTextures,chooseVariantGroups,Chun
    {state:'minecraft:stone',positions:Array.from({length:1023},(_,i)=>64*1024+i)},
    {state:'minecraft:red_wool',positions:[64*1024+1023]},
   ]};
-  const world=new TexturedWorld(scene,async()=>tile,async state=>[{geometry,material:materials[state.endsWith('stone')?0:1]}]);
+  const extraStates=['minecraft:blue_wool','minecraft:yellow_wool'];
+  const neighbor={...tile,x:1,bounds:[32,-64,0,64,320,32],groups:tile.groups.map((group,i)=>({...group,state:extraStates[i]}))};
+  const world=new TexturedWorld(scene,async(name,{x})=>x===0?tile:neighbor,async state=>{
+   const index=extraStates.indexOf(state);
+   return [{geometry,material:materials[index>=0?index+2:state.endsWith('stone')?0:1]}];
+  });
   await world.initialize({revision:'mip-fixture',bounds:[0,0,0,31,0,31],occupied_chunks:[[0,0]]});
   world.enabled=true;
   await world.update(16,16,1,[0,0,0],null);
@@ -143,6 +148,17 @@ async function exercise({THREE,buildState,awaitTextures,chooseVariantGroups,Chun
   const rgba=output.getContext('2d').getImageData(20,20,3,3).data;
   for(let i=0;i<rgba.length;i+=4)sampledColors.push(Array.from(rgba.slice(i,i+3)));
   require(sampledColors.every(([r,g,b])=>r<8&&g>100&&g<230&&b<8),'Distant tiles must average within their own texture '+JSON.stringify(sampledColors));
+  const retained=world.meshes.get('0,0'),previousAtlas=world.atlas;
+  for(const color of ['#0000ff','#ffff00'])materials.push(new THREE.MeshLambertMaterial({map:texture(ctx=>{ctx.fillStyle=color;ctx.fillRect(0,0,16,16);})}));
+  await world.initialize({...world.info,occupied_chunks:[[0,0],[2,0]]});
+  await world.update(16,16,1,[0,0,0],null);
+  require(world.meshes.get('0,0')===retained&&world.lastUpdate.rebuilt===1,'Atlas growth rebuilt the resident model tile');
+  require(world.atlas.dimension>previousAtlas.dimension&&world.atlas.rects.get(checker).slot===firstRect.slot,'Atlas growth changed a retained material slot');
+  const retainedPixels=renderCapture(renderer,scene,probe,64,64).getContext('2d').getImageData(20,20,3,3).data;
+  require(rgba.every((value,i)=>value===retainedPixels[i]),'Atlas growth changed pixels on unchanged geometry');
+  probe.position.x+=32;probe.lookAt(48,0,16);probe.updateMatrixWorld();
+  const [r,g,b]=renderCapture(renderer,scene,probe,64,64).getContext('2d').getImageData(20,20,1,1).data;
+  require(r<8&&g<8&&b>100,'Newly exposed geometry sampled the wrong texture');
   world.clear();world.markerMaterial.dispose();geometry.dispose();extra.dispose();
   for(const material of materials){material.map.dispose();material.dispose();}
  }

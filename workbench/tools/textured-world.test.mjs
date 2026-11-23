@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import {test} from 'node:test';
 import * as THREE from 'three';
 import {TexturedWorld} from '../textured-world.js';
+import {OfflineIrisView} from '../offline-iris-view.js';
+import {chooseRenderCapacity,DEFAULT_RENDER_CAPACITY} from '../render-capacity.js';
 import {buildState,materialSettings,modelFaceTint} from '../model-terrain.js';
 import {textureAnimation,textureFrame} from '../texture-animation.js';
 import {blockEntityAppearance} from './block-entity-appearance.mjs';
@@ -56,6 +58,29 @@ test('placed pot sherds and moving-piston state survive Anvil appearance decodin
 const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});return {promise,resolve,reject};};
 const info=revision=>({revision,occupied_chunks:[[0,0,0,15]],helper_chunks:[]});
 const tile={x:0,z:0,groups:[{state:'minecraft:stone',mask:0,fluid_mask:0,positions:[0]}]};
+test('render capacity uses independent CPU and GPU limits and a conservative fallback',()=>{
+ const profile=(ram,free,vram,unified=false)=>chooseRenderCapacity({system_total_mib:ram,system_available_mib:free,dedicated_mib:vram,unified});
+ assert.equal(chooseRenderCapacity(),DEFAULT_RENDER_CAPACITY);
+ assert.deepEqual(profile(8192,4096,null),DEFAULT_RENDER_CAPACITY);
+ const tightGpu=profile(64*1024,28*1024,1024),tightRam=profile(8192,3072,24*1024);
+ assert.ok(tightGpu.cpuTiles>tightRam.cpuTiles);
+ assert.ok(tightGpu.maxVertices<tightRam.maxVertices);
+ const powerful=profile(32*1024,16*1024,8192),shared=profile(32*1024,16*1024,8192,true);
+ for(const key of Object.keys(DEFAULT_RENDER_CAPACITY))assert.ok(powerful[key]>DEFAULT_RENDER_CAPACITY[key],key);
+ assert.ok(shared.maxVertices<powerful.maxVertices);
+ for(const reserved of [256,8192]){
+  const unknown=profile(32*1024,16*1024,reserved,null);
+  assert.equal(unknown.cpuTiles,powerful.cpuTiles);
+  assert.equal(unknown.maxVertices,DEFAULT_RENDER_CAPACITY.maxVertices);
+ }
+ assert.deepEqual(profile(512*1024,256*1024,96*1024),powerful);
+ const scarce=profile(32*1024,1024,24*1024);
+ assert.ok(scarce.cpuTiles<powerful.cpuTiles&&scarce.maxVertices<tightRam.maxVertices);
+ const recovering={system_total_mib:32*1024,system_available_mib:1600,dedicated_mib:24*1024,unified:false};
+ assert.deepEqual(chooseRenderCapacity(recovering,scarce),scarce);
+ assert.deepEqual(chooseRenderCapacity({...recovering,system_available_mib:2048},scarce),DEFAULT_RENDER_CAPACITY);
+ assert.equal(chooseRenderCapacity({},powerful),powerful);
+});
 class Harness extends TexturedWorld{
  constructor(call,material=new THREE.MeshBasicMaterial()){super(new THREE.Scene(),call,async()=>[{geometry:new THREE.BoxGeometry(),material}]);this.createdAtlases=[];this.createdGroups=[];}
  createAtlas(materials){const texture=new THREE.Texture(),rects=new Map(materials.filter(m=>m.map).map(m=>[m.map,{}])),atlas={texture,rects};this.createdAtlases.push(atlas);return atlas;}
@@ -79,6 +104,68 @@ test('concurrent scene initialization shares one read and tile cache stays bound
 test('late initial metadata cannot replace a newer explicitly supplied world revision',async()=>{
  const gate=deferred(),world=new Harness(async()=>gate.promise),initial=world.initialize();await world.initialize(info('newer'));gate.resolve(info('older'));await initial;assert.equal(world.info.revision,'newer');
 });
+
+test('switches share compatible in-flight tile reads and a failed read can be retried',async()=>{
+ const gate=deferred(),reads=[];
+ const world=new Harness(async(name,args)=>{
+  reads.push(args.visibility_key);
+  return reads.length===1?gate.promise:{...tile,revision:args.visibility_key};
+ });
+ const t={key:'0,0',x:0,z:0},base={...info('a'),visibility_revision:'',visibility_tiles:{}};
+ await world.initialize(base);
+ const before=world.tile(t),otherView=world.tile(t);
+ assert.deepEqual(reads,['']);
+ await world.initialize({...base,visibility_revision:'hidden',visibility_tiles:{'0,0':'hidden'}});
+ assert.equal((await world.tile(t)).revision,'hidden');
+ gate.reject(Error('superseded read'));
+ await Promise.all([assert.rejects(before,/superseded/),assert.rejects(otherView,/superseded/)]);
+ await world.initialize(base);
+ assert.equal((await world.tile(t)).revision,'');
+ assert.deepEqual(reads,['','hidden','']);
+});
+
+test('restoring the visible scene during a pending hide releases progress immediately',async()=>{
+ const gate=deferred(),started=deferred(),progress=[];
+ const world=new Harness(async(name,args)=>{
+  if(args.visibility_key){started.resolve();return gate.promise;}
+  return tile;
+ });
+ const base={...info('palace'),visibility_revision:'',visibility_tiles:{}};
+ const update=()=>world.update(0,0,1,[0,0,0],null);
+ await world.initialize(base);world.enabled=true;await update();
+ const original=world.meshes.get('0,0');
+ world.progress=(done,total)=>progress.push([done,total]);
+ await world.initialize({...base,visibility_revision:'hidden',visibility_tiles:{'0,0':'hidden'}});
+ const pending=update();await started.promise;
+ await world.initialize(base);
+ assert.deepEqual(progress.at(-1),[0,0]);
+ assert.equal(world.loading,null);
+ assert.equal(world.allTilesResident,true);
+ await update();
+ gate.resolve({...tile,revision:'hidden'});await pending;
+ assert.equal(world.meshes.get('0,0'),original);
+ assert.deepEqual(progress.at(-1),[0,0]);
+ assert.equal(world.bakedTiles,1);world.clear();
+});
+
+test('model preparation and revisiting vertex-budget candidates reuse cached work',async()=>{
+ const gate=deferred(),started=deferred();
+ let variants=0,parts=0;
+ const world=new Harness(async(name,{x,z})=>({...tile,x,z}));
+ world.chooseVariants=async(state,items)=>{variants++;return [{items}];};
+ world.parts=async()=>{
+  parts++;started.resolve();await gate.promise;
+  return [{geometry:new THREE.BoxGeometry(),material:new THREE.MeshBasicMaterial()}];
+ };
+ const left={intersectsBox:box=>box.min.x===0},right={intersectsBox:box=>box.min.x===32};
+ const update=frustum=>world.update(0,0,1,[0,0,0],null,[0,0,0],undefined,frustum,36);
+ await world.initialize({revision:'same',occupied_chunks:[[0,0],[2,0]]});world.enabled=true;
+ const first=update(left);await started.promise;gate.resolve();await first;
+ await update(right);await update(left);
+ assert.deepEqual([...world.meshes.keys()],['0,0']);
+ assert.equal(variants,2);assert.equal(parts,1);assert.equal(world.bakedTiles,3);
+ world.clear();
+});
 test('a large world keeps the camera neighborhood and caps resident tile count',async()=>{
  const world=new Harness(async()=>tile);
  await world.initialize({revision:'large',bounds:[0,-64,0,23999,319,16],
@@ -97,6 +184,24 @@ test('initial preview only reads the nearest requested tiles even when the targe
  await world.update(4000,16,4000,[0,0,0],null,[4,80,16],undefined,null,10000,2);
  assert.deepEqual(calls,[[0,0],[1,0]]);
  assert.equal(world.meshes.size,2);
+});
+test('live capacity changes trim CPU data and reselect meshes under both vertex and tile budgets',async()=>{
+ const world=new Harness(async(name,{x,z})=>({...tile,x,z}));
+ await world.initialize({revision:'capacity',occupied_chunks:Array.from({length:12},(_,x)=>[2*x,0])});
+ const update=()=>world.update(0,0,0,[0,0,0],null,[0,0,0],undefined,null,1e8,10000);
+ world.enabled=true;await update();
+ const first=world.meshes.get('0,0');assert.equal(world.allTilesResident,true);
+ const smaller={cpuTiles:6,residentTiles:4,streamTiles:3,initialTiles:2,maxVertices:108};
+ assert.equal(world.setCapacity(smaller),true);assert.equal(world.setCapacity({...smaller}),false);
+ assert.equal(world.cache.size,6);assert.equal(world.allTilesResident,false);
+ await update();
+ assert.equal(world.meshes.size,3);assert.equal(world.loadedVertices,108);
+ assert.equal(world.meshes.get('0,0'),first);
+ assert.equal(world.setCapacity(DEFAULT_RENDER_CAPACITY),true);
+ await update();assert.equal(world.allTilesResident,true);
+ world.enabled=false;world.setCapacity(smaller);
+ assert.equal(world.meshes.size,0);assert.equal(world.loadedVertices,0);assert.ok(world.cache.size<=6);
+ world.clear();
 });
 test('a palace-sized background stays resident in a local editing window when the camera moves and turns',async()=>{
  let reads=0;
@@ -172,9 +277,91 @@ test('a vertex-limited scene can swap the visible tile without a change in candi
  const origin=[0,0,0],left={intersectsBox:box=>box.min.x<32},right={intersectsBox:box=>box.min.x>=32};
  await world.update(0,0,0,origin,null,[0,80,0],undefined,left,36);
  assert.deepEqual([...world.meshes.keys()],['0,0']);
+ const candidateKey=world.signature;
+ assert.equal(world.coverageKey,'0,0');
  await world.update(0,0,0,origin,null,[0,80,0],undefined,right,36);
  assert.deepEqual([...world.meshes.keys()],['1,0']);
+ assert.equal(world.signature,candidateKey);
+ assert.equal(world.coverageKey,'1,0');
  assert.equal(world.loadedVertices,36);
  assert.equal(world.omittedTiles,1);
+ world.clear();
+});
+
+test('Iris ignores a parked background and cannot present a late frame after switching documents',async t=>{
+ const started=deferred(),finish=deferred(),requests=[],failed=[];
+ const inputs={pack:{shadow_distance:8,sun_path_rotation:0},world:{world_uuid:'new',environment_revision:'day',day_time:0,chunks:[]}};
+ const previous=globalThis.window;
+ globalThis.window={__TAURI_INTERNALS__:{invoke:async(command,args)=>{
+  if(command==='workbench_call'){requests.push(args);return inputs;}
+  assert.equal(command,'iris_draw');assert.equal(args.frame.eye_in_water,0);
+  started.resolve();return finish.promise;
+ }}};
+ t.after(()=>{if(previous===undefined)delete globalThis.window;else globalThis.window=previous;});
+ const iris=Object.assign(Object.create(OfflineIrisView.prototype),{shader:'sky.zip',canvas:{hidden:true},error:{},key:'local::day',
+  say:error=>failed.push(error),atlas:{texture:{version:0},animate(){}},atlasVersion:0,start:0});
+ const data={key:'local',region:{world_uuid:'new',environment_revision:'day'},camera:new THREE.PerspectiveCamera(),
+  width:4,height:4,snapshot:{bounds:[0,0,0,15,15,15],blocks:{}},chunks:{meshes:()=>[{}]},
+  lod:{enabled:false,coverageKey:'9,9',info:{revision:'old-world',environment_revision:'old-night'},stateAt:()=>assert.fail('Parked block lookup')}};
+ iris.show(data);await started.promise;
+ assert.equal(requests[0].args.environment_revision,'day');
+ assert.equal(requests[0].args.revision,undefined);
+ iris.setView(null);finish.resolve(new Uint8Array(64));await iris.pending;
+ assert.equal(iris.canvas.hidden,true);assert.equal(iris.presented,null);assert.deepEqual(failed,[]);
+});
+
+test('a superseded shader failure cannot suppress a queued new view',async()=>{
+ const gate=deferred(),shown=[],errors=[];
+ const iris=Object.assign(Object.create(OfflineIrisView.prototype),{shader:'sky.zip',canvas:{hidden:false},error:{},say:text=>errors.push(text),
+  draw:async(data,{current})=>{shown.push(data.key);if(data.key==='first')await gate.promise;assert.ok(current());}});
+ const data={lod:{enabled:true,meshes:new Map([['0,0',{}]])},region:{panorama:true}};
+ iris.show({...data,key:'first'});const first=iris.pending;
+ iris.show({...data,key:'second'});gate.reject(Error('Old request'));await first;await iris.pending;
+ assert.deepEqual(shown,['first','second']);assert.deepEqual(errors,[]);
+});
+test('changing construction visibility only replaces affected model tiles',async()=>{
+ const reads=[];
+ const world=new Harness(async(name,{x,z,visibility_key})=>{reads.push([x,visibility_key]);return {...tile,x,z};});
+ const metadata={revision:'construction',occupied_chunks:[[0,0],[2,0]],visibility_revision:'',visibility_tiles:{}};
+ await world.initialize(metadata);
+ world.enabled=true;
+ await world.update(0,0,0,[0,0,0],null);
+ const unaffected=world.meshes.get('1,0'),old=world.meshes.get('0,0');
+ await world.initialize({...metadata,visibility_revision:'hidden',visibility_tiles:{'0,0':'changed'}});
+ assert.equal(world.allTilesResident,false);
+ await world.update(0,0,0,[0,0,0],null);
+ assert.equal(world.meshes.get('1,0'),unaffected);
+ assert.notEqual(world.meshes.get('0,0'),old);
+ assert.deepEqual(reads,[[0,''],[1,''],[0,'changed']]);
+ await world.initialize(metadata);
+ await world.update(0,0,0,[0,0,0],null);
+ assert.equal(world.meshes.get('1,0'),unaffected);
+ assert.equal(reads.length,3);
+ world.clear();
+});
+
+test('unchanged exposed faces retain their mesh, lookup and updated capture metadata',async()=>{
+ const progress=[],reads=[];
+ const world=new Harness(async(name,{x,z,visibility_key})=>{
+  reads.push(x);
+  return {...tile,x,z,revision:visibility_key||'base',render_hash:x===0?'roof-'+visibility_key:'unchanged'};
+ });
+ const base={revision:'palace',occupied_chunks:[[0,0],[2,0],[4,0]],visibility_revision:'',visibility_tiles:{}};
+ const update=()=>world.update(0,0,1,[0,0,0],null);
+ await world.initialize(base);world.enabled=true;await update();
+ const shared=world.meshes.get('1,0'),lookup=world.lookups.get('1,0'),distant=world.meshes.get('2,0');
+ world.progress=(done,total)=>progress.push([done,total]);
+ await world.initialize({...base,visibility_revision:'hidden',visibility_tiles:{'0,0':'hidden','1,0':'border'}});
+ await update();
+ assert.equal(world.meshes.get('1,0'),shared);
+ assert.equal(world.lookups.get('1,0'),lookup);
+ assert.equal(shared.children[0].userData.tile.revision,'border');
+ assert.equal(world.meshes.get('2,0'),distant);
+ assert.deepEqual(reads,[0,1,2,0,1]);
+ assert.deepEqual(world.lastUpdate,{candidates:2,reads:2,rebuilt:1,retained:2,atlas_replaced:false});
+ assert.deepEqual(progress[0],[0,4]);
+ await world.initialize(base);await update();
+ assert.equal(world.lastUpdate.reads,0);
+ assert.equal(world.lastUpdate.rebuilt,1);
  world.clear();
 });

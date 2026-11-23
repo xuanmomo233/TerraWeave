@@ -5,8 +5,9 @@ import {createHash,randomUUID} from 'node:crypto';
 import {spawn} from 'node:child_process';
 import {AsyncLocalStorage} from 'node:async_hooks';
 import {PROJECT,ROOT} from './workspace-paths.mjs';
-import {worldSource,saveWorldSource,relocateWorldSource,worldLinkForBackup} from './world-source.mjs';
+import {identifyWorld,worldSource,saveWorldSource,relocateWorldSource,worldLinkForBackup} from './world-source.mjs';
 import {backupProject,restoreProjectBackup} from './project-backup.mjs';
+import {DESIGN_CONVERSION_TOOLS,designConversion} from './design-conversion.mjs';
 import {createProject,currentProject,listProjects,primaryRoot,primaryWorld,projectFor,projectLocations,renameProject} from './project-catalog.mjs';
 import {writeVoidWorld} from './void-world.mjs';
 import {planBounds,planningFocusY} from './planning-core.mjs';
@@ -26,7 +27,7 @@ export {PROJECT,ROOT};
 const store=projectStore(ROOT);
 const planning=planningService(ROOT,()=>store.listRegions(),()=>worldSource()?.world_uuid);
 const invocation=new AsyncLocalStorage();
-const metadataWrites=new Set([...PLANNING_TOOLS.filter(t=>!t.annotations?.readOnlyHint).map(t=>t.name),'save_map_view','save_workspace','update_draft','backup_project','relocate_world_source']);
+const metadataWrites=new Set([...PLANNING_TOOLS.filter(t=>!t.annotations?.readOnlyHint).map(t=>t.name),'save_map_view','save_workspace','update_draft','backup_project','relocate_world_source','convert_design_export']);
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
 const valid=id=>typeof id==='string'&&/^[a-zA-Z0-9-]{1,99}$/.test(id);
@@ -96,8 +97,18 @@ export async function desktopRequest(request,{start=true,timeout=120000,root=ROO
  atomic(queued,{...request,id,expires_at_ms:deadline});
  if(request.kind==='show')fs.writeFileSync(path.join(root,'wake-window'),'');
  const response=path.join(root,'responses',id+'.json');
+ let checkOwner=Date.now()+250;
  while(Date.now()<deadline){
   if(fs.existsSync(response)){const r=read(response);fs.unlinkSync(response);if(!r.ok)throw Error(r.error??'Desktop operation failed');return {...r.result,desktop_acknowledged:true,request_id:id};}
+  if(Date.now()>=checkOwner){
+   checkOwner=Date.now()+1000;
+   if(!fs.existsSync(path.join(root,'heartbeat.json'))&&fs.existsSync(queued)){
+    let withdrawn=true;
+    try{fs.unlinkSync(queued);}
+    catch(error){if(error.code!=='ENOENT')throw error;withdrawn=false;}
+    if(withdrawn)throw Error('该工程窗口已关闭或切换，桌面请求未执行');
+   }
+  }
   await sleep(25);
  }
  try{fs.unlinkSync(queued);}catch(error){if(error.code!=='ENOENT')throw error;}
@@ -172,7 +183,7 @@ export const TOOLS=[
  {name:'list_captures',description:'List saved preview captures, region identities and view metadata.',inputSchema:schema({}),annotations:{readOnlyHint:true}},
  {name:'delete_captures',description:'Delete specific saved preview groups and collect snapshots with no remaining references.',inputSchema:schema({capture_ids:{type:'array',items:{type:'string'},minItems:1}},['capture_ids']),annotations:{destructiveHint:true}},
  {name:'read_capture',description:'Return the actual PNG image content for a saved capture, checking the original image hashes.',inputSchema:schema({capture_id:{type:'string'}},['capture_id']),annotations:{readOnlyHint:true}},
- ...DESIGN_TOOLS,
+ ...DESIGN_TOOLS,...DESIGN_CONVERSION_TOOLS,
  ...PLANNING_TOOLS,...MAP_TOOLS,
 ];
 TOOLS.find(t=>t.name==='capture_views').inputSchema.properties.show_grid={type:'boolean'};
@@ -193,8 +204,13 @@ function readSavedPositions(uuid,keys){
  if(world.world_uuid!==uuid)throw Error('草稿属于另一个存档');
  return savedBlocks(keys,world);
 }
-const designs=designService({folder,atomic,read,readRegion:loadRegionData,readRegionMetadata:region,currentRegion:()=>{try{return region();}catch{return null;}},saveSnapshot,savePreview:store.savePreview,displayRegion,readSavedPositions,normalizeState:normalizeBlockState,prepareBlockAssets:ensureVanillaAssets,validateBounds,validateEdits,planning,captureDetail:args=>maps.browse(args)});
+const designs=designService({folder,atomic,read,readRegion:loadRegionData,readRegionMetadata:region,currentRegion:()=>{try{return region();}catch{return null;}},
+ currentWorldRevision:uuid=>{const world=worldIndex();return world.world_uuid===uuid?world.revision:undefined;},
+ currentConstruction:uuid=>{const world=worldIndex();return world.world_uuid===uuid?maps.construction(world):null;},
+ exportWorldUuid:uuid=>{const source=worldSource();return source?.world_uuid===uuid?source.paper_world_uuid??uuid:uuid;},
+ saveSnapshot,savePreview:store.savePreview,displayRegion,readSavedPositions,normalizeState:normalizeBlockState,prepareBlockAssets:ensureVanillaAssets,validateBounds,validateEdits,planning,captureDetail:args=>maps.browse(args)});
 const maps=mapService({root:ROOT,planning,desktopRequest,saveSnapshot,savePreview:store.savePreview,displayRegion});
+const convertDesign=designConversion({folder,atomic});
 TOOLS.push({name:'world_source',description:'Read the configured local Anvil save.',inputSchema:schema({}),annotations:{readOnlyHint:true}});
 TOOLS.push(
  {name:'read_editor_state',description:'Read the workspace session and pending form edits.',inputSchema:schema({}),annotations:{readOnlyHint:true}},
@@ -265,6 +281,7 @@ async function execute(name,args){
   ensurePackAnimationMetadata(path.join(PROJECT,'assets'));
  }
  if(name==='world_source')return worldSource();
+ if(DESIGN_CONVERSION_TOOLS.some(tool=>tool.name===name))return convertDesign(name,args);
  if(name==='restore_project_backup')return restoreProjectBackup(args.directory);
  if(name==='backup_project'){
   let identity;
@@ -275,12 +292,14 @@ async function execute(name,args){
   return backupProject(currentProject(),args.directory,worldLinkForBackup(identity));
  }
  if(name==='relocate_world_source'){
+  worldIndex(identifyWorld(args.directory));
   const worlds=await projectWorlds();
   if(worlds.size>1)throw Error('工程内有多个存档身份，请先拆分工程数据');
   const [identity]=worlds;
   return relocateWorldSource(args.directory,identity,args.confirm_legacy);
  }
  if(name==='save_world_source'){
+  worldIndex(identifyWorld(args.directory));
   const worlds=await projectWorlds();
   if(worlds.size>1)throw Error('工程内有多个存档身份，请先拆分工程数据');
   return saveWorldSource(args.directory,[...worlds][0]);
@@ -300,7 +319,17 @@ async function execute(name,args){
   let minecraft;
   try{minecraft=worldIndex().minecraft;}catch{}
   const assets=path.join(PROJECT,'assets');
-  if(name==='save_render_settings')return saveRenderSettings(assets,args,minecraft);
+  if(name==='save_render_settings'){
+   const file=path.join(assets,'render-settings.json'),before=fs.existsSync(file)?fs.readFileSync(file,'utf8'):null;
+   const result=saveRenderSettings(assets,args,minecraft);
+   if(before===fs.readFileSync(file,'utf8'))return result;
+   const roots=new Set([ROOT,...listProjects(desktopStatus).filter(p=>p.running).map(p=>p.project_directory)]);
+   if(invocation.getStore()?.origin==='desktop')roots.delete(ROOT);
+   const replies=await Promise.allSettled([...roots].map(root=>desktopRequest({kind:'render_settings_changed'},{root,start:false,timeout:15000})));
+   const failures=replies.filter(r=>r.status==='rejected');
+   if(failures.length)result.desktop_sync_error=failures.map(r=>r.reason.message).join(' · ');
+   return result;
+  }
   ensurePackAnimationMetadata(assets);
   return readRenderSettings(assets,minecraft);
  }
@@ -398,7 +427,7 @@ async function invokeTool(name,args={}){
  const tool=TOOLS.find(t=>t.name===name);if(!tool)throw Error('Unknown workbench tool');
  if(!args||typeof args!=='object'||Array.isArray(args)||Object.keys(args).some(k=>!(k in tool.inputSchema.properties)))throw Error('Invalid tool arguments');
  for(const key of tool.inputSchema.required)if(!(key in args))throw Error('Missing '+key);
- for(const key of ['archived','include_archived','visible','refresh','keep_camera','allow_saved','forget_history','remove_backups','remove_legacy_imports','purge_archived','remove_old_captures','show_grid','show_plans','show_invisible','show_selection','reset'])if(args[key]!==undefined&&typeof args[key]!=='boolean')throw Error(key+' must be a boolean');
+ for(const key of ['archived','include_archived','visible','preserve_selection','refresh','keep_camera','allow_saved','forget_history','remove_backups','remove_legacy_imports','purge_archived','remove_old_captures','show_grid','show_plans','show_invisible','show_selection','reset'])if(args[key]!==undefined&&typeof args[key]!=='boolean')throw Error(key+' must be a boolean');
  if(args.navigation_id!==undefined&&!valid(args.navigation_id))throw Error('Invalid navigation ID');
  if(args.physics!==undefined&&typeof args.physics!=='boolean')throw Error('Physics must be true or false');
  if(name==='load_region'){validateBounds(args.bounds);if(args.bounds.some((v,i)=>i<3&&args.bounds[i+3]-v>=128))throw Error('Preview spans at most 128 blocks along each axis');}
@@ -411,7 +440,7 @@ async function invokeTool(name,args={}){
 }
 async function handle(q){
  if(q.id===undefined)return null;const ok=result=>({jsonrpc:'2.0',id:q.id,result});
- if(q.method==='initialize')return ok({protocolVersion:'2025-06-18',capabilities:{tools:{}},serverInfo:{name:'TerraWeave',version:'0.7.6'},instructions:'TerraWeave offline map planning and saved-world preview. Use export_draft to hand off an immutable revision to the separate world writer MCP. open_world_scene renders complete block models and textures with a free camera; do not replace visible scenery with colored voxels. get_scene_view reads the actual user camera. capture_world_scene defaults to that observed view and freezes block states, model geometry and texture atlas; explicit angles/custom cameras remain available. inspect_captured_scene verifies its exact source. show_invisible reveals barrier glyphs without changing world blocks. planning_state and inspect_plan provide selected map geometry and notes; save_plan supports areas/routes/markers independent of chunk size. Hide/show is separate from deletion. capture_map freezes map planning geometry. browse_world/open_plan_detail enter a saved-world detail view; create_draft with plan_id supports sparse world-scale designs. capture_views supports precise cameras and cutaways. Distinguish saved-world renders, live blocks, planning and drafts; workbench lighting/animation differs from Minecraft-client screenshots. Repeated navigation reuses bounded caches.'});
+ if(q.method==='initialize')return ok({protocolVersion:'2025-06-18',capabilities:{tools:{}},serverInfo:{name:'TerraWeave',version:'0.7.7'},instructions:'TerraWeave offline map planning and saved-world preview. For AI construction, assign every authored area to a planning object before drafting. Use planning_state and inspect_plan to reuse a suitable plan, or save_plan to create one. Pass its plan_id to create_draft and use the same plan for refinements of the same area. Use separate plans for independently hideable parts. After applying, check the committed write receipt and that hiding and showing the plan updates its built blocks, then restore the prior visibility. Use export_draft to hand off an immutable revision to the separate world writer MCP. open_world_scene renders complete block models and textures with a free camera; do not replace visible scenery with colored voxels. get_scene_view reads the actual user camera. capture_world_scene defaults to that observed view and freezes block states, model geometry and texture atlas; explicit angles/custom cameras remain available. inspect_captured_scene verifies its exact source. show_invisible reveals barrier glyphs without changing world blocks. planning_state and inspect_plan provide selected map geometry and notes; save_plan supports areas/routes/markers independent of chunk size. Hide/show is separate from deletion. capture_map freezes map planning geometry. browse_world/open_plan_detail enter a saved-world detail view; create_draft with plan_id supports sparse world-scale designs. capture_views supports precise cameras and cutaways. Distinguish saved-world renders, live blocks, planning and drafts; workbench lighting/animation differs from Minecraft-client screenshots. Repeated navigation reuses bounded caches.'});
  if(q.method==='ping')return ok({});if(q.method==='tools/list')return ok({tools:TOOLS});
  if(q.method==='tools/call')try{
   const r=await callTool(q.params.name,q.params.arguments??{}),content=[{type:'text',text:JSON.stringify(r)}];

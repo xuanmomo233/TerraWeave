@@ -26,9 +26,10 @@ function coordinate(key){
 const stateOk=s=>typeof s==='string'&&/^minecraft:[a-z0-9_]+(?:\[[a-z0-9_=-]+(?:,[a-z0-9_=-]+)*\])?$/.test(s)&&s.length<=512;
 const signState=s=>typeof s==='string'&&/^minecraft:[a-z0-9_]+_sign(?:\[|$)/.test(s);
 const exactEntityState=s=>typeof s==='string'&&/^minecraft:(?:chest|trapped_chest|barrel|(?:[a-z_]+_)?shulker_box|[a-z_]+_banner)(?:\[|$)/.test(s);
-function packet(value){
+export function validateDesignPacket(value,{allowLocalWorld=false}={}){
  const plain=x=>!!x&&typeof x==='object'&&!Array.isArray(x);
- if(!plain(value)||value.schema!==1||!validId(value.world_uuid)||!validId(value.draft_id)||
+ const validWorld=validId(value?.world_uuid)||allowLocalWorld&&/^local-[a-f0-9]{32}$/.test(value?.world_uuid??'');
+ if(!plain(value)||value.schema!==1||!validWorld||!validId(value.draft_id)||
   !Number.isSafeInteger(value.draft_revision)||value.draft_revision<1||
   !plain(value.base)||!plain(value.changes)||!plain(value.previously_applied))throw Error('无效的织境工坊方案文件');
  if(value.minecraft!==undefined&&!supportedMinecraft(value.minecraft))throw Error('不支持的方案游戏版本');
@@ -152,7 +153,7 @@ export function worldWriter({directory,send}){
  return {
   apply(value,operationId){
    return serialized(()=>locked(async()=>{
-    const design=packet(value),digest=sha(JSON.stringify(design)),id=operationId??idFor(digest);
+    const design=validateDesignPacket(value),digest=sha(JSON.stringify(design)),id=operationId??idFor(digest);
     const existing=load(id);
     if(existing){
      if(existing.digest!==digest)throw Error('该操作标识已经绑定另一份方案');
@@ -172,7 +173,7 @@ export function worldWriter({directory,send}){
      return {x,y,z,before,state};
     });
     const record={id,digest,order:operations.length,kind:'apply',world_uuid:design.world_uuid,draft_id:design.draft_id,
-     draft_revision:design.draft_revision,minecraft:design.minecraft,label:design.label,edits,batch_ends:batchEnds(edits),batches:[],complete:false};
+     draft_revision:design.draft_revision,plan_id:design.plan_id,minecraft:design.minecraft,label:design.label,edits,batch_ends:batchEnds(edits),batches:[],complete:false};
     durable(file(id),record);
     return resume(record);
    }));
@@ -205,7 +206,7 @@ export function worldWriter({directory,send}){
      ...(Object.hasOwn(c,'after_entity')?{before_entity:c.after_entity,after_entity:c.before_entity}:
       Object.hasOwn(c,'after_sign')?{before_sign:c.after_sign,after_sign:c.before_sign}:{})}));
     const record={id:next,parent:id,order:operations.length,kind:direction,world_uuid:original.world_uuid,
-     draft_id:original.draft_id,draft_revision:original.draft_revision,minecraft:source.minecraft??source.batches.find(b=>b.minecraft)?.minecraft,label:original.label,edits,batch_ends:batchEnds(edits),batches:[],complete:false};
+     draft_id:original.draft_id,draft_revision:original.draft_revision,plan_id:original.plan_id,minecraft:source.minecraft??source.batches.find(b=>b.minecraft)?.minecraft,label:original.label,edits,batch_ends:batchEnds(edits),batches:[],complete:false};
     durable(file(next),record);
     return resume(record);
    }));

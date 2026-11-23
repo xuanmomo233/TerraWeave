@@ -279,6 +279,32 @@
   </div>
  </form>
 </dialog>
+<dialog id="design-conversion-dialog" aria-labelledby="design-conversion-title">
+ <form id="design-conversion-form">
+  <h2 id="design-conversion-title">转换建筑方案</h2>
+  <p class="hint">使用当前工程关联的 Paper 存档作为目标，沿用原方案的坐标。</p>
+  <div class="folder-field">
+   <label for="design-conversion-path">原方案 JSON</label>
+   <div class="folder-picker"><input id="design-conversion-path" type="text" required autofocus>
+    <button id="design-conversion-browse" type="button">浏览…</button></div>
+  </div>
+  <p id="design-conversion-status" role="status"></p>
+  <ul id="design-conversion-issues" class="design-conversion-issues" hidden></ul>
+  <div class="design-conversion-pages" id="design-conversion-pages" hidden>
+   <button id="design-conversion-prev" type="button">上一页</button>
+   <button id="design-conversion-next" type="button">下一页</button>
+  </div>
+  <label id="design-conversion-result" hidden>转换后的方案
+   <input id="design-conversion-output" type="text" readonly>
+  </label>
+  <p id="design-conversion-error" role="alert"></p>
+  <div class="dialog-actions">
+   <button id="design-conversion-close" type="button">关闭</button>
+   <button id="design-conversion-check" type="submit">检查方案</button>
+   <button id="design-conversion-save" class="accent" type="button" disabled>生成方案</button>
+  </div>
+ </form>
+</dialog>
 <dialog id="appearance-dialog" aria-labelledby="appearance-title">
  <h2 id="appearance-title">外观与主题</h2>
  <h3>主题预设</h3><div id="appearance-presets" aria-label="主题预设"></div>

@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {createHash,randomUUID} from 'node:crypto';
 import {inflateRawSync} from 'node:zlib';
+import {isDeepStrictEqual} from 'node:util';
 import {checkIrisSupport,nativeIrisSources} from './iris-runtime.mjs';
 
 export const animationMetadata=/^assets\/minecraft\/textures\/[a-z0-9_/-]+\.png\.mcmeta$/;
@@ -113,8 +114,9 @@ export function saveRenderSettings(assets,args,minecraft){
   }
   return id;
  });
- const config={pack_order:order,roots,shader:args.shader};
- const out=path.join(assets,'render-settings.json'),pending=out+'.pending-'+randomUUID();
+ const out=path.join(assets,'render-settings.json'),previous=read(out,null);
+ if(previous?.shader===args.shader&&isDeepStrictEqual(previous.pack_order,order)&&isDeepStrictEqual(previous.roots,roots))return catalog;
+ const config={pack_order:order,roots,shader:args.shader},pending=out+'.pending-'+randomUUID();
  fs.writeFileSync(pending,JSON.stringify(config),{flag:'wx'});
  fs.renameSync(pending,out);
  return readRenderSettings(assets,minecraft);

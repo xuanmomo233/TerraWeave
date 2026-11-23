@@ -18,13 +18,15 @@
 
 1. 停止目标 Paper 服务端，移出先前安装的桥接插件 JAR，再将 `TerraWeave.jar` 放入 `plugins`。下表通过验收的 Paper 版本共用这个文件。[下载 TerraWeave.jar 1.2.0](https://github.com/xuanmomo233/TerraWeave/releases/download/plugin-v1.2.0/TerraWeave.jar)
 2. 启动目标服。确认服务端日志显示 `Persistent map workbench ready`，且 `plugins/TerraWeave/heartbeat.json` 持续更新。插件绑定服务端启动时的第一个已加载世界，心跳文件中的 `world`、`world_uuid` 和 `minecraft` 可用于核对目标。
-3. 用织境工坊打开同一世界的存档或其副本。副本保留 Paper 的 `uid.dat`。导出方案的世界 UUID 和游戏版本须与目标服匹配，目标坐标须位于已生成的区块内。只带 `local-` 标识的工程可用于离线规划。要写入 Paper，请从目标世界的存档建立工程后导出方案。
+3. 用织境工坊打开目标服的存档或其副本。副本应保留世界身份文件。新版 Paper 的主世界身份在 `dimensions/minecraft/overworld/data/paper/metadata.dat`，旧版使用 `uid.dat`。已有工程曾按 `local-` 标识记录规划时，工坊会从该工程关联的存档读取 Paper UUID，导出时填入方案。导出方案的世界 UUID 和游戏版本须与目标服匹配，目标坐标须位于已生成的区块内。
+
+工作台制作和导出草稿只写入工程目录里的方案文件。提交后由目标 Paper 服务端按其当前 Minecraft 版本写方块和保存区块。Minecraft 或 Paper 升级存档时，由游戏服务端负责迁移。
 
 新版在 `plugins/TerraWeave` 下建立独立的写入记录。已有的 `world_writer` 配置需把 `TERRAWEAVE_WRITE_BRIDGE` 和显式设置的 `TERRAWEAVE_WRITER_STATE` 改为下文的新路径，再在新聊天中确认 MCP 已加载。先前的操作记录可留存备查，新版从新目录读取回执。
 
 ### Paper 版本兼容
 
-TerraWeave 插件 **1.2.0** 使用同一份 JAR 在 Paper 1.20.1 至 26.2 范围内逐版验收。下表列出实际测试的官方构建及上游渠道。1.20.x 至 1.21.11 使用 Java 21，26.1.1 至 26.2 使用 Java 25。[Paper 下载服务](https://docs.papermc.io/misc/downloads-service/) · [Paper Java 要求](https://docs.papermc.io/paper/getting-started/)
+TerraWeave 插件 **1.2.0** 使用同一份 JAR 在 Paper 1.20.1 至 26.3 范围内逐版验收。下表列出实际测试的官方构建及上游渠道。1.20.x 至 1.21.11 使用 Java 21，26.1.1 至 26.3 使用 Java 25。[Paper 下载服务](https://docs.papermc.io/misc/downloads-service/) · [Paper Java 要求](https://docs.papermc.io/paper/getting-started/)
 
 每个通过的构建均在实际 Paper 进程中写入箱子、木桶和旗帜，再执行撤销、重做和二次撤销。测试比较两次恢复得到的完整 SNBT，覆盖物品槽位及数量、物品自定义数据、容器名称、旗帜图案和插件持久数据。另验证重做会保留后来改过内容的箱子。
 
@@ -52,8 +54,19 @@ TerraWeave 插件 **1.2.0** 使用同一份 JAR 在 Paper 1.20.1 至 26.2 范围
 | 26.1.1 | 29 | ALPHA | 通过 |
 | 26.1.2 | 74 | STABLE | 通过 |
 | 26.2 | 135 | STABLE | 通过 |
+| 26.3 | 259 | STABLE | 通过 |
 
 NBT 回执绑定其生成时的 Minecraft 版本。执行恢复时使用与回执一致的版本。服务端心跳的 `block_entity_payload=1` 表示原版容器与旗帜的 NBT 适配器已启用。
+
+### 跨版本转换建筑方案
+
+1. 在工坊打开目标 Paper 世界的存档，选择「文件 → 转换建筑方案」，打开原工程导出的 JSON。
+2. 查看目标版本、方块兼容结果和原坐标上将被替换的已有方块。对待处理的方块输入目标方块状态，然后点「检查方案」重新核对。
+3. 点「生成方案」。新 JSON 保存在目标工程的 `exports` 下，包含目标存档的 UUID、版本和方块基线。用写入 MCP 提交新方案时，目标服会再次校验。
+
+支持 1.20.1 到 26.3 的 23 个 Java 正式版。版本表由对应 Mojang 正式服务端的方块报告生成，记录所有方块 ID、合法属性取值和默认状态。已确认的跨版本改名包括 1.20.3 的短草与 1.21.9 的铁链。可保留的属性会一并转换。目标版本新增的属性使用官方默认值。旧版缺少的方块、无法表示的含水或乐器状态，以及苍白之心等无法直接对应的属性，需要明确指定替换状态。[Java 版 1.20.3](https://feedback.minecraft.net/hc/en-us/articles/21968446892173-Minecraft-Java-Edition-1-20-3) · [Java 版 1.21.9](https://www.minecraft.net/en-us/article/minecraft-java-edition-1-21-9)
+
+转换针对方块布局。建筑方案格式记录位置和方块状态，容器物品、告示牌文字、实体及整张世界的数据不属于方案。转换不会升级、降级或写入存档。
 
 ### 配置 Codex
 
@@ -102,6 +115,16 @@ startup_timeout_sec = 25
 tool_timeout_sec = 180
 default_tools_approval_mode = 'prompt'
 ```
+
+### AI 施工前的规划归属
+
+每个由 AI 制作的建筑、地台、廊道或园景都必须先归入一个规划。需要独立选中或隐藏的部分分别建规划。同一部分的扩建、材质调整和细节修整沿用原有规划。
+
+1. 先调用 `world_map_info` 和 `planning_state` 查看全图。用 `inspect_plan` 核对已有规划的几何、图层和用途，确认后沿用其 ID，或用 `save_plan` 新建有明确名称的规划。
+2. 用 `create_draft` 传入对应的 `plan_id`。需要横跨多个规划的施工，按各部分归属分别创建和导出方案。提交前核对导出方案中的规划 ID、世界 UUID 和草稿修订。
+3. 施工后核对实际写入回执。逐项检查隐藏规划时对应建筑从视图消失、显示时恢复，并将显隐状态还原为检查前的设置。重叠位置按已核对的施工记录显示仍可见的方块。显隐只改变工坊视图，存档保持原样。
+
+工作台使用可读的已提交回执确定方块归属。同机施工时，直接使用本工程导出的方案文件提交。跨主机施工时，保留目标服的写入记录，并确认工作台能够读取对应记录后验收显隐。
 
 ### 首次写入、撤销与重做
 

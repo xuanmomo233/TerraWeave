@@ -4,6 +4,7 @@ import {randomUUID} from 'node:crypto';
 import {PROJECT,ROOT} from './workspace-paths.mjs';
 import {identifyWorld,saveWorldSource,worldSource} from './world-source.mjs';
 import {writeVoidWorld} from './void-world.mjs';
+import {worldIndex} from './world-surface.mjs';
 
 export const primaryRoot = path.resolve(PROJECT,process.env.TERRAWEAVE_PRIMARY_STATE??ROOT);
 export const primaryWorld = process.env.TERRAWEAVE_PRIMARY_WORLD??(ROOT===primaryRoot?process.env.TERRAWEAVE_WORLD:undefined);
@@ -93,6 +94,7 @@ export function createProject({name,type,directory}){
  if(!['blank','void','save'].includes(type))throw Error('请选择工程的存档类型');
  if(type==='save'&&(typeof directory!=='string'||!directory.trim()))throw Error('请填写世界存档目录');
  const source=type==='save'?identifyWorld(directory.trim()):null;
+ if(source)worldIndex(source);
  const id=randomUUID(),root=path.join(projects,id);
  fs.mkdirSync(projects,{recursive:true});
  fs.mkdirSync(root);

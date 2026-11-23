@@ -24,8 +24,13 @@ stage = root / "packages" / "windows-runtime"
 config = stage / "assets" / "render-settings.json"
 config.write_text('{"pack_order":[],"shader":"off","roots":[]}', encoding="utf-8")
 shutil.copyfile(root / "assets/block-states-1.20.1.json", stage / "assets/block-states-1.20.1.json")
+(stage / "tools").mkdir(exist_ok=True)
+block_registry = stage / "tools" / "block-states-26.3.json"
+shutil.copyfile(root / "tools" / block_registry.name, block_registry)
+conversion_catalog = stage / "tools" / "design-block-catalog.json"
+shutil.copyfile(root / "tools" / conversion_catalog.name, conversion_catalog)
 for source in (root / "tools").glob("*.mjs"):
-    if source.name.endswith((".test.mjs", "-qa.mjs")) or source.name.startswith(("verify-", "test-")):
+    if source.name.endswith((".test.mjs", "-qa.mjs")) or source.name.startswith(("verify-", "test-", "generate-")):
         continue
     target = stage / "tools" / source.name
     target.parent.mkdir(exist_ok=True)
@@ -40,9 +45,9 @@ with ZipFile(args.node_zip) as node:
         (stage / "runtime" / dest).write_bytes(node.read(f"node-v{node_version}-win-x64/{name}"))
 payload = [config, stage / "assets/block-states-1.20.1.json", stage / "snapshot-delta.js", stage / "minecraft-version.js", stage / "package.json",
            stage / "SDK.md", stage / "runtime/node.exe", stage / "runtime/NODE-LICENSE.txt",
-           stage / "runtime/MicrosoftEdgeWebview2Setup.exe"]
+           stage / "runtime/MicrosoftEdgeWebview2Setup.exe", block_registry, conversion_catalog]
 payload.extend(stage / "tools" / file.name for file in (root / "tools").glob("*.mjs")
-               if not file.name.endswith((".test.mjs", "-qa.mjs")) and not file.name.startswith(("verify-", "test-")))
+               if not file.name.endswith((".test.mjs", "-qa.mjs")) and not file.name.startswith(("verify-", "test-", "generate-")))
 resources = {Path(os.path.relpath(file, root / "src-tauri")).as_posix():file.relative_to(stage).as_posix()
              for file in payload}
 installer_config = {

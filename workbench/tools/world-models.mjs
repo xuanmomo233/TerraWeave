@@ -31,18 +31,34 @@ export function fullCubeOccluder(state,minecraft=baselineMinecraft){
 export function fluidCorners(x,y,z,kind,get,minecraft=baselineMinecraft){
  return fluidCornerHeights(x,y,z,kind,get,s=>fullCubeOccluder(s,minecraft));
 }
-export function modelTile(tx,tz,root,index=worldIndex()){
+function renderHash(tile){
+ return createHash('sha256').update(JSON.stringify([tile.minecraft,tile.groups,tile.block_entities])).digest('hex');
+}
+export function modelTile(tx,tz,root,index=worldIndex(),construction){
  refreshModelAssets();
- if(![tx,tz].every(Number.isSafeInteger)||Math.abs(tx)>1000000||Math.abs(tz)>1000000)throw Error('Invalid model tile');const minecraft=index.minecraft??baselineMinecraft,minX=tx*32,minZ=tz*32,regions=index.regions.filter(r=>r.x*512<minX+33&&(r.x+1)*512>minX-1&&r.z*512<minZ+33&&(r.z+1)*512>minZ-1),revision=createHash('sha256').update(JSON.stringify([index.world_uuid,index.region_directory,minecraft,regions.map(r=>[r.x,r.z,r.mtime,r.size])])).update(packRevision).digest('hex'),file=path.join(root,`models-${tx}-${tz}.json`);
- try{const old=JSON.parse(fs.readFileSync(file,'utf8'));if(old.version===5&&old.revision===revision)return old;}catch{}
+ if(![tx,tz].every(Number.isSafeInteger)||Math.abs(tx)>1000000||Math.abs(tz)>1000000)throw Error('Invalid model tile');const minecraft=index.minecraft??baselineMinecraft,minX=tx*32,minZ=tz*32,regions=index.regions.filter(r=>r.x*512<minX+33&&(r.x+1)*512>minX-1&&r.z*512<minZ+33&&(r.z+1)*512>minZ-1),revision=createHash('sha256').update(JSON.stringify([index.world_uuid,index.region_directory,minecraft,regions.map(r=>[r.x,r.z,r.mtime,r.size])])).update(packRevision).update(construction?.tileKey(tx,tz)??'').digest('hex'),file=path.join(root,`models-${tx}-${tz}.json`);
+ const cacheVersion=minecraft==='26.3'?6:5;
+ try{const old=JSON.parse(fs.readFileSync(file,'utf8'));if(old.version===cacheVersion&&old.revision===revision){old.render_hash??=renderHash(old);return old;}}catch{}
  const names=['minecraft:air'],ids=new Map([[names[0],0]]),chunks=new Map(),unknown=new Set(),idFor=s=>{if(!ids.has(s)){ids.set(s,names.length);names.push(s);}return ids.get(s);};
- function chunk(cx,cz){const key=cx+','+cz;if(chunks.has(key))return chunks.get(key);let n;try{n=readWorldChunk(cx,cz,index.directory);}catch{}if(!completeAnvilChunk(n)){chunks.set(key,null);unknown.add(key);return null;}const sections=new Map();for(const s of n.sections??[]){if(!s.block_states?.palette)continue;const local=sectionIndices(s);if(!local)continue;const palette=s.block_states.palette.map(p=>idFor(stateName(p))),cells=new Uint32Array(4096);for(let i=0;i<4096;i++)cells[i]=palette[local[i]];sections.set(s.Y,cells);}const entities=new Map();for(const entity of n.block_entities??[]){const appearance=blockEntityAppearance(entity);if(appearance)entities.set([entity.x,entity.y,entity.z].join(),appearance);}const result={sections,entities};chunks.set(key,result);return result;}
+ function chunk(cx,cz){const key=cx+','+cz;if(chunks.has(key))return chunks.get(key);let n;try{n=readWorldChunk(cx,cz,index.directory);}catch{}if(!completeAnvilChunk(n)){chunks.set(key,null);unknown.add(key);return null;}const sections=new Map();for(const s of n.sections??[]){if(!s.block_states?.palette)continue;const local=sectionIndices(s);if(!local)continue;const palette=s.block_states.palette.map(p=>idFor(stateName(p))),cells=new Uint32Array(4096);for(let i=0;i<4096;i++)cells[i]=palette[local[i]];sections.set(s.Y,cells);}const entities=new Map();for(const entity of n.block_entities??[]){const appearance=blockEntityAppearance(entity);if(appearance)entities.set([entity.x,entity.y,entity.z].join(),appearance);}
+  if(construction)for(const [x,y,z,resolve] of construction.chunk(cx,cz)){
+   const section=Math.floor(y/16),i=(y&15)*256+(z&15)*16+(x&15),cells=sections.get(section);
+   const actual=names[cells?.[i]??0],shown=resolve(actual);
+   if(shown===actual)continue;
+   if(!cells)sections.set(section,new Uint32Array(4096));
+   sections.get(section)[i]=idFor(shown);
+   entities.delete([x,y,z].join(','));
+  }
+  const result={sections,entities};chunks.set(key,result);return result;
+ }
  function at(x,y,z){if(y< -64||y>319)return 0;const c=chunk(Math.floor(x/16),Math.floor(z/16));if(!c)return -1;const section=c.sections.get(Math.floor(y/16));return section?.[((y%16+16)%16)*256+((z%16+16)%16)*16+(x%16+16)%16]??0;}
  const get=(x,y,z)=>{const n=at(x,y,z);return n<0?null:names[n];},groups=new Map(),block_entities={};let total=0,visible=0;
  for(let cz=Math.floor(minZ/16);cz<Math.floor(minZ/16)+2;cz++)for(let cx=Math.floor(minX/16);cx<Math.floor(minX/16)+2;cx++){const c=chunk(cx,cz);if(!c)continue;for(const [sectionY,cells]of c.sections)for(let i=0;i<4096;i++){const s=names[cells[i]];if(!s||isAir(s))continue;total++;const x=cx*16+i%16,y=sectionY*16+Math.floor(i/256),z=cz*16+Math.floor(i/16)%16;if(y< -64||y>319)continue;
    const kind=fluid(s);let mask=0,fluidMask=0;for(let f=0;f<6;f++){const d=faces[f],neighbor=get(x+d[0],y+d[1],z+d[2]),solid=neighbor!==null&&fullCubeOccluder(neighbor,minecraft);if(solid)mask|=1<<f;if(solid||kind&&fluid(neighbor)===kind)fluidMask|=1<<f;}
    if((kind?fluidMask:mask)===63&&!invisible(s)&&!s.startsWith('minecraft:bubble_column'))continue;const location=[x,y,z].join(),appearance=c.entities.get(location);if(appearance?.kind==='container')block_entities[location]=appearance;const block_entity=appearance?.kind==='container'?undefined:appearance,corners=kind?fluidCorners(x,y,z,kind,get,minecraft):undefined,key=[cells[i],mask,kind?fluidMask:0,corners?.join(',')??'',JSON.stringify(block_entity)??''].join('|');if(!groups.has(key))groups.set(key,{state:s,mask,fluid_mask:kind?fluidMask:0,fluid_corners:corners,block_entity,positions:[]});groups.get(key).positions.push((y+64)*1024+(z-minZ)*32+x-minX);visible++;
   }}
- const result={version:5,block_entities,minecraft,x:tx,z:tz,bounds:[minX,-64,minZ,minX+32,320,minZ+32],groups:[...groups.values()],total_non_air:total,visible_blocks:visible,unreadable_chunks:[...unknown].map(s=>s.split(',').map(Number)),revision,source:'saved_anvil_exact_models'};fs.mkdirSync(root,{recursive:true});const temp=file+'.pending-'+process.pid;fs.writeFileSync(temp,JSON.stringify(result));fs.renameSync(temp,file);const files=fs.readdirSync(root).filter(n=>/^models-.*\.json$/.test(n));if(files.length>192){const ordered=files.flatMap(n=>{try{return[{n,t:fs.statSync(path.join(root,n)).mtimeMs}];}catch{return[];}}).sort((a,b)=>a.t-b.t);for(const old of ordered.slice(0,files.length-192))try{fs.unlinkSync(path.join(root,old.n));}catch(e){if(e.code!=='ENOENT')throw e;}}
+ const result={version:cacheVersion,block_entities,minecraft,x:tx,z:tz,bounds:[minX,-64,minZ,minX+32,320,minZ+32],groups:[...groups.values()],total_non_air:total,visible_blocks:visible,unreadable_chunks:[...unknown].map(s=>s.split(',').map(Number)),revision,source:'saved_anvil_exact_models'};
+ result.render_hash=renderHash(result);
+ fs.mkdirSync(root,{recursive:true});const temp=file+'.pending-'+process.pid;fs.writeFileSync(temp,JSON.stringify(result));fs.renameSync(temp,file);const files=fs.readdirSync(root).filter(n=>/^models-.*\.json$/.test(n));if(files.length>192){const ordered=files.flatMap(n=>{try{return[{n,t:fs.statSync(path.join(root,n)).mtimeMs}];}catch{return[];}}).sort((a,b)=>a.t-b.t);for(const old of ordered.slice(0,files.length-192))try{fs.unlinkSync(path.join(root,old.n));}catch(e){if(e.code!=='ENOENT')throw e;}}
  return result;
 }

@@ -1,23 +1,33 @@
 import * as THREE from 'three';
 import {awaitTextures} from './model-terrain.js';
 import {updateAnimatedTexture} from './texture-animation.js';
+import {DEFAULT_RENDER_CAPACITY} from './render-capacity.js';
 
-export function createTextureAtlas(materials){
+export function createTextureAtlas(materials,previous){
   const maps=[...new Set([...materials].map(m=>m.map).filter(Boolean))];
   const tileSize=2**Math.ceil(Math.log2(Math.max(16,...maps.map(m=>Math.max(m.image.width,m.image.height)))));
-  const columns=2**Math.ceil(Math.log2(Math.sqrt(maps.length+1))),dimension=columns*tileSize;
+  const slots=new Map(),used=new Set([0]);
+  for(const map of maps){
+   const slot=previous?.rects.get(map)?.slot;
+   if(slot!==undefined){slots.set(map,slot);used.add(slot);}
+  }
+  const capacity=Math.max(maps.length+1,...[...used].map(slot=>slot+1));
+  const columns=2**Math.ceil(Math.log2(Math.sqrt(capacity))),dimension=columns*tileSize;
   const canvas=document.createElement('canvas');canvas.width=canvas.height=dimension;
   const c=canvas.getContext('2d');c.imageSmoothingEnabled=false;c.fillStyle='#ffffff';c.fillRect(0,0,tileSize,tileSize);
   const rects=new Map(),animated=[];
   const texture=new THREE.CanvasTexture(canvas);texture.colorSpace=THREE.SRGBColorSpace;
   texture.magFilter=THREE.NearestFilter;texture.minFilter=THREE.NearestMipmapLinearFilter;texture.generateMipmaps=true;
   function draw(map,x,y){c.clearRect(x,y,tileSize,tileSize);c.drawImage(map.image,x,y,tileSize,tileSize);}
+  let nextSlot=1;
   function extend(sourceMaps){
    const missing=[...new Set(sourceMaps.filter(map=>map&&!rects.has(map)))];
    if(rects.size+missing.length>=columns*columns||missing.some(map=>Math.max(map.image.width,map.image.height)>tileSize))return false;
    for(const map of missing){
-    const slot=rects.size+1,x=slot%columns*tileSize,y=Math.floor(slot/columns)*tileSize;
-    draw(map,x,y);rects.set(map,{x:x+.5,y:y+.5,w:tileSize-1,h:tileSize-1});
+    while(used.has(nextSlot))nextSlot++;
+    const slot=slots.get(map)??nextSlot,x=slot%columns*tileSize,y=Math.floor(slot/columns)*tileSize;
+    used.add(slot);
+    draw(map,x,y);rects.set(map,{slot,x:x+.5,y:y+.5,w:tileSize-1,h:tileSize-1});
     if(map.userData.animation)animated.push({map,x,y,version:map.version});
    }
    if(missing.length)texture.needsUpdate=true;
@@ -34,11 +44,21 @@ export function createTextureAtlas(materials){
    if(changed)texture.needsUpdate=true;
    return changed;
   }
-  return {texture,canvas,rects,dimension,tileSize,animate,extend,white:{x:.5,y:.5,w:tileSize-1,h:tileSize-1}};
+  return {texture,canvas,rects,dimension,tileSize,animate,extend,white:{slot:0,x:.5,y:.5,w:tileSize-1,h:tileSize-1}};
 }
 
 function atlasMipSampling(shader,atlas){
- Object.assign(shader.uniforms,{atlasDimension:{value:atlas.dimension},atlasLastTileMip:{value:Math.log2(atlas.tileSize)}});
+ Object.assign(shader.uniforms,{atlasDimension:{value:atlas.dimension},atlasTileSize:{value:atlas.tileSize},atlasLastTileMip:{value:Math.log2(atlas.tileSize)}});
+ // Keep source UVs and a stable texture slot in the mesh, including across atlas repacks.
+ shader.vertexShader='attribute float atlasSlot; uniform float atlasDimension; uniform float atlasTileSize;\n'+shader.vertexShader;
+ shader.vertexShader=shader.vertexShader.replace('#include <uv_vertex>',`#include <uv_vertex>
+ float columns = atlasDimension / atlasTileSize;
+ vec2 cell = vec2(mod(atlasSlot,columns),floor(atlasSlot/columns)) * atlasTileSize;
+ vec2 texel = cell + vec2(0.5) + vec2(uv.x,1.0-uv.y) * (atlasTileSize-1.0);
+ vMapUv = vec2(texel.x/atlasDimension,1.0-texel.y/atlasDimension);
+ #ifdef USE_EMISSIVEMAP
+ vEmissiveMapUv = vMapUv;
+ #endif`);
  // Power-of-two cells stay independent down to one texel per material.
  shader.fragmentShader=`
 uniform float atlasDimension;
@@ -54,18 +74,50 @@ vec4 sampleAtlas(sampler2D image, vec2 uv) {
   .replace('#include <emissivemap_fragment>',THREE.ShaderChunk.emissivemap_fragment.replace('texture2D( emissiveMap, vEmissiveMapUv )','sampleAtlas( emissiveMap, vEmissiveMapUv )'));
 }
 
-const STREAMED_TILES=64;
-const MAX_CACHED_TILES=192;
-export const MAX_SCENE_VERTICES=6_900_000;
+const BAKE_SLICE_MS=8;
+export const MAX_SCENE_VERTICES=DEFAULT_RENDER_CAPACITY.maxVertices;
 const helper=s=>/^minecraft:(barrier|structure_void|light)(\[|$)/.test(s);
 export const modelGroupKey=(g,minecraft)=>JSON.stringify([minecraft,g.state,g.mask,g.fluid_mask,g.fluid_corners,g.block_entity,g.variantIndices]);
 const keyFor=modelGroupKey;
 export class TexturedWorld{
- constructor(scene,call,parts,progress=()=>{},chooseVariants){this.scene=scene;this.call=call;this.parts=parts;this.progress=progress;this.chooseVariants=chooseVariants;this.meshes=new Map();this.cache=new Map();this.prepared=new Map();this.lookups=new Map();this.enabled=false;this.showInvisible=false;this.info=null;this.signature='';this.generation=0;this.bakedTiles=0;this.loading=null;this.atlas=null;this.materials=new Map();this.markerMaterial=new THREE.PointsMaterial({size:1.1,transparent:true,alphaTest:.1,depthWrite:false});this.uniforms={active:{value:false},min:{value:new THREE.Vector3()},max:{value:new THREE.Vector3()}};}
- async initialize(info){const generation=this.generation;if(!info){if(!this.infoRequest)this.infoRequest=this.call('world_scene_info',{preview:true}).finally(()=>this.infoRequest=null);info=await this.infoRequest;if(generation!==this.generation&&this.info)return this.info;}if(this.info?.revision!==info.revision){this.generation++;this.cache.clear();this.signature='';}else if(this.info?.preview_index&&!info.preview_index)this.generation++;this.info=info;this.tiles=this.indexTiles(info);return this.info;}
+ capacity=DEFAULT_RENDER_CAPACITY;
+ coverageKey='';
+ pendingTiles=new Map();
+ pendingParts=new Map();
+ preparedTiles=new WeakMap();
+ constructor(scene,call,parts,progress=()=>{},chooseVariants){this.scene=scene;this.call=call;this.parts=parts;this.progress=progress;this.chooseVariants=chooseVariants;this.meshes=new Map();this.cache=new Map();this.prepared=new Map();this.lookups=new Map();this.enabled=false;this.showInvisible=false;this.info=null;this.signature='';this.generation=0;this.bakedTiles=0;this.tileReads=0;this.loading=null;this.atlas=null;this.materials=new Map();this.markerMaterial=new THREE.PointsMaterial({size:1.1,transparent:true,alphaTest:.1,depthWrite:false});this.uniforms={active:{value:false},min:{value:new THREE.Vector3()},max:{value:new THREE.Vector3()}};}
+ async initialize(info){
+  const generation=this.generation;
+  if(!info){
+   if(!this.infoRequest)this.infoRequest=this.call('world_scene_info',{preview:true}).finally(()=>this.infoRequest=null);
+   info=await this.infoRequest;
+   if(generation!==this.generation&&this.info)return this.info;
+  }
+  if(this.info?.revision!==info.revision){
+   this.cancelUpdate();this.cache.clear();this.signature='';
+  }else if(this.info?.visibility_revision!==info.visibility_revision||this.info?.preview_index&&!info.preview_index)this.cancelUpdate();
+  this.info=info;this.tiles=this.indexTiles(info);this.completeResidency=undefined;return this.info;
+ }
+ cancelUpdate(){
+  this.generation++;
+  if(this.loading){this.loading=null;this.loadingSignature='';this.progress(0,0);}
+ }
+ setCapacity(capacity){
+  const previous=this.capacity;
+  if(Object.keys(DEFAULT_RENDER_CAPACITY).every(key=>previous[key]===capacity[key]))return false;
+  this.capacity=capacity;
+  this.trimTileCache();
+  if(previous.residentTiles!==capacity.residentTiles||previous.streamTiles!==capacity.streamTiles||previous.maxVertices!==capacity.maxVertices){
+   if(!this.enabled&&(this.meshes.size>capacity.residentTiles||this.loadedVertices>capacity.maxVertices))this.clear();
+   else this.cancelUpdate();
+   this.capacityDirty=true;
+  }
+  return true;
+ }
+ trimTileCache(){while(this.cache.size>this.capacity.cpuTiles)this.cache.delete(this.cache.keys().next().value);}
  setShowInvisible(value,map){this.showInvisible=value;if(map&&this.markerMaterial.map!==map){this.markerMaterial.map=map;this.markerMaterial.needsUpdate=true;}for(const group of this.meshes.values())for(const child of group.children)if(child.isPoints)child.visible=value;}
  dispose(group){for(const child of group.children)child.geometry.dispose();}
- clear(){this.generation++;for(const group of this.meshes.values()){this.scene.remove(group);this.dispose(group);}this.meshes.clear();this.lookups.clear();for(const mat of this.materials.values())mat.dispose();this.materials.clear();this.atlas?.texture.dispose();this.atlas=null;this.signature='';this.residentRevision=undefined;this.loadedVertices=0;this.omittedTiles=0;}
+ clear(){this.cancelUpdate();for(const group of this.meshes.values()){this.scene.remove(group);this.dispose(group);}this.meshes.clear();this.lookups.clear();for(const mat of this.materials.values())mat.dispose();this.materials.clear();this.atlas?.texture.dispose();this.atlas=null;this.signature='';this.coverageKey='';this.residentRevision=undefined;this.completeResidency=undefined;this.loadedVertices=0;this.omittedTiles=0;this.lastUpdate=undefined;}
  rebase(origin,bounds){this.origin=[...origin];this.cutBounds=bounds;for(const group of this.meshes.values())group.position.set(...group.userData.origin.map((n,i)=>n-origin[i]));this.uniforms.active.value=!!bounds;if(bounds){this.uniforms.min.value.set(...bounds.slice(0,3).map((n,i)=>n-origin[i]));this.uniforms.max.value.set(...bounds.slice(3).map((n,i)=>n+1-origin[i]));}}
  indexTiles(info){
   const result=new Map(),world=info.bounds??[-64,-64,-64,63,319,63];
@@ -76,17 +128,21 @@ export class TexturedWorld{
   return [...result.values()];
  }
  get allTilesResident(){
-  return !!this.info&&!this.info.preview_index&&this.residentRevision===this.info.revision&&
-   this.meshes.size===this.tiles.length&&this.tiles.every(tile=>this.meshes.has(tile.key));
+  if(this.capacityDirty||!this.info||this.info.preview_index||this.residentRevision!==this.info.revision||this.meshes.size!==this.tiles.length)return false;
+  return this.completeResidency??=this.tiles.every(tile=>this.hasCurrentTile(tile.key));
  }
- wanted(eye,target,frustum,origin,limit=STREAMED_TILES,keepResidents=false){
+ visibilityKey(key){return this.info?.visibility_tiles?.[key]??'';}
+ hasCurrentTile(key){const group=this.meshes.get(key);return !!group&&(group.userData.visibility_key??'')===this.visibilityKey(key);}
+ wanted(eye,target,frustum,origin,limit=this.capacity.streamTiles,keepResidents=false){
+  limit=Math.min(limit,this.capacity.residentTiles);
+  const box=new THREE.Box3();
   const ranked=this.tiles.map(tile=>{
    const x=tile.x*32,z=tile.z*32;
    const distance=(p)=>Math.hypot(Math.max(0,x-p[0],p[0]-x-32),Math.max(0,z-p[2],p[2]-z-32));
    const near=distance(eye);
-   const visible=frustum?.intersectsBox(new THREE.Box3(
-    new THREE.Vector3(x-origin[0],tile.min_y-origin[1],z-origin[2]),
-    new THREE.Vector3(x+32-origin[0],tile.max_y+1-origin[1],z+32-origin[2])));
+   box.min.set(x-origin[0],tile.min_y-origin[1],z-origin[2]);
+   box.max.set(x+32-origin[0],tile.max_y+1-origin[1],z+32-origin[2]);
+   const visible=frustum?.intersectsBox(box);
    const retained=this.residentRevision===this.info.revision&&this.meshes.has(tile.key);
    // Only newly visible tiles can displace residents. Nearby unseen tiles fill spare capacity.
    const priority=visible?0:keepResidents&&retained?1:near<=128?2:3;
@@ -95,14 +151,38 @@ export class TexturedWorld{
   });
   ranked.sort((a,b)=>a.priority-b.priority||a.score-b.score||a.tile.x-b.tile.x||a.tile.z-b.tile.z);
   const wanted=ranked.slice(0,limit);
-  if(keepResidents)wanted.push(...ranked.slice(limit).filter(entry=>entry.retained).slice(0,MAX_CACHED_TILES-wanted.length));
+  if(keepResidents)wanted.push(...ranked.slice(limit).filter(entry=>entry.retained).slice(0,this.capacity.residentTiles-wanted.length));
   return wanted.map(entry=>entry.tile);
  }
- vertexCount(tile){
-  return tile.groups.reduce((sum,g)=>sum+g.positions.length*(this.prepared.get(keyFor(g,tile.minecraft))??[])
-   .reduce((count,part)=>count+(part.geometry.index?.count??part.geometry.getAttribute('position').count),0),0);
+ tileResources(tile){
+  let vertices=0;
+  const materials=new Set();
+  for(const group of tile.groups){
+   for(const part of this.prepared.get(keyFor(group,tile.minecraft))??[]){
+    vertices+=group.positions.length*(part.geometry.index?.count??part.geometry.getAttribute('position').count);
+    materials.add(part.material);
+   }
+  }
+  return {vertices,materials:[...materials]};
  }
- async tile(t){const revision=this.info.revision,key=revision+':'+t.key;if(this.cache.has(key)){const data=this.cache.get(key);this.cache.delete(key);this.cache.set(key,data);return data;}const data=await this.call('world_model_tile',{x:t.x,z:t.z,world_revision:revision});if(this.info?.revision===revision){this.cache.set(key,data);while(this.cache.size>MAX_CACHED_TILES)this.cache.delete(this.cache.keys().next().value);}return data;}
+ async tile(t,onRead){
+  const {revision,visibility_revision}=this.info,visible=this.visibilityKey(t.key),key=revision+':'+t.key+(visible?':'+visible:'');
+  if(this.cache.has(key)){const data=this.cache.get(key);this.cache.delete(key);this.cache.set(key,data);return data;}
+  if(this.pendingTiles.has(key))return this.pendingTiles.get(key);
+  onRead?.();
+  this.tileReads++;
+  const pending=this.call('world_model_tile',{x:t.x,z:t.z,world_revision:revision,...(visibility_revision!==undefined?{visibility_key:visible}:{})});
+  this.pendingTiles.set(key,pending);
+  try{
+   const data=await pending;
+   if(this.info?.revision===revision&&this.visibilityKey(t.key)===visible){
+    this.cache.set(key,data);this.trimTileCache();
+   }
+   return data;
+  }finally{
+   this.pendingTiles.delete(key);
+  }
+ }
  async prepare(data,current=()=>true){
   const groups=[],position=n=>[n%32+data.bounds[0],Math.floor(n/1024)-64,Math.floor(n/32)%32+data.bounds[2]];
   for(const g of data.groups){
@@ -112,13 +192,21 @@ export class TexturedWorld{
    for(const {indices,items} of choices){
     if(!current())return;
     const chosen=indices?{...g,positions:items,variantIndices:indices}:g,key=keyFor(chosen,data.minecraft);
-    if(!this.prepared.has(key))this.prepared.set(key,await this.parts(g.state,{minecraft:data.minecraft,occlusionMask:g.mask,fluidMask:g.fluid_mask,fluidCorners:g.fluid_corners,blockEntity:g.block_entity,variantIndices:indices}));
+    if(!this.prepared.has(key)){
+     let pending=this.pendingParts.get(key);
+     if(!pending){
+      pending=Promise.resolve(this.parts(g.state,{minecraft:data.minecraft,occlusionMask:g.mask,fluidMask:g.fluid_mask,fluidCorners:g.fluid_corners,blockEntity:g.block_entity,variantIndices:indices}))
+       .then(parts=>this.prepared.set(key,parts)).finally(()=>this.pendingParts.delete(key));
+      this.pendingParts.set(key,pending);
+     }
+     await pending;
+    }
     groups.push(chosen);
    }
   }
   return {...data,groups};
  }
- createAtlas(materials){return createTextureAtlas(materials);}
+ createAtlas(materials,previous){return createTextureAtlas(materials,previous);}
  style(material){return JSON.stringify([material.transparent??false,material.opacity??1,material.side??0,material.wireframe??false,material.emissiveIntensity??0,material.emissive?.getHex()??0,material.alphaTest??.1,material.depthWrite??true]);}
  atlasMaterial(source,resources=this){
   const key=this.style(source);
@@ -142,45 +230,67 @@ export class TexturedWorld{
    for(const part of this.prepared.get(keyFor(g,tile.minecraft))??[]){const key=this.style(part.material),geometry=part.geometry;if(!buckets.has(key))buckets.set(key,{source:part.material,items:[],count:0});const bucket=buckets.get(key),count=geometry.index?.count??geometry.getAttribute('position').count;bucket.items.push({g,part,count});bucket.count+=count*g.positions.length;}
   }
   resources.lookups.set(tile.x+','+tile.z,lookup);const group=new THREE.Group();group.userData={origin:[...origin],tile};
-  for(const bucket of buckets.values()){const positions=new Float32Array(bucket.count*3),normals=new Float32Array(bucket.count*3),uvs=new Float32Array(bucket.count*2),colors=new Float32Array(bucket.count*3),blockOrigins=new Float32Array(bucket.count*3),owners=new Uint32Array(bucket.count/3);let cursor=0;
+  for(const bucket of buckets.values()){const positions=new Float32Array(bucket.count*3),normals=new Float32Array(bucket.count*3),uvs=new Float32Array(bucket.count*2),slots=atlas.dimension/atlas.tileSize>256?new Float32Array(bucket.count):new Uint16Array(bucket.count),colors=new Float32Array(bucket.count*3),blockOrigins=new Float32Array(bucket.count*3),owners=new Uint32Array(bucket.count/3);let cursor=0;
    for(const {g,part,count}of bucket.items){const geometry=part.geometry,p=geometry.getAttribute('position'),n=geometry.getAttribute('normal'),uv=geometry.getAttribute('uv'),rect=atlas.rects.get(part.material.map)??atlas.white,tint=part.material.color??new THREE.Color(0xffffff),placeholder=part.placeholder?.5:0;
     for(const encoded of g.positions){const x=encoded%32+tile.bounds[0]-origin[0]+placeholder,y=Math.floor(encoded/1024)-64-origin[1]+placeholder,z=Math.floor(encoded/32)%32+tile.bounds[2]-origin[2]+placeholder;
-     for(let v=0;v<count;v++){const i=geometry.index?.getX(v)??v,j=cursor*3,k=cursor*2;if(cursor%3===0)owners[cursor/3]=encoded;positions[j]=p.getX(i)+x;positions[j+1]=p.getY(i)+y;positions[j+2]=p.getZ(i)+z;blockOrigins[j]=x-placeholder;blockOrigins[j+1]=y-placeholder;blockOrigins[j+2]=z-placeholder;normals[j]=n?.getX(i)??0;normals[j+1]=n?.getY(i)??1;normals[j+2]=n?.getZ(i)??0;uvs[k]=(rect.x+(uv?.getX(i)??0)*rect.w)/atlas.dimension;uvs[k+1]=1-(rect.y+(1-(uv?.getY(i)??0))*rect.h)/atlas.dimension;colors[j]=tint.r;colors[j+1]=tint.g;colors[j+2]=tint.b;cursor++;}
+     for(let v=0;v<count;v++){const i=geometry.index?.getX(v)??v,j=cursor*3,k=cursor*2;if(cursor%3===0)owners[cursor/3]=encoded;positions[j]=p.getX(i)+x;positions[j+1]=p.getY(i)+y;positions[j+2]=p.getZ(i)+z;blockOrigins[j]=x-placeholder;blockOrigins[j+1]=y-placeholder;blockOrigins[j+2]=z-placeholder;normals[j]=n?.getX(i)??0;normals[j+1]=n?.getY(i)??1;normals[j+2]=n?.getZ(i)??0;uvs[k]=uv?.getX(i)??0;uvs[k+1]=uv?.getY(i)??0;slots[cursor]=rect.slot;colors[j]=tint.r;colors[j+1]=tint.g;colors[j+2]=tint.b;cursor++;}
     }
    }
-   const geometry=new THREE.BufferGeometry();geometry.setAttribute('position',new THREE.BufferAttribute(positions,3));geometry.setAttribute('blockOrigin',new THREE.BufferAttribute(blockOrigins,3));geometry.setAttribute('normal',new THREE.BufferAttribute(normals,3));geometry.setAttribute('uv',new THREE.BufferAttribute(uvs,2));geometry.setAttribute('color',new THREE.BufferAttribute(colors,3));geometry.computeBoundingSphere();geometry.computeBoundingBox();const mesh=new THREE.Mesh(geometry,this.atlasMaterial(bucket.source,resources));mesh.userData={owners,tile};group.add(mesh);
+   const geometry=new THREE.BufferGeometry();geometry.setAttribute('position',new THREE.BufferAttribute(positions,3));geometry.setAttribute('blockOrigin',new THREE.BufferAttribute(blockOrigins,3));geometry.setAttribute('normal',new THREE.BufferAttribute(normals,3));geometry.setAttribute('uv',new THREE.BufferAttribute(uvs,2));geometry.setAttribute('atlasSlot',new THREE.BufferAttribute(slots,1));geometry.setAttribute('color',new THREE.BufferAttribute(colors,3));geometry.computeBoundingSphere();geometry.computeBoundingBox();const mesh=new THREE.Mesh(geometry,this.atlasMaterial(bucket.source,resources));mesh.userData={owners,tile,atlasSource:bucket.source};group.add(mesh);
   }
   if(markers.length){const geometry=new THREE.BufferGeometry();geometry.setAttribute('position',new THREE.Float32BufferAttribute(markers,3));const points=new THREE.Points(geometry,this.markerMaterial);points.visible=this.showInvisible;group.add(points);}return group;
  }
- async update(x,z,distance,origin,bounds,eye=[x,0,z],_scale,frustum,budget=MAX_SCENE_VERTICES,tileLimit){
+ async update(x,z,distance,origin,bounds,eye=[x,0,z],_scale,frustum,budget=this.capacity.maxVertices,tileLimit){
   if(!this.enabled)return;
   if(!this.info)await this.initialize();
   if(!this.enabled)return;
   this.rebase(origin,bounds);
   const {revision,preview_index:preview}=this.info,totalTiles=this.tiles.length;
-  const stream=preview||totalTiles>MAX_CACHED_TILES;
-  const limit=tileLimit??(stream?STREAMED_TILES:MAX_CACHED_TILES);
+  budget=Math.min(budget,this.capacity.maxVertices);
+  const stream=preview||totalTiles>this.capacity.residentTiles;
+  const limit=tileLimit??(stream?this.capacity.streamTiles:this.capacity.residentTiles);
   const wanted=this.wanted(eye,[x,0,z],frustum,origin,limit,tileLimit===undefined),keys=wanted.map(t=>t.key);
-  const signature=[revision,budget,...[...keys].sort()].join(':'),order=keys.join(':');
+  const signature=[revision,budget,...[...keys].sort().map(key=>key+'='+this.visibilityKey(key))].join(':'),order=keys.join(':');
   const sameSet=this.signature===signature,reorder=sameSet&&this.budgetLimited;
   const loadingSignature=reorder?signature+'|'+order:signature;
   if(this.loading&&this.loadingGeneration===this.generation&&this.loadingSignature===loadingSignature)return this.loading;
-  if(sameSet&&(!reorder||this.residentOrder===order)&&!this.loading)return;
+  if(sameSet&&(!reorder||this.residentOrder===order)){
+   if(this.loading)this.cancelUpdate();
+   this.capacityDirty=false;
+   return;
+  }
   const generation=++this.generation,current=()=>generation===this.generation&&this.enabled;
-  const reusable=this.residentRevision===revision?new Map(this.meshes):new Map();
+  const sameWorld=this.residentRevision===revision;
+  const entries=wanted.map(({key,x,z})=>{
+   const resident=sameWorld?this.meshes.get(key):undefined;
+   return {key,x,z,resident,dirty:!resident||!this.hasCurrentTile(key),tile:resident?.userData.tile,profile:resident?.userData.profile};
+  });
+  const dirty=entries.filter(entry=>entry.dirty);
   const oldAtlas=this.atlas,oldMaterials=new Map(this.materials);
-  const next=new Map(),data=Array(wanted.length),resources={atlas:null,materials:new Map(),lookups:new Map()};
-  let cursor=0,finished=0,committed=false;
+  const next=new Map(),staged=[],resources={atlas:null,materials:new Map(),lookups:new Map()};
+  let cursor=0,finished=0,reads=0,rebuilt=0,committed=false;
+  const progress=()=>{if(dirty.length)this.progress(finished,dirty.length*2,sameWorld);};
   this.loadingSignature=loadingSignature;
   this.loadingGeneration=generation;
-  this.progress(0,wanted.length*2);
+  progress();
   const load=async()=>{
-   while(cursor<wanted.length&&current()){
-    const index=cursor++,entry=wanted[index],resident=reusable.get(entry.key);
-    const prepared=resident?.userData.tile??await this.prepare(await this.tile(entry),current);
+   while(cursor<dirty.length&&current()){
+    const entry=dirty[cursor++],raw=await this.tile(entry,()=>reads++);
     if(!current())return;
-    data[index]=prepared;
-    this.progress(++finished,wanted.length*2);
+    if(raw.render_hash&&raw.render_hash===entry.tile?.render_hash){
+     entry.tile={...raw,groups:entry.tile.groups};
+    }else{
+     entry.resident=undefined;
+     let prepared=this.preparedTiles.get(raw);
+     if(!prepared){
+      const tile=await this.prepare(raw,current);
+      if(!current())return;
+      prepared={tile,profile:this.tileResources(tile)};
+      this.preparedTiles.set(raw,prepared);
+     }
+     Object.assign(entry,prepared);
+    }
+    finished++;progress();
    }
   };
   const task=(async()=>{
@@ -190,34 +300,50 @@ export class TexturedWorld{
     const failed=results.find(r=>r.status==='rejected');
     if(failed)throw failed.reason;
     let vertices=0;
-    const selected=data.filter(tile=>{
-     const count=this.vertexCount(tile);
-     if(vertices+count>budget)return false;
-     vertices+=count;return true;
+    const selected=entries.filter(({profile})=>{
+     if(vertices+profile.vertices>budget)return false;
+     vertices+=profile.vertices;return true;
     });
-    const modelKeys=new Set(selected.flatMap(tile=>tile.groups.filter(g=>!helper(g.state)).map(group=>keyFor(group,tile.minecraft))));
-    const materials=[...new Set([...modelKeys].flatMap(key=>(this.prepared.get(key)??[]).map(p=>p.material)))];
+    const materials=[...new Set(selected.flatMap(entry=>entry.profile.materials))];
     await awaitTextures(materials);
     if(!current())return;
-    const reuseAtlas=this.residentRevision===revision&&oldAtlas&&
+    const reuseAtlas=sameWorld&&oldAtlas&&
      (materials.every(m=>!m.map||oldAtlas.rects.has(m.map))||oldAtlas.extend?.(materials.map(m=>m.map)));
-    resources.atlas=reuseAtlas?oldAtlas:this.createAtlas(materials);
+    resources.atlas=reuseAtlas?oldAtlas:this.createAtlas(materials,sameWorld?oldAtlas:undefined);
     if(reuseAtlas)resources.materials=new Map(oldMaterials);
-    for(const tile of selected){
+    const rebind=[];
+    let yieldAt=performance.now()+BAKE_SLICE_MS;
+    for(const {tile,key,resident,profile,dirty:changed} of selected){
      if(!current())return;
-     const key=tile.x+','+tile.z,retained=reuseAtlas&&reusable.get(key);
-     if(retained){
+     if(resident){
       resources.lookups.set(key,this.lookups.get(key));
-      next.set(key,retained);
+      next.set(key,resident);
+      if(!reuseAtlas)for(const mesh of resident.children){
+       if(mesh.userData.atlasSource)rebind.push([mesh,this.atlasMaterial(mesh.userData.atlasSource,resources)]);
+      }
      }else{
-      next.set(key,this.bake(tile,origin,resources));
-      this.bakedTiles++;
-      await new Promise(r=>setTimeout(r,0));
-      if(!current())return;
+      const group=this.bake(tile,origin,resources);
+      staged.push(group);
+      group.userData.profile=profile;
+      next.set(key,group);
+      rebuilt++;
+      if(performance.now()>=yieldAt){
+       await (globalThis.scheduler?.yield?.()??new Promise(resolve=>setTimeout(resolve,0)));
+       if(!current())return;
+       yieldAt=performance.now()+BAKE_SLICE_MS;
+      }
      }
-     this.progress(++finished,wanted.length*2);
+     if(changed){finished++;progress();}
     }
+    await Promise.resolve();
     if(!current())return;
+    for(const [mesh,material] of rebind)mesh.material=material;
+    for(const {key,tile,dirty:changed} of selected)if(changed){
+     const group=next.get(key);
+     group.userData.visibility_key=this.visibilityKey(key);
+     group.userData.tile=tile;
+     for(const mesh of group.children)if(mesh.isMesh)mesh.userData.tile=tile;
+    }
     for(const [key,group] of this.meshes)if(next.get(key)!==group){this.scene.remove(group);this.dispose(group);}
     if(!reuseAtlas){
      for(const mat of oldMaterials.values())mat.dispose();
@@ -225,16 +351,17 @@ export class TexturedWorld{
     }
     for(const [key,group] of next)if(this.meshes.get(key)!==group)this.scene.add(group);
     Object.assign(this,{atlas:resources.atlas,materials:resources.materials,lookups:resources.lookups,meshes:next,
-     signature,residentRevision:revision,residentOrder:order,budgetLimited:selected.length<wanted.length,
-     loadedVertices:vertices,omittedTiles:totalTiles-selected.length});
+     signature,coverageKey:[...next.keys()].sort().join('|'),residentRevision:revision,residentOrder:order,capacityDirty:false,completeResidency:undefined,budgetLimited:selected.length<wanted.length,
+     loadedVertices:vertices,omittedTiles:totalTiles-selected.length,bakedTiles:this.bakedTiles+rebuilt,
+     lastUpdate:{candidates:dirty.length,reads,rebuilt,retained:next.size-rebuilt,atlas_replaced:!!oldAtlas&&!reuseAtlas}});
     this.rebase(this.origin??origin,this.cutBounds);
     committed=true;
-    this.progress(wanted.length*2,wanted.length*2);
+    this.progress(dirty.length*2,dirty.length*2,sameWorld);
    }catch(error){
     if(current()){this.progress(0,0);throw error;}
    }finally{
     if(!committed){
-     for(const [key,group] of next)if(reusable.get(key)!==group)this.dispose(group);
+     for(const group of staged)this.dispose(group);
      for(const [key,mat] of resources.materials)if(resources.atlas!==oldAtlas||oldMaterials.get(key)!==mat)mat.dispose();
      if(resources.atlas!==oldAtlas)resources.atlas?.texture.dispose();
     }

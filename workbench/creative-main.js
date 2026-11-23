@@ -8,7 +8,8 @@ import {makeIndex,patchLocalIndex} from './chunk-index.js';
 import {snapshotDelta,applySnapshotDelta,affectedChunkColumns} from './snapshot-delta.js';
 import {mountWorkspaceUI} from './workspace-ui.js';
 import {mountMapWorkspace} from './map-workspace.js';
-import {MAX_SCENE_VERTICES,TexturedWorld} from './textured-world.js';
+import {TexturedWorld} from './textured-world.js';
+import {chooseRenderCapacity} from './render-capacity.js';
 import {PlanningOverlay} from './planning-overlay.js';
 import {captureCamera,captureFrustum,renderCapture} from './capture-renderer.js';
 import {PlanningSketch,planningPoint,pointLabel} from './planning-sketch.js';
@@ -17,7 +18,7 @@ import './editor-layout.css';
 import './appearance.css';
 import './panel-layout.css';
 import {readWheelSensitivity,saveWheelSensitivity,wheelZoomFactor,wheelTravel} from './viewport-wheel.js';
-import {callWorkbench} from './workbench-api.js';
+import {callWorkbench,finishWorkbenchWrites,invokeProject,readWorkbenchSnapshot} from './workbench-api.js';
 import {mountRenderSettings} from './render-settings-ui.js';
 import {OfflineIrisView} from './offline-iris-view.js';
 
@@ -47,7 +48,12 @@ const controls=new OrbitControls(camera,renderer.domElement);controls.enableDamp
 controls.mouseButtons={LEFT:null,MIDDLE:THREE.MOUSE.PAN,RIGHT:THREE.MOUSE.ROTATE};
 const cache=new Map(),unsupported=new Map(),box=new THREE.BoxGeometry(1,1,1),pink=new THREE.MeshBasicMaterial({color:0xff00ff,wireframe:true});
 async function parts(state,options={},showInvisible=!!settings.show_invisible){const key=state+'|'+showInvisible+'|'+JSON.stringify(options);if(!cache.has(key))cache.set(key,buildState(state,{...options,showInvisible}).catch(e=>{unsupported.set(state,String(e));return [{geometry:box,material:pink,placeholder:true}];}));return cache.get(key);}
-const chunks=new ChunkRenderer(scene,parts,[0,0,0]);
+const localGeometry=new THREE.Group(),worldGeometry=new THREE.Group();
+function showGeometry(group,visible){
+ if(visible&&!group.parent)scene.add(group);
+ else if(!visible)group.removeFromParent();
+}
+const chunks=new ChunkRenderer(localGeometry,parts,[0,0,0]);
 let region=null,snapshot=null,outline=null,diffGroup=new THREE.Group(),working=false,polling=false,sceneChanging=false,capturing=false,marking=false,corner=null,renderQueue=Promise.resolve();
 let tool='select',grid=null,blockOutline=null;
 const sceneSketch=new PlanningSketch();
@@ -70,23 +76,25 @@ scene.add(diffGroup);
 let settings={min_y:-64,max_y:319,show_selection:false,show_grid:false,show_plans:false,show_invisible:false,display_mode:'scene'};
 const planningToggle=document.createElement('label');planningToggle.title='规划叠加';planningToggle.innerHTML='<input id="planning-overlay" type="checkbox" aria-label="规划叠加"><svg class="icon"><use href="#i-folder"/></svg>';$('detail-switches').prepend(planningToggle);
 const invisibleToggle=document.createElement('label');invisibleToggle.title='显示屏障标识';invisibleToggle.innerHTML='<input id="invisible-blocks" type="checkbox" aria-label="显示屏障"><svg class="icon"><use href="#i-eye"/></svg>';$('detail-switches').prepend(invisibleToggle);
-const openRenderSettings=mountRenderSettings({
- selected:sceneView,
- apply(_config,pose){
+function reloadRenderSettings(pose){
+  if(switchingProject)return;
   sessionStorage.setItem('terraweave-render-restore',JSON.stringify(pose));
   location.reload();
- }
+}
+const openRenderSettings=mountRenderSettings({
+ selected:sceneView,
+ apply:async(_config,pose)=>{await ui.recovery.flush();reloadRenderSettings(pose);}
 });
-const ui=mountWorkspaceUI({getRegion:()=>region,getSnapshot:()=>snapshot,getView:()=>({...settings}),getCamera:()=>sceneView(),isCapturing:()=>capturing,setView,frame:name=>{if(region&&!capturing)frame(name);},setTool,undoSketch,cancelActiveSketch,clear:clearDocument,openRenderSettings});
+const ui=mountWorkspaceUI({getRegion:()=>region,getSnapshot:()=>snapshot,getView:()=>({...settings}),getCamera:()=>sceneView(),isCapturing:()=>capturing,setView,frame:name=>{if(region&&!capturing)frame(name);},setTool,undoSketch,cancelActiveSketch,clear:clearDocument,openRenderSettings,switchProject});
 const iris=new OfflineIrisView(view,ui.say,()=>requestPlanOverlay(true));
 const api=callWorkbench;
-const macro=mountMapWorkspace({editor:ui,canvas:renderer.domElement,getRegion:()=>region,getPlanSnap,sketchChanged:refreshPlanningControls,
+const macro=mountMapWorkspace({editor:ui,canvas:renderer.domElement,getRegion:()=>region,getPlanSnap,sketchChanged:refreshPlanningControls,syncConstruction,
  paintDraftVisibility(id,visible){
   if(region?.draft_id!==id||region.reveal_changes)return;
   const next=visible&&settings.display_mode==='editor';
   if(diffGroup.visible!==next){diffGroup.visible=next;requestDraw();}
  },
- resumePanorama(){if(!region?.panorama||!ui.storedView(region)||!lod.meshes.size||lod.loading)return false;macro.showDetail();ui.setRegion(region);ui.setViewFields(settings);$('source-state').textContent='存档全景三维';$('source-status').textContent='完整模型与贴图 · 自由相机';cameraMode();requestDraw();return true;}});ui.bindMap(macro);
+ resumePanorama(){if(!region?.panorama||!ui.storedView(region)||!lod.meshes.size||lod.loading)return false;macro.showDetail();ui.setRegion(region);ui.setViewFields(settings);$('source-state').textContent='存档全景三维';$('source-status').textContent='完整模型与贴图 · 自由相机';cameraMode();requestDraw();syncConstruction(macro.getVisibilityRevision());return true;}});ui.bindMap(macro);
 const sceneLoading=document.createElement('div');sceneLoading.id='scene-loading';sceneLoading.hidden=true;view.append(sceneLoading);
 const panoramaButton=document.createElement('button');
 panoramaButton.textContent='全景';
@@ -97,7 +105,14 @@ panoramaButton.onclick=()=>{
  else ui.run(()=>api('open_world_scene'));
 };
 $('detail-controls').querySelector('.view-buttons').prepend(panoramaButton);
-const lod=new TexturedWorld(scene,api,parts,(done,total)=>{sceneLoading.hidden=macro.active||done>=total;sceneLoading.textContent='正在加载完整模型与贴图 '+done+' / '+total;if(region?.panorama)$('render-stats').textContent=done+' / '+total+' · 完整材质';},chooseVariantGroups),planOverlay=new PlanningOverlay(view);let fly=true,lastFrame=performance.now(),flyLook=null,lastAngles=0;const heldKeys=new Set();
+const lod=new TexturedWorld(worldGeometry,api,parts,(done,total,incremental)=>{
+ const pending=done<total,tiles=total/2;
+ sceneLoading.hidden=macro.active||!pending;
+ if(!pending)return;
+ const percent=Math.floor(done/total*100),action=incremental?'更新':'加载';
+ sceneLoading.textContent='正在'+action+' '+tiles+' 个模型图块 · '+percent+'%';
+ if(region?.panorama)$('render-stats').textContent=action+' '+tiles+' 个图块 · '+percent+'%';
+},chooseVariantGroups),planOverlay=new PlanningOverlay(view);let fly=true,lastFrame=performance.now(),flyLook=null,lastAngles=0;const heldKeys=new Set();
 const cameraDraft=new Map();let cameraDirty=false;const cameraFields=['camera-x','camera-y','camera-z','camera-yaw','camera-pitch'];
 const speedField=document.createElement('label');speedField.innerHTML='移动速度 <input id="camera-speed" type="number" min="0.1" max="2048" value="20" aria-label="相机移动速度">';$('set-camera-angle').after(speedField);$('set-camera-angle').textContent='应用相机位置与朝向';
 const wheelField=document.createElement('label');wheelField.innerHTML='滚轮灵敏度（%）<input id="wheel-sensitivity" type="number" min="1" max="100" step="1" aria-label="滚轮灵敏度">';speedField.after(wheelField);$('wheel-sensitivity').value=String(readWheelSensitivity());$('wheel-sensitivity').onchange=()=>{$('wheel-sensitivity').value=String(saveWheelSensitivity($('wheel-sensitivity').value));};
@@ -105,18 +120,18 @@ for(const id of cameraFields)$(id).addEventListener('input',()=>{cameraDirty=tru
 function syncCameraFields(force=false){if(!snapshot||cameraDirty&&!force)return;const p=camera.position.toArray().map((n,i)=>n+snapshot.bounds[i]),direction=camera.getWorldDirection(new THREE.Vector3()),yaw=(THREE.MathUtils.radToDeg(Math.atan2(direction.x,-direction.z))+360)%360,pitch=THREE.MathUtils.radToDeg(Math.asin(direction.y));[...p,yaw,pitch].forEach((n,i)=>$(cameraFields[i]).value=String(Math.round(n*100)/100));if(force){cameraDirty=false;cameraDraft.clear();}}
 function moveSpeed(){return THREE.MathUtils.clamp(Number($('camera-speed').value)||20,.1,2048);}
 function resetNavigation(){heldKeys.clear();flyLook=null;}
-function cameraMode(){controls.enabled=!fly&&!capturing;$('fly-toggle').classList.toggle('active',fly);$('fly-toggle').textContent=fly?'自由相机':'环绕相机';$('control-hint').textContent=fly?'右键转头 · WASD 移动 · 空格/E 上升 · Q/C 下降 · Shift 加速 · 中键平移':'右键环绕 · 中键平移 · 滚轮缩放';}
+function cameraMode(){controls.enabled=!fly&&!capturing;$('fly-toggle').classList.toggle('active',fly);$('fly-toggle').textContent=fly?'自由相机':'环绕相机';$('control-hint').textContent=fly?'右键转头 · WASD 移动 · 空格 上升 · Q/C 下降 · Shift 加速 · 中键平移':'右键环绕 · 中键平移 · 滚轮缩放';}
 function atmosphere(){scene.background.set(settings.display_mode==='editor'?'#14171c':'#b8d4ed');if(grid)grid.visible=settings.show_grid;if(outline)outline.visible=settings.show_selection;diffGroup.visible=settings.display_mode==='editor';requestDraw();}
 const usesIris=()=>iris.active&&settings.display_mode==='scene'&&!!snapshot&&!!region;
-const sceneKey=()=>[region.snapshot_hash??region.id,region.environment_revision??lod.info?.environment_revision,geometryBuilds,lod.enabled?lod.signature:'',lod.meshes.size].join(':');
+const sceneKey=()=>[region.snapshot_hash??region.id,region.environment_revision??(lod.enabled?lod.info?.environment_revision:undefined),geometryBuilds,lod.enabled?lod.signature:'',lod.enabled?lod.coverageKey:''].join(':');
 const displayedCamera=()=>!usesIris()||iris.canvas.hidden?camera:iris.presented?.key===sceneKey()?iris.presented.camera:null;
 function drawViewport(){
  const shaded=usesIris();
  view.classList.toggle('iris-active',shaded);
- if(!shaded||iris.canvas.hidden)renderer.render(scene,camera);
- if(shaded&&(lod.meshes.size||chunks.meshes().length)){
+ if(shaded){
   iris.show({lod,chunks,snapshot,region,camera,width:renderer.domElement.width,height:renderer.domElement.height,key:sceneKey()});
- }
+ }else iris.setView(null);
+ if(!shaded||iris.canvas.hidden)renderer.render(scene,camera);
 }
 function planningTool(){return sceneSketch.active;}
 function setTool(name){
@@ -134,10 +149,13 @@ function setTool(name){
  refreshPlanningControls();
  requestPlanOverlay(true);
 }
-function clearDocument(){
+function clearDocument({keepWorld=false,keepLocal=false}={}){
  resetNavigation();
- region=null;snapshot=null;residentGeometry=null;chunks.reset({chunks:[]},319);
- lod.enabled=false;lod.clear();sceneLoading.hidden=true;
+ region=null;snapshot=null;showGeometry(localGeometry,false);showGeometry(worldGeometry,false);
+ if(!keepLocal){residentGeometry=null;chunks.reset({chunks:[]},319);}
+ lod.enabled=false;
+ if(!keepWorld)lod.clear();
+ sceneLoading.hidden=true;
  clearSceneSketch();
  planOverlay.draw(null,null);
  for(const mesh of [outline,grid,blockOutline])if(mesh){scene.remove(mesh);mesh.geometry.dispose();mesh.material.dispose();}
@@ -288,10 +306,9 @@ function markers(){
   changes.forEach((c,i)=>{matrix.makeTranslation(...c.coordinate.map((v,n)=>v-s[n]+.5));mesh.setMatrixAt(i,matrix);});mesh.renderOrder=8;diffGroup.add(mesh);
  }
 }
-function renderScene(incomingDelta,visibilityOnly=false){
- const wanted=snapshot,wantedRegion=region,config={...settings};
+function renderScene(wanted,wantedRegion,config,{incomingDelta,visibilityOnly=false,current,commit}){
  const run=async()=>{
-  if(wanted!==snapshot||wantedRegion!==region)return;
+  if(!current())return;
   // Snapshot identity includes the neighboring block states used for face culling.
   const profile=[config.min_y,config.max_y,!!config.show_invisible].join(':');
   const previous=residentGeometry;
@@ -308,21 +325,20 @@ function renderScene(incomingDelta,visibilityOnly=false){
     :new Set([...Object.values(wanted.blocks),...Object.values(wanted.context_blocks??{})]);
    const opaqueStates=delta?new Set(previous.opaqueStates):new Set();
    await Promise.all([...states].map(async state=>{if(await opaqueModel(state,wanted.minecraft))opaqueStates.add(state);}));
-   if(wanted!==snapshot||wantedRegion!==region)return;
-   residentGeometry=null;
-   chunks.origin=wanted.bounds.slice(0,3);
-   if(delta)chunks.index=patchLocalIndex(chunks.index,wanted,dirty,opaqueStates);
-   else chunks.reset(makeIndex(wanted,1,{cull:true,opaqueStates}),config.max_y,config.min_y);
+   if(!current())return;
+   const index=delta?patchLocalIndex(chunks.index,wanted,dirty,opaqueStates):makeIndex(wanted,1,{cull:true,opaqueStates});
    while(chunks.busy)await new Promise(r=>setTimeout(r,10));
    const updated=await chunks.update((wanted.bounds[0]+wanted.bounds[3]+1)/2,(wanted.bounds[2]+wanted.bounds[5]+1)/2,256,256,{
     chooseVariants:chooseVariantGroups,minecraft:wanted.minecraft,
-    parts:(state,options)=>parts(state,{...options,minecraft:wanted.minecraft},!!config.show_invisible),dirty,prepare:awaitTextures
+    parts:(state,options)=>parts(state,{...options,minecraft:wanted.minecraft},!!config.show_invisible),dirty,prepare:awaitTextures,
+    geometry:{index,cap:config.max_y,min:config.min_y,origin:wanted.bounds.slice(0,3),replace:!delta},isCurrent:current
    });
-   if(wanted!==snapshot||wantedRegion!==region)return;
-   residentGeometry={hash:wantedRegion.snapshot_hash,snapshot:wanted,profile,opaqueStates};
+   if(!updated)return;
+   residentGeometry={hash:wantedRegion.snapshot_hash,snapshot:wanted,profile,opaqueStates,vertices:localVertices(chunks)};
    meshUpdate={mode:delta?'partial':'full',...updated};
    geometryBuilds++;
   }
+  commit();
   markers();atmosphere();
   const active=[...new Set(chunks.meshes().map(m=>m.userData.s))].filter(s=>unsupported.has(s));
   ui.setLimits(active.length?'以下状态使用粉色占位：\n'+active.join('\n'):'实际方块模型与材质已就绪；光照、流体、实体及方块实体细节仍有差异。');ui.stats(chunks.stats.activeBlocks);
@@ -330,8 +346,37 @@ function renderScene(incomingDelta,visibilityOnly=false){
  };
  renderQueue=renderQueue.catch(()=>{}).then(run);return renderQueue;
 }
-async function configureInvisible(value){let map;if(value){const mat=invisibleMarkerMaterial();await awaitTextures([mat]);map=mat.map;}lod.setShowInvisible(!!value,map);requestDraw();}
-async function setView(next){if(sceneChanging||capturing)return;const layers=next.min_y!==undefined&&next.min_y!==settings.min_y||next.max_y!==undefined&&next.max_y!==settings.max_y,invisible=next.show_invisible!==undefined&&next.show_invisible!==settings.show_invisible;settings={...settings,...next};if(invisible)await configureInvisible(settings.show_invisible);atmosphere();ui.setViewFields(settings);if(snapshot&&(layers||invisible)&&!region.panorama){await renderScene();if(layers&&lod.enabled)updateWorldVolume().catch(error=>ui.say(String(error)));}}
+async function invisibleMap(value){
+ if(!value)return;
+ const material=invisibleMarkerMaterial();
+ await awaitTextures([material]);
+ return material.map;
+}
+async function configureInvisible(value){lod.setShowInvisible(!!value,await invisibleMap(value));requestDraw();}
+let pendingView;
+async function setView(next){
+ if(sceneChanging||capturing)return;
+ const owner=region,snap=snapshot,config={...(pendingView??settings),...next};
+ pendingView=config;
+ const current=()=>pendingView===config&&region===owner&&snapshot===snap;
+ const layers=config.min_y!==settings.min_y||config.max_y!==settings.max_y;
+ const invisible=config.show_invisible!==settings.show_invisible;
+ try{
+  const map=invisible?await invisibleMap(config.show_invisible):undefined;
+  if(!current())return;
+  const commit=()=>{
+   settings=config;
+   if(invisible)lod.setShowInvisible(!!config.show_invisible,map);
+   ui.setViewFields(settings);
+  };
+  if(snap&&(layers||invisible)&&!owner.panorama){
+   if(await renderScene(snap,owner,config,{current,commit})&&layers&&lod.enabled)updateWorldVolume().catch(error=>ui.say(String(error)));
+  }else{commit();atmosphere();}
+ }catch(error){
+  if(current())ui.setViewFields(settings);
+  throw error;
+ }finally{if(pendingView===config)pendingView=undefined;}
+}
 function frame(name='isometric',width=view.clientWidth,height=view.clientHeight,custom){
  const b=region.bounds,focus=[...b];focus[1]=Math.max(b[1],settings.min_y);focus[4]=Math.max(focus[1],Math.min(b[4],settings.max_y));
  const center=region.focus_position?[region.focus_position[0],THREE.MathUtils.clamp(region.focus_position[1],focus[1],focus[4]+1),region.focus_position[2]]:focus.slice(0,3).map((n,i)=>(n+focus[i+3]+1)/2);
@@ -346,7 +391,7 @@ function frame(name='isometric',width=view.clientWidth,height=view.clientHeight,
 }
 function described(){return {region_id:region.id,snapshot_hash:region.snapshot_hash,positions:Object.keys(snapshot.blocks).length,unsupported_states:[...new Set(chunks.meshes().map(m=>m.userData.s))].filter(s=>unsupported.has(s))};}
 function applySceneCamera(pose){
- if(pose?.world_uuid!==region?.world_uuid||!['position','target'].every(key=>Array.isArray(pose[key])&&pose[key].length===3&&pose[key].every(Number.isFinite)))return false;
+ if(!pose||pose.world_uuid!==region?.world_uuid||!['position','target'].every(key=>Array.isArray(pose[key])&&pose[key].length===3&&pose[key].every(Number.isFinite)))return false;
  resetNavigation();
  const damping=controls.enableDamping;
  controls.enableDamping=false;controls.update();controls.enableDamping=damping;
@@ -357,7 +402,18 @@ function applySceneCamera(pose){
  syncCameraFields(true);
  return true;
 }
-function sceneView(){if(macro.active)return {mode:'map',view:macro.getView()};if(!snapshot)return {mode:'empty'};const position=camera.position.toArray().map((n,i)=>n+snapshot.bounds[i]),target=controls.target.toArray().map((n,i)=>n+snapshot.bounds[i]),direction=camera.getWorldDirection(new THREE.Vector3());return {mode:fly?'free':'orbit',panoramic:!!region.panorama,view_id:region.view_id,label:region.label,position,target,up:camera.up.toArray(),yaw:(THREE.MathUtils.radToDeg(Math.atan2(direction.x,-direction.z))+360)%360,pitch:THREE.MathUtils.radToDeg(Math.asin(direction.y)),fov:camera.fov,width:view.clientWidth,height:view.clientHeight,world_uuid:region.world_uuid,region_id:region.panorama?undefined:region.id,world_revision:region.world_revision,render_stats:{viewport_frames:viewportFrames,texture_animation_frames:textureAnimationFrames,draw_calls:renderer.info.render.calls,triangles:renderer.info.render.triangles,gpu_geometries:renderer.info.memory.geometries,gpu_textures:renderer.info.memory.textures,model_tiles:lod.meshes.size,model_tiles_baked:lod.bakedTiles,model_vertices:lod.loadedVertices??0,local_geometry_builds:geometryBuilds,cached_tiles:lod.cache.size,loading:!!lod.loading}};}
+function backgroundVertexBudget(){
+ return Math.max(0,lod.capacity.maxVertices-(region?.panorama?0:residentGeometry?.vertices??0));
+}
+function sceneView(){
+ const {cpuTiles,residentTiles,streamTiles,initialTiles,maxVertices}=lod.capacity;
+ const render_capacity={cpu_tiles:cpuTiles,resident_tiles:residentTiles,stream_tiles:streamTiles,initial_tiles:initialTiles,
+  max_vertices:maxVertices,background_vertex_budget:backgroundVertexBudget(),hardware:renderHardware};
+ if(macro.active)return {mode:'map',view:macro.getView(),render_stats:{render_capacity}};
+ if(!snapshot)return {mode:'empty',render_stats:{render_capacity}};
+ const position=camera.position.toArray().map((n,i)=>n+snapshot.bounds[i]),target=controls.target.toArray().map((n,i)=>n+snapshot.bounds[i]),direction=camera.getWorldDirection(new THREE.Vector3());
+ return {mode:fly?'free':'orbit',panoramic:!!region.panorama,view_id:region.view_id,label:region.label,position,target,up:camera.up.toArray(),yaw:(THREE.MathUtils.radToDeg(Math.atan2(direction.x,-direction.z))+360)%360,pitch:THREE.MathUtils.radToDeg(Math.asin(direction.y)),fov:camera.fov,width:view.clientWidth,height:view.clientHeight,world_uuid:region.world_uuid,region_id:region.panorama?undefined:region.id,world_revision:region.world_revision,render_stats:{render_capacity,viewport_frames:viewportFrames,texture_animation_frames:textureAnimationFrames,draw_calls:renderer.info.render.calls,triangles:renderer.info.render.triangles,gpu_geometries:renderer.info.memory.geometries,gpu_textures:renderer.info.memory.textures,model_tiles:lod.enabled?lod.meshes.size:0,model_tiles_baked:lod.bakedTiles,model_tiles_read:lod.tileReads,model_tile_update:lod.lastUpdate,visibility_revision:lod.info?.visibility_revision??'',model_vertices:lod.enabled?lod.loadedVertices??0:0,local_geometry_builds:geometryBuilds,cached_tiles:lod.cache.size,loading:!!lod.loading}};
+}
 function localVertices(collection){
  return collection.meshes().reduce((n,mesh)=>n+mesh.count*(mesh.geometry.index?.count??mesh.geometry.getAttribute('position').count),0);
 }
@@ -366,24 +422,77 @@ async function updateWorldVolume(tileLimit){
  const owner=region,origin=snapshot.bounds.slice(0,3);
  const eye=camera.position.toArray().map((n,i)=>n+origin[i]),target=controls.target.toArray().map((n,i)=>n+origin[i]);
  const cut=owner.panorama?null:snapshot.bounds;
- const budget=Math.max(0,MAX_SCENE_VERTICES-(owner.panorama?0:localVertices(chunks)));
+ const budget=backgroundVertexBudget();
  volumeLoadEye=eye;
  await lod.update(target[0],target[2],camera.position.distanceTo(controls.target),origin,cut,eye,undefined,captureFrustum(camera),budget,tileLimit);
- if(owner!==region)return;
+ if(owner!==region||lod.loading||lod.residentRevision!==lod.info?.revision)return;
  if(owner.panorama){
+  // Prefer visible world geometry when retaining the last local view would exceed the scene budget.
+  if(residentGeometry&&residentGeometry.vertices+lod.loadedVertices>lod.capacity.maxVertices){
+   residentGeometry=null;chunks.reset({chunks:[]},319);
+  }
   const resident=lod.meshes.size,total=lod.tiles.length;
   $('render-stats').textContent=resident+' / '+total+' 图块 · 完整材质';
   $('source-status').textContent=lod.allTilesResident?'全部实景图块已加载 · 自由相机':'按视角加载实景模型';
  }else $('source-status').textContent=lod.omittedTiles?'已载入选区周围的实景模型 · 部分远处图块未驻留':'选区周围的实景模型已载入';
  requestDraw();
 }
-let volumeQueued=false,lastVolumeRefresh=0,volumeLoadEye,refiningVolumeIndex;
+let volumeQueued=false,lastVolumeRefresh=0,volumeLoadEye,refiningVolumeIndex,preparingVolumeFor;
+let renderHardware=null,probingCapacity=false,capacityChanged=false;
+function rendererHint(){
+ try{
+  const gl=renderer.getContext(),debug=gl.getExtension('WEBGL_debug_renderer_info');
+  if(debug)return gl.getParameter(debug.UNMASKED_RENDERER_WEBGL)||undefined;
+ }catch{/* Some WebViews restrict adapter identification. */}
+}
+async function refreshRenderCapacity(){
+ if(probingCapacity)return;
+ probingCapacity=true;
+ try{
+  const adapter=rendererHint();
+  const metrics=await invoke('render_capacity',adapter?{renderer:adapter}:{});
+  if(!metrics)return;
+  const capacity=chooseRenderCapacity(metrics,renderHardware?lod.capacity:undefined);
+  renderHardware=metrics;
+  if(lod.setCapacity(capacity)){
+   if(!lod.enabled&&residentGeometry&&residentGeometry.vertices+lod.loadedVertices>capacity.maxVertices)lod.clear();
+   capacityChanged=true;
+   volumeQueued=true;
+  }
+ }catch{/* Native capacity discovery is optional. The current budget remains usable. */}
+ finally{probingCapacity=false;}
+}
+void refreshRenderCapacity();
+setInterval(()=>{if(!document.hidden&&!macro.active&&!capturing)void refreshRenderCapacity();},60000);
+let constructionChange=0;
+function syncConstruction(revision){
+ const owner=region,ticket=++constructionChange;
+ if(!owner||macro.active)return;
+ const refreshLocal=owner.transient&&owner.source==='saved_anvil_detail'&&owner.focus_position&&!macro.matchesConstruction(owner);
+ if(!refreshLocal){
+  if(!lod.enabled)return;
+  if((lod.info?.visibility_revision??'')===revision)return;
+  api('world_scene_info',{preview:true,render_view:true}).then(async info=>{
+   if(ticket!==constructionChange||region!==owner||macro.active)return;
+   await lod.initialize(info);
+   volumeQueued=true;
+   if(info.preview_index)refineVolumeIndex(info);
+  }).catch(error=>{if(ticket===constructionChange)ui.say(String(error));});
+  return;
+ }
+ const [x,y,z]=owner.focus_position;
+ api('browse_world',{x:Math.floor(x),y,z:Math.floor(z),plan_id:owner.detail_for_plan_id,view_id:owner.view_id,label:owner.label,
+  keep_camera:true,allow_saved:true,expected_region_id:owner.id}).catch(error=>{if(ticket===constructionChange)ui.say(String(error));});
+}
 function refineVolumeIndex(info){
- if(!info?.preview_index||refiningVolumeIndex?.revision===info.revision)return;
- const pending={revision:info.revision};
+ if(!info?.preview_index)return;
+ const key=[info.revision,info.visibility_revision].join(':');
+ if(refiningVolumeIndex?.key===key)return;
+ const pending={key};
  refiningVolumeIndex=pending;
- api('world_scene_info').then(async exact=>{
-  if(lod.info?.revision!==exact.revision||exact.revision!==info.revision||!lod.info.preview_index||!exact.bounds||!lod.enabled)return;
+ api('world_scene_info',{render_view:true}).then(async exact=>{
+  if(lod.info?.revision!==exact.revision||exact.revision!==info.revision||(lod.info?.visibility_revision??'')!==(exact.visibility_revision??'')||
+     !lod.info.preview_index||!exact.bounds||!lod.enabled)return;
   await lod.initialize(exact);
   volumeQueued=true;
   if(region?.panorama)$('object-summary').textContent=exact.occupied_chunks.length+' 个有内容区块 · 全部使用方块模型与贴图\n自由移动观察，双击表面进入方块编辑';
@@ -393,11 +502,11 @@ function refineVolumeIndex(info){
 }
 function scheduleVolumeRefresh(now,moved){
  volumeQueued||=moved;
- if(!volumeQueued||!lod.enabled||sceneChanging||now-lastVolumeRefresh<240)return;
- if(lod.allTilesResident){volumeQueued=false;return;}
+ if(!volumeQueued||!lod.enabled||sceneChanging||preparingVolumeFor===region||now-lastVolumeRefresh<240)return;
+ if(lod.allTilesResident&&!capacityChanged){volumeQueued=false;return;}
  if(lod.loading&&(!volumeLoadEye||!snapshot||
   Math.hypot(camera.position.x+snapshot.bounds[0]-volumeLoadEye[0],camera.position.z+snapshot.bounds[2]-volumeLoadEye[2])<96))return;
- volumeQueued=false;
+ volumeQueued=false;capacityChanged=false;
  lastVolumeRefresh=now;
  updateWorldVolume().catch(error=>ui.say(String(error)));
 }
@@ -409,19 +518,21 @@ function restoredSettings(defaults,saved,bounds){
 }
 async function openPanorama(q){
  if(!q.scene.bounds)throw Error('当前存档中没有可预览的完整三维内容');
- const info=q.scene.occupied_chunks?q.scene:await api('world_scene_info',{preview:true});
+ const info=q.scene.occupied_chunks?q.scene:await api('world_scene_info',{preview:true,render_view:true});
  if(info.revision!==q.scene.revision)throw Error('打开期间存档已变化，请刷新三维视图');
  ui.rememberView();
- const b=q.scene.bounds,sameWorld=region?.panorama&&region.world_uuid===q.scene.world_uuid&&
-  region.world_revision===q.scene.revision&&lod.meshes.size&&!lod.loading;
+ const b=q.scene.bounds,compatible=lod.info?.world_uuid===q.scene.world_uuid&&lod.info.revision===info.revision;
+ const sameWorld=compatible&&lod.residentRevision===info.revision&&lod.meshes.size>0;
  const next={id:'world-scene',view_id:q.view_id,panorama:true,transient:true,label:q.label??'全景三维',bounds:b,loaded_bounds:b,
   source:'saved_anvil_volume',world:q.scene.world,world_uuid:q.scene.world_uuid,world_revision:q.scene.revision,environment_revision:q.scene.environment_revision};
  const saved=ui.storedView(next);
- if(!sameWorld)clearDocument();
- else clearSceneSketch();
+ const keepLocal=residentGeometry?.snapshot.uuid===q.scene.world_uuid;
+ clearDocument({keepWorld:compatible,keepLocal});
  fly=true;
  snapshot={bounds:b,blocks:{}};
  region=next;
+ lod.rebase(b.slice(0,3),null);
+ lod.enabled=true;showGeometry(worldGeometry,true);
  settings=restoredSettings({min_y:b[1],max_y:b[4],show_selection:false,show_grid:false,show_plans:false,
   show_invisible:settings.show_invisible??false,display_mode:'scene'},saved?.view,b);
  macro.showDetail();
@@ -429,7 +540,6 @@ async function openPanorama(q){
  await macro.refresh();
  await lod.initialize(info);
  await configureInvisible(settings.show_invisible);
- lod.enabled=true;
  if(!applySceneCamera(q.camera??saved?.camera??q.scene.initial_camera))frame('isometric');
  ui.setRegion(region);ui.setViewFields(settings);ui.toolChanged('orbit');
  $('source-state').textContent='存档全景三维';
@@ -437,12 +547,12 @@ async function openPanorama(q){
  $('object-summary').textContent=info.occupied_chunks.length+(info.preview_index?' 个候选区块 · 相机周围优先加载':' 个有内容区块 · 全部使用方块模型与贴图')+'\n自由移动观察，双击表面进入方块编辑';
  ui.setLimits(q.scene.limits);
  if(info.progressive_loading&&!sameWorld){
-  await updateWorldVolume(6);
+  await updateWorldVolume(lod.capacity.initialTiles);
   volumeQueued=true;
  }else await updateWorldVolume();
  refineVolumeIndex(info);
  cameraMode();
- ui.say(info.progressive_loading&&!sameWorld?'附近区块已就绪 · 其余区块继续加载':'实景已就绪 · WASD 移动，右键转头，E/空格上升，Q/C 下降');
+ ui.say(info.progressive_loading&&!sameWorld?'附近区块已就绪 · 其余区块继续加载':'实景已就绪 · WASD 移动，右键转头，空格上升，Q/C 下降');
  return {world_uuid:region.world_uuid,world_revision:q.scene.revision,view_id:region.view_id,representation:'minecraft_block_models',tiles:lod.meshes.size};
 }
 let captureAnimationTime=0;
@@ -468,7 +578,7 @@ async function captureScope(callback){
 function snapshotHeight(data,x,z){
  const b=data.snapshot.bounds,ix=Math.floor(x),iz=Math.floor(z);
  const local=!data.region.panorama&&ix>=b[0]&&ix<=b[3]&&iz>=b[2]&&iz<=b[5];
- const source=local?b:data.lod.info?.bounds;
+ const source=local?b:data.lod.enabled&&data.lod.info?.bounds;
  for(let y=source?.[4]??-65;y>=(source?.[1]??-64);y--){
   const state=local?data.snapshot.blocks[[ix,y,iz].join(',')]:data.lod.stateAt(ix,y,iz);
   if(state&&!/^minecraft:(air|cave_air|void_air|barrier|structure_void|light)(\[|$)/.test(state))return y;
@@ -499,6 +609,7 @@ async function capturePanorama(q){
   if(plans.revision!==q.planning_revision)throw Error('规划已变化，请重新截图');
   const bounds=q.scene.bounds,scene=captureScene('scene');
   const staged=new TexturedWorld(scene,api,parts,undefined,chooseVariantGroups);
+  staged.setCapacity(lod.capacity);
   const placed={...q.scene,id:'capture-world',panorama:true,loaded_bounds:bounds};
   const snap={bounds,blocks:{}};
   const requested=current?[{...current,name:'当前实景'}]:q.views?.length?q.views:q.angles.map(name=>({name}));
@@ -525,40 +636,58 @@ async function capturePanorama(q){
 async function display(q){
  if(!macro.acceptsDetail(q.navigation_id))return {cancelled:true};
  ui.rememberView();
- const saved=q.region.view_id?ui.storedView(q.region):null;
- const visibilityOnly=!!q.expected_region_id,previousSettings=settings;
- const oldOrigin=snapshot?.bounds.slice(0,3),worldPosition=oldOrigin?camera.position.toArray().map((v,i)=>v+oldOrigin[i]):null,worldTarget=oldOrigin?controls.target.toArray().map((v,i)=>v+oldOrigin[i]):null;
- if(blockOutline&&(region?.snapshot_hash!==q.region.snapshot_hash||region?.view_id!==q.region.view_id||region?.draft_id!==q.region.draft_id)){
-  scene.remove(blockOutline);blockOutline.geometry.dispose();blockOutline.material.dispose();blockOutline=null;
- }
- snapshot=q.snapshot;region=q.region;macro.showDetail();
- const construction=Number.isInteger(region.construction_y),edit=region.source==='design_draft'&&region.preview_mode==='diff';
- settings={min_y:snapshot.bounds[1],max_y:snapshot.bounds[4],show_selection:edit?$('outline').checked:false,
-  show_grid:construction||(edit&&$('grid').checked),show_plans:construction||!!region.detail_for_plan_id,
+ const oldRegion=region,saved=q.region.view_id?ui.storedView(q.region):ui.restoringView(q.region),visibilityOnly=!!q.expected_region_id;
+ const current=()=>region===oldRegion&&macro.acceptsDetail(q.navigation_id)&&(!visibilityOnly||!macro.active&&
+  (q.region.source!=='saved_anvil_detail'||macro.matchesConstruction(q.region)));
+ if(!current())return {cancelled:true};
+ const oldCamera=snapshot&&region?.world_uuid===q.region.world_uuid&&q.region.keep_camera?sceneView():null;
+ const bounds=q.snapshot.bounds,construction=Number.isInteger(q.region.construction_y),edit=q.region.preview_mode==='diff';
+ const defaults={min_y:bounds[1],max_y:bounds[4],show_selection:edit?$('outline').checked:false,
+  show_grid:construction||(edit&&$('grid').checked),show_plans:construction||!!q.region.detail_for_plan_id,
   show_invisible:settings.show_invisible??false,display_mode:edit||construction?'editor':'scene'};
- settings=restoredSettings(settings,visibilityOnly?previousSettings:saved?.view,snapshot.bounds);
- corner=null;controls.enabled=!fly;
- if(grid){scene.remove(grid);grid.geometry.dispose();grid.material.dispose();}
- const width=snapshot.bounds[3]-snapshot.bounds[0]+1,depth=snapshot.bounds[5]-snapshot.bounds[2]+1;
- const size=construction?Math.max(width,depth):Math.ceil(Math.max(width,depth)*2/16)*16;
- grid=new THREE.GridHelper(size,size,0x557f83,0x304952);
- grid.position.set(Math.floor(width/2),construction?region.construction_y-snapshot.bounds[1]-.002:-.03,Math.floor(depth/2));scene.add(grid);
- const meshUpdate=await renderScene(q.snapshot_delta,visibilityOnly);
- if(!macro.acceptsDetail(q.navigation_id)||visibilityOnly&&macro.active)return {cancelled:true};
- if(region.keep_camera&&worldPosition){camera.position.copy(local(worldPosition));controls.target.copy(local(worldTarget));camera.lookAt(controls.target);}else frame();
- applySceneCamera(q.camera??saved?.camera);
- lod.enabled=!!region.transient&&!region.pristine_void;
- if(!lod.enabled)lod.clear();else lod.rebase(snapshot.bounds.slice(0,3));
+ const retainingView=visibilityOnly||!!oldCamera?.position;
+ const remembered=retainingView?settings:saved?.view;
+ const previousMode=retainingView?oldRegion?.preview_mode:saved?.region.preview_mode;
+ const config=restoredSettings(defaults,remembered&&previousMode!==q.region.preview_mode?
+  {...remembered,display_mode:defaults.display_mode}:remembered,bounds);
+ const marker=await invisibleMap(config.show_invisible);
+ const meshUpdate=await renderScene(q.snapshot,q.region,config,{incomingDelta:q.snapshot_delta,visibilityOnly,current,commit(){
+  if(blockOutline&&(region?.snapshot_hash!==q.region.snapshot_hash||region?.view_id!==q.region.view_id||region?.draft_id!==q.region.draft_id)){
+   scene.remove(blockOutline);blockOutline.geometry.dispose();blockOutline.material.dispose();blockOutline=null;
+  }
+  snapshot=q.snapshot;region=q.region;settings=config;pendingView=undefined;
+  macro.showDetail();
+  corner=null;
+  if(grid){scene.remove(grid);grid.geometry.dispose();grid.material.dispose();}
+  const width=bounds[3]-bounds[0]+1,depth=bounds[5]-bounds[2]+1;
+  const size=construction?Math.max(width,depth):Math.ceil(Math.max(width,depth)*2/16)*16;
+  grid=new THREE.GridHelper(size,size,0x557f83,0x304952);
+  grid.position.set(Math.floor(width/2),construction?region.construction_y-bounds[1]-.002:-.03,Math.floor(depth/2));scene.add(grid);
+  if(!applySceneCamera(q.camera??(oldCamera?.position?oldCamera:saved?.camera)))frame();
+  showGeometry(localGeometry,true);
+  const compatible=lod.info?.world_uuid===region.world_uuid&&(!region.world_revision||lod.info.revision===region.world_revision);
+  if(!compatible||!region.transient&&residentGeometry.vertices+lod.loadedVertices>lod.capacity.maxVertices)lod.clear();
+  lod.enabled=!!region.transient&&!region.pristine_void;showGeometry(worldGeometry,lod.enabled);
+  if(lod.enabled)lod.rebase(bounds.slice(0,3),bounds);
+  else if(lod.loading)lod.cancelUpdate();
+  lod.setShowInvisible(!!config.show_invisible,marker);
+ }});
+ if(!meshUpdate)return {cancelled:true};
  ui.setRegion(region);ui.setViewFields(settings);ui.toolChanged(tool);cameraMode();
  macro.completeDetail(q.navigation_id);
  if(lod.enabled){
-  if(!lod.info||region.world_revision&&lod.info.revision!==region.world_revision||region.environment_revision&&lod.info.environment_revision!==region.environment_revision){
-   await lod.initialize(await api('world_scene_info',{preview:true}));
-  }
-  const info=lod.info;
-  updateWorldVolume(info.preview_index&&!lod.meshes.size?6:undefined).then(()=>{
+  const owner=region;
+  preparingVolumeFor=owner;
+  const readIndex=lod.info?.world_uuid!==owner.world_uuid||!lod.info||owner.world_revision&&lod.info.revision!==owner.world_revision||owner.environment_revision&&lod.info.environment_revision!==owner.environment_revision||
+   (owner.construction_visibility??'')!==(lod.info.visibility_revision??'');
+  const ready=readIndex?api('world_scene_info',{preview:true,render_view:true}):Promise.resolve(lod.info);
+  ready.then(async info=>{
+   if(region!==owner)return;
+   if(readIndex)await lod.initialize(info);
+   if(region!==owner)return;
+   await updateWorldVolume(info.preview_index&&!lod.meshes.size?lod.capacity.initialTiles:undefined);
    if(info.preview_index&&lod.info?.revision===info.revision)refineVolumeIndex(info);
-  }).catch(error=>ui.say(String(error)));
+  }).catch(error=>ui.say(String(error))).finally(()=>{if(preparingVolumeFor===owner)preparingVolumeFor=undefined;});
  }
  return {...described(),geometry_reused:meshUpdate?.mode==='reused',local_geometry_builds:geometryBuilds,local_mesh_update:meshUpdate};
 }
@@ -566,6 +695,7 @@ async function captures(q){
  return captureScope(async()=>{
   const r=q.region,snap=q.snapshot,origin=snap.bounds.slice(0,3);
   const scene=captureScene(q.display_mode),staged=new TexturedWorld(scene,api,parts,undefined,chooseVariantGroups);
+  staged.setCapacity(lod.capacity);
   const localChunks=new ChunkRenderer(scene,(s,o)=>parts(s,{...o,minecraft:snap.minecraft},!!q.show_invisible),origin);
   const helpers=[];
   try{
@@ -619,10 +749,10 @@ async function captureViewport(q){
   const viewCamera=captureCamera(q.width,q.height,snap.bounds,r.bounds,pose);
   const data={scene,lod,chunks,snapshot:snap,region:r,key:sceneKey()};
   const {images,report}=await exportViews({...q,...viewSettings},data,plans,[{...viewCamera,name:'当前完整实景'}]);
-  return {images,region_id:r.panorama?undefined:r.id,snapshot_hash:r.snapshot_hash,world_uuid:r.world_uuid,world_revision:lod.info?.revision,
+  return {images,region_id:r.panorama?undefined:r.id,snapshot_hash:r.snapshot_hash,world_uuid:r.world_uuid,world_revision:lod.enabled?lod.info?.revision:r.world_revision,
    bounds:snap.bounds,draft_id:r.draft_id,draft_revision:r.draft_revision,preview_mode:r.preview_mode,
-   view:{...viewSettings,iris:report,includes_background:!!lod.meshes.size},planning_snapshot:plans,
-   scene_geometry:{...(lod.atlas?lod.evidence():{tiles:[],models:{}}),representation:'minecraft_block_models_composite',
+   view:{...viewSettings,iris:report,includes_background:lod.enabled&&!!lod.meshes.size},planning_snapshot:plans,
+   scene_geometry:{...(lod.enabled&&lod.atlas?lod.evidence():{tiles:[],models:{}}),representation:'minecraft_block_models_composite',
     local_region:r.panorama?undefined:{id:r.id,snapshot_hash:r.snapshot_hash,bounds:snap.bounds,context_included:!!snap.context_blocks,view:viewSettings}},
    created_at:new Date().toISOString(),source:'workbench_composite_render',minecraft_client_screenshot:false};
  });
@@ -638,13 +768,33 @@ function planningLayoutDiagnostics(){
   heightHelp:$('plan-height-help').textContent,upperPlaceholder:$('plan-max-y').getAttribute('placeholder')};
 }
 let initialMapPending = !sessionStorage.getItem('terraweave-render-restore');
+let switchingProject=false;
+async function switchProject(id){
+ if(switchingProject||working||capturing||sceneChanging||ui.busy)throw Error('请等待当前工程的操作完成后再切换');
+ switchingProject=true;
+ try{
+  while(polling)await new Promise(resolve=>setTimeout(resolve,25));
+  ui.rememberView();
+  await macro.flushView();
+  await finishWorkbenchWrites();
+  await ui.recovery.flush();
+  const epoch=await invokeProject('switch_project',{id});
+  sessionStorage.removeItem('terraweave-render-restore');
+  const next=new URL(location.href);
+  next.searchParams.set('project_epoch',String(epoch));
+  location.replace(next.href);
+ }catch(error){
+  switchingProject=false;
+  throw error;
+ }
+}
 function restoreEditorSession(activateLast){
  setTimeout(()=>ui.restoreSession(activateLast).catch(error=>ui.say(String(error))),0);
 }
 async function poll(){
- if(polling)return;polling=true;
+ if(polling||switchingProject)return;polling=true;
  try{
-  const q=await invoke('workbench_poll');
+  const q=await invokeProject('workbench_poll');
   if (working) return;
   if (!q) {
    if (initialMapPending) {initialMapPending=false;await macro.open().catch(error=>ui.say(String(error)));restoreEditorSession(true);}
@@ -664,21 +814,22 @@ async function poll(){
    else if(q.kind==='world_scene')result=await openPanorama(q);
    else if(q.kind==='capture_scene')result=await capturePanorama(q);
    else if(q.kind==='capture_viewport')result=await captureViewport(q);
-   else if(q.kind==='planning_update'){await macro.refresh();result={planning_updated:true};}
+   else if(q.kind==='planning_update'){await macro.refresh(await readWorkbenchSnapshot({fresh:true}));result={planning_updated:true};}
+   else if(q.kind==='render_settings_changed'){await ui.recovery.flush();result={reload:true};}
    else if(q.kind==='draft_deleted')result=await ui.draftDeleted(q.draft_id);
    else if(q.kind==='capture_map')result=await macro.capture(q);
    else if(q.expected_region_id&&(macro.active||region?.id!==q.expected_region_id))result={cancelled:true};
    else if(q.kind==='display')result=await display(q);
    else if(q.kind==='display_cached'){
     if(!macro.acceptsDetail(q.navigation_id))result={cancelled:true};
-    else if(!snapshot||region?.snapshot_hash!==q.region.snapshot_hash)result={cache_miss:true};
-    else result={...await display({...q,snapshot}),snapshot_reused:true};
+    else if(!residentGeometry?.hash||residentGeometry.hash!==q.region.snapshot_hash)result={cache_miss:true};
+    else result={...await display({...q,snapshot:residentGeometry.snapshot}),snapshot_reused:true};
    }
    else if(q.kind==='display_delta'){
     const delta=q.snapshot_delta;
     if(!macro.acceptsDetail(q.navigation_id))result={cancelled:true};
-    else if(!snapshot||region?.snapshot_hash!==delta?.from_hash)result={cache_miss:true};
-    else result={...await display({...q,snapshot:applySnapshotDelta(snapshot,delta)}),snapshot_delta_applied:true};
+    else if(!residentGeometry?.hash||residentGeometry.hash!==delta?.from_hash)result={cache_miss:true};
+    else result={...await display({...q,snapshot:applySnapshotDelta(residentGeometry.snapshot,delta)}),snapshot_delta_applied:true};
    }
    else if(q.kind==='select'){
     if(!snapshot||q.region.snapshot_hash!==region.snapshot_hash)throw Error('请先打开对应快照');
@@ -689,7 +840,8 @@ async function poll(){
    response={ok:true,result};
   }catch(e){response={ok:false,error:String(e)};ui.say(String(e));}
   finally{sceneChanging=false;}
-  await invoke('workbench_complete',{id:q.id,result:response});
+  await invokeProject('workbench_complete',{id:q.id,result:response});
+  if(q.kind==='render_settings_changed'&&response.ok){reloadRenderSettings(sceneView());return;}
   if(initialiseSession)restoreEditorSession(openOnShow);
   if(!q.expected_region_id&&!['scene_view','show','planning_update'].includes(q.kind)&&!response.result?.cache_miss&&!response.result?.cancelled)ui.refresh();
  }catch(e){ui.say('工作台连接错误：'+String(e));}
@@ -713,7 +865,7 @@ function hit(e,pose=displayedCamera()){
  const previousFar=ray.far;
  try{
   ray.far=localHit?.distance??Infinity;
-  for(const intersection of ray.intersectObjects(lod.meshList(),false)){
+  for(const intersection of lod.enabled?ray.intersectObjects(lod.meshList(),false):[]){
    if(localHit&&intersection.distance>=localHit.distance)break;
    const block=lod.hitBlock(intersection);
    const covered=!region.panorama&&block.coordinate.every((n,i)=>n>=snapshot.bounds[i]&&n<=snapshot.bounds[i+3]);
@@ -839,18 +991,18 @@ window.addEventListener('blur',resetNavigation);
 document.addEventListener('visibilitychange',()=>{if(document.hidden)resetNavigation();});
 new ResizeObserver(()=>{if(!capturing)resizeViewport();}).observe(view);
 for(const button of document.querySelectorAll('[data-display-mode]'))button.onclick=()=>{const edit=button.dataset.displayMode==='editor';$('grid').checked=edit;$('outline').checked=edit;setView({display_mode:button.dataset.displayMode,show_grid:edit,show_selection:edit});};
-$('fly-toggle').onclick=()=>{if(capturing)return;resetNavigation();fly=!fly;cameraMode();ui.say(fly?'自由相机已开启 · 右键转头，WASD 移动，E/空格上升，Q/C 下降，Shift 加速':'环绕相机已开启');};
+$('fly-toggle').onclick=()=>{if(capturing)return;resetNavigation();fly=!fly;cameraMode();ui.say(fly?'自由相机已开启 · 右键转头，WASD 移动，空格上升，Q/C 下降，Shift 加速':'环绕相机已开启');};
 renderer.domElement.addEventListener('pointerdown',e=>{if(!capturing&&fly&&(e.button===2||e.button===1)){flyLook={x:e.clientX,y:e.clientY,mode:e.button===1?'pan':'look'};renderer.domElement.setPointerCapture(e.pointerId);}},true);
 renderer.domElement.addEventListener('pointermove',e=>{if(capturing||!fly||!flyLook)return;const dx=e.clientX-flyLook.x,dy=e.clientY-flyLook.y;if(flyLook.mode==='pan'){const right=new THREE.Vector3(1,0,0).applyQuaternion(camera.quaternion),up=new THREE.Vector3(0,1,0).applyQuaternion(camera.quaternion),move=right.multiplyScalar(-dx).addScaledVector(up,dy).multiplyScalar(moveSpeed()*.005);camera.position.add(move);controls.target.add(move);}else{const angles=new THREE.Euler().setFromQuaternion(camera.quaternion,'YXZ');angles.y-=dx*.004;angles.x=THREE.MathUtils.clamp(angles.x-dy*.004,-Math.PI/2+.01,Math.PI/2-.01);camera.quaternion.setFromEuler(angles);controls.target.copy(camera.position).add(camera.getWorldDirection(new THREE.Vector3()).multiplyScalar(24));}flyLook={...flyLook,x:e.clientX,y:e.clientY};});for(const event of ['pointerup','pointercancel','lostpointercapture'])renderer.domElement.addEventListener(event,()=>flyLook=null);
 renderer.domElement.addEventListener('wheel',e=>{if(macro.active||capturing)return;e.preventDefault();e.stopImmediatePropagation();const sensitivity=$('wheel-sensitivity').value;if(fly){const move=camera.getWorldDirection(new THREE.Vector3()).multiplyScalar(wheelTravel(e,sensitivity));camera.position.add(move);controls.target.add(move);}else{const offset=camera.position.clone().sub(controls.target),distance=offset.length(),next=THREE.MathUtils.clamp(distance*wheelZoomFactor(e,sensitivity),Math.max(.1,controls.minDistance),controls.maxDistance);if(distance)camera.position.copy(controls.target).addScaledVector(offset,next/distance);}},{capture:true,passive:false});
-document.addEventListener('keydown',e=>{if(capturing&&!e.target.closest('input,textarea,select')){e.preventDefault();e.stopImmediatePropagation();return;}if(e.target.closest('#camera-x,#camera-y,#camera-z,#camera-yaw,#camera-pitch')&&e.key==='Enter'){e.preventDefault();e.stopImmediatePropagation();$('set-camera-angle').click();return;}if(capturing||!fly||macro.active||e.target.closest('input,textarea,select')||e.ctrlKey||e.metaKey)return;if(['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE','KeyC','Space'].includes(e.code)){heldKeys.add(e.code);e.preventDefault();e.stopImmediatePropagation();}},true);
+document.addEventListener('keydown',e=>{if(capturing&&!e.target.closest('input,textarea,select')){e.preventDefault();e.stopImmediatePropagation();return;}if(e.target.closest('#camera-x,#camera-y,#camera-z,#camera-yaw,#camera-pitch')&&e.key==='Enter'){e.preventDefault();e.stopImmediatePropagation();$('set-camera-angle').click();return;}if(capturing||!fly||macro.active||e.target.closest('input,textarea,select')||e.ctrlKey||e.metaKey)return;if(['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyC','Space'].includes(e.code)){heldKeys.add(e.code);e.preventDefault();e.stopImmediatePropagation();}},true);
 $('set-camera-angle').onclick=()=>{if(!region||capturing)return;resetNavigation();const values=cameraFields.map(id=>{const value=cameraDraft.has(id)?cameraDraft.get(id):$(id).value;return value.trim()===''?NaN:Number(value);});if(!values.every(Number.isFinite)){ui.say('相机坐标和角度必须为有效数字');return;}const yaw=THREE.MathUtils.degToRad(values[3]),pitch=THREE.MathUtils.degToRad(THREE.MathUtils.clamp(values[4],-89.9,89.9)),direction=new THREE.Vector3(Math.sin(yaw)*Math.cos(pitch),Math.sin(pitch),-Math.cos(yaw)*Math.cos(pitch));const damping=controls.enableDamping;controls.enableDamping=false;controls.update();controls.enableDamping=damping;camera.position.copy(local(values.slice(0,3)));controls.target.copy(camera.position).addScaledVector(direction,24);camera.up.set(0,1,0);camera.lookAt(controls.target);syncCameraFields(true);ui.say('已应用相机位置与朝向');};
 function surfaceHeight(x,z){
  const bounds=snapshot?.bounds;
  if(!region||!bounds)return null;
  const ix=Math.floor(x),iz=Math.floor(z);
  const isLocal=!region.panorama&&ix>=bounds[0]&&ix<=bounds[3]&&iz>=bounds[2]&&iz<=bounds[5];
- const limits=isLocal?bounds:lod.info?.bounds;
+ const limits=isLocal?bounds:lod.enabled&&lod.info?.bounds;
  if(!limits)return null;
  for(let y=limits[4];y>=limits[1];y--){
   const block=isLocal?snapshot.blocks[[ix,y,iz].join(',')]:lod.stateAt(ix,y,iz);
@@ -882,8 +1034,8 @@ function updatePlanningTarget(now){
 let lastSessionPersist=0;
 renderer.setAnimationLoop(()=>{
  const now=performance.now(),delta=Math.min(.1,(now-lastFrame)/1000);lastFrame=now;if(capturing||macro.active)return;
- const localAnimation=chunks.animate(now),sceneAnimation=lod.animate(now);
- if(fly&&region&&heldKeys.size){const direction=camera.getWorldDirection(new THREE.Vector3()),side=new THREE.Vector3().crossVectors(direction,camera.up).normalize(),move=new THREE.Vector3(),speed=delta*moveSpeed()*(heldKeys.has('ShiftLeft')||heldKeys.has('ShiftRight')?4:1);if(heldKeys.has('KeyW'))move.add(direction);if(heldKeys.has('KeyS'))move.sub(direction);if(heldKeys.has('KeyD'))move.add(side);if(heldKeys.has('KeyA'))move.sub(side);if(heldKeys.has('Space')||heldKeys.has('KeyE'))move.y++;if(heldKeys.has('KeyC')||heldKeys.has('KeyQ'))move.y--;if(move.lengthSq())move.normalize().multiplyScalar(speed);camera.position.add(move);controls.target.add(move);}
+ const localAnimation=!!localGeometry.parent&&chunks.animate(now),sceneAnimation=lod.animate(now);
+ if(fly&&region&&heldKeys.size){const direction=camera.getWorldDirection(new THREE.Vector3()),side=new THREE.Vector3().crossVectors(direction,camera.up).normalize(),move=new THREE.Vector3(),speed=delta*moveSpeed()*(heldKeys.has('ShiftLeft')||heldKeys.has('ShiftRight')?4:1);if(heldKeys.has('KeyW'))move.add(direction);if(heldKeys.has('KeyS'))move.sub(direction);if(heldKeys.has('KeyD'))move.add(side);if(heldKeys.has('KeyA'))move.sub(side);if(heldKeys.has('Space'))move.y++;if(heldKeys.has('KeyC')||heldKeys.has('KeyQ'))move.y--;if(move.lengthSq())move.normalize().multiplyScalar(speed);camera.position.add(move);controls.target.add(move);}
  if(!fly)controls.update();
  updatePlanningOverlay();
  const cameraChanged=drawnPosition.distanceToSquared(camera.position)>1e-12||1-Math.abs(drawnRotation.dot(camera.quaternion))>1e-12;

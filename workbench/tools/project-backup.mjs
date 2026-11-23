@@ -91,15 +91,16 @@ export async function restoreProjectBackup(directory){
    if(copied.size!==file.size||copied.sha256!==file.sha256)throw Error('备份文件校验失败：'+name);
   }
   if(data.source){
-   const {owned,directory,world_uuid,level_sha256}=data.source;
+   const {owned,directory,world_uuid,paper_world_uuid,level_sha256}=data.source;
    if(typeof directory!=='string'||typeof world_uuid!=='string'||!(/^(?:local-[a-f0-9]{32}|[a-f0-9-]{36})$/i.test(world_uuid)))throw Error('备份中的存档关联无效');
+   if(paper_world_uuid!==undefined&&!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(paper_world_uuid))throw Error('备份中的 Paper 世界 UUID 无效');
    let link=directory;
    if(owned){
     const pieces=portablePath(directory);
     if(pieces[0]!=='worlds'||!fs.existsSync(path.join(target,...pieces,'level.dat')))throw Error('备份中的工程世界不完整');
     link=path.join(...pieces);
    }else if(!path.isAbsolute(directory))throw Error('备份的外部存档路径无效');
-   await writeFile(path.join(target,'world-source.json'),JSON.stringify({directory:link,world_uuid,level_sha256}),{flag:'wx'});
+   await writeFile(path.join(target,'world-source.json'),JSON.stringify({directory:link,world_uuid,paper_world_uuid,level_sha256}),{flag:'wx'});
   }
  });
 }

@@ -1,18 +1,29 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import {diffChanges,editOverlay,draftApplyPlan,historyActions,advanceHistory,draftPatch,replayDraftPatch} from './design-core.mjs';
 import {makeIndex,cellsInChunk} from '../chunk-index.js';
 import {designService} from './design-service.mjs';
 import {documentKey} from '../editor-state.js';
 
 const base={bounds:[-1,0,0,1,0,0],blocks:{'-1,0,0':'minecraft:air','0,0,0':'minecraft:stone','1,0,0':'minecraft:glass'}};
-test('bundled draft edits display the saved revision and preserve it when preview fails',async()=>{
- const storage=new Map(),rendered=[],scope={...base,uuid:'world-test'};
+function testStorage(t){
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'terraweave-draft-'));
+ t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+ return {
+  folder:name=>{const dir=path.join(root,name);fs.mkdirSync(dir,{recursive:true});return dir;},
+  read:file=>JSON.parse(fs.readFileSync(file,'utf8')),
+  atomic:(file,data)=>fs.writeFileSync(file,JSON.stringify(data))
+ };
+}
+test('bundled draft edits display the saved revision and preserve it when preview fails',async t=>{
+ const rendered=[],scope={...base,uuid:'world-test'};
  const region={id:'base',world_uuid:scope.uuid,snapshot_id:'base-hash',snapshot_hash:'base-hash',bounds:scope.bounds,source:'live_paper_main_thread',label:'基础区域'};
  let writes=0,failDisplay=false,current=region;
  const service=designService({
-  folder:name=>name,read:file=>structuredClone(storage.get(file)),
-  atomic:(file,data)=>storage.set(file,structuredClone(data)),
+  ...testStorage(t),
   readRegion:()=>({region,snapshot:scope}),readRegionMetadata:()=>region,currentRegion:()=>current,
   planning:{read:()=>({objects:[],layers:[]})},
   saveSnapshot:()=>{writes++;return {snapshot_id:'draft-hash',snapshot_hash:'draft-hash'};},
@@ -52,6 +63,50 @@ test('bundled draft edits display the saved revision and preserve it when previe
  assert.equal(rendered.at(-1).expected,region.id);
  current={id:'another-view'};
  assert.deepEqual(await service.execute('preview_draft',{draft_id,expected_region_id:region.id}),{cancelled:true});
+});
+test('a hidden draft reveals the next visible overlapping draft, then the saved world',async t=>{
+ const storage=testStorage(t),air='minecraft:air',shared='0,64,0',halo='-17,64,0',outside='1,64,0';
+ const scope={uuid:'world-test',bounds:[-16,48,-16,16,80,16],blocks:{[shared]:'minecraft:gold_block',[outside]:'minecraft:dirt'},
+  context_blocks:{[halo]:'minecraft:sandstone'}};
+ const region={id:'base',label:'存档',world_uuid:scope.uuid,snapshot_id:'base-hash',snapshot_hash:'base-hash',bounds:scope.bounds,source:'saved_anvil_detail'};
+ const plans={objects:[{id:'upper-plan',layer_id:'upper',visible:true},{id:'middle-plan',layer_id:'middle',visible:true}],layers:[{id:'upper',visible:true},{id:'middle',visible:true}]};
+ let rendered;
+ const service=designService({...storage,readRegion:()=>({region,snapshot:scope}),readRegionMetadata:()=>region,
+  planning:{read:()=>plans},saveSnapshot:()=>({snapshot_id:'preview-hash',snapshot_hash:'preview-hash'}),
+  savePreview:()=>{},displayRegion:(r,kind,nav,snapshot)=>{rendered=snapshot;return r;}});
+ const add=(id,date,changes,plan_id,world_uuid=scope.uuid)=>storage.atomic(path.join(storage.folder('drafts'),id+'.json'),{
+  id,world_uuid,label:id,plan_id,base_region_id:region.id,bounds:scope.bounds,focus:[0,64,0],revision:1,schema:2,created_at:date,
+  base_cells:{[shared]:air,[halo]:air,[outside]:'minecraft:dirt'},changes
+ });
+ add('lower','2026-01-01',{[shared]:'minecraft:stone',[halo]:'minecraft:stone',[outside]:'minecraft:glass'});
+ add('middle','2026-01-02',{[shared]:air,[halo]:'minecraft:glass'},'middle-plan');
+ add('upper','2026-01-03',{[shared]:'minecraft:oak_planks',[halo]:'minecraft:oak_planks'},'upper-plan');
+ add('unrelated','2026-01-04',{[shared]:'minecraft:diamond_block'},undefined,'another-world');
+ const preview=mode=>service.execute('preview_draft',{draft_id:'upper',mode});
+ await preview('target');
+ assert.equal(rendered.blocks[shared],'minecraft:oak_planks');
+ plans.objects[0].visible=false;
+ const hidden=await preview('target');
+ assert.equal(hidden.design_visible,false);
+ assert.deepEqual(hidden.overlapping_drafts,[{id:'lower',revision:1,visible:true},{id:'middle',revision:1,visible:true}]);
+ assert.deepEqual(hidden.overlap_candidates,[{id:'lower',revision:1},{id:'middle',revision:1}]);
+ assert.equal(rendered.blocks[shared],air,'A visible lower draft can explicitly remove a block');
+ assert.equal(rendered.context_blocks[halo],'minecraft:glass');
+ assert.equal(rendered.blocks[outside],'minecraft:dirt','Unrelated positions remain as saved');
+ plans.layers[1].visible=false;
+ await preview('target');
+ assert.equal(rendered.blocks[shared],'minecraft:stone');
+ assert.equal(rendered.context_blocks[halo],'minecraft:stone');
+ await service.execute('update_draft',{draft_id:'lower',visible:false});
+ await preview('target');
+ assert.equal(rendered.blocks[shared],'minecraft:gold_block');
+ assert.equal(rendered.context_blocks[halo],'minecraft:sandstone');
+ await preview('base');
+ assert.equal(rendered.blocks[shared],air);
+ assert.equal(rendered.context_blocks[halo],air);
+ plans.objects[0].visible=true;
+ await preview('target');
+ assert.equal(rendered.blocks[shared],'minecraft:oak_planks');
 });
 test('drafts from a view do not inherit its tab identity',()=>{
  assert.match(documentKey({view_id:'scene-a',draft_id:'draft-a',transient:true}),/^draft:draft-a$/);

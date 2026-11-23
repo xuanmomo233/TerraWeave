@@ -5,21 +5,10 @@ import {createHash} from 'node:crypto';
 import {overworldRegionDirectory,worldSource} from './world-source.mjs';
 import {baselineMinecraft,completeAnvilChunk,javaReleases,supportedDataVersion,supportedMinecraft} from '../minecraft-version.js';
 import {decodeAnvilLz4} from './anvil-lz4.mjs';
+import {normalizeAnvilPalette} from './anvil-block-palette.mjs';
+import {parseNbt,readLevelNbt} from './nbt.mjs';
+export {parseNbt,readLevelNbt} from './nbt.mjs';
 
-export function parseNbt(bytes){
- let offset=0,nodes=0;
- const take=n=>{if(n<0||offset+n>bytes.length)throw Error('Truncated NBT');const b=bytes.subarray(offset,offset+n);offset+=n;return b;};
- const u8=()=>take(1)[0],i32=()=>take(4).readInt32BE(),str=()=>take(take(2).readUInt16BE()).toString('utf8');
- function value(tag,depth=0){if(depth>64||++nodes>2000000)throw Error('NBT complexity limit');switch(tag){
-  case 1:return take(1).readInt8();case 2:return take(2).readInt16BE();case 3:return i32();case 4:return take(8).readBigInt64BE();case 5:return take(4).readFloatBE();case 6:return take(8).readDoubleBE();
-  case 7:{const length=i32();return take(length);}case 8:return str();
-  case 9:{const type=u8(),length=i32();if(length<0||length>1000000)throw Error('Invalid NBT list');return Array.from({length},()=>value(type,depth+1));}
-  case 10:{const result=Object.create(null);while(true){const type=u8();if(!type)return result;const key=str();result[key]=value(type,depth+1);}}
-  case 11:case 12:{const length=i32(),size=tag===11?4:8;if(length<0||length>4000000/size)throw Error('Invalid NBT array');const b=take(length*size);return Array.from({length},(_,i)=>tag===11?b.readInt32BE(i*4):b.readBigUInt64BE(i*8));}
-  default:throw Error('Unknown NBT tag '+tag);
- }}
- if(u8()!==10)throw Error('NBT root is not a compound');str();return value(10);
-}
 let lastIndex;
 export function worldIndex(source=worldSource()){
  const directory=source?.error?undefined:source?.directory;
@@ -35,6 +24,7 @@ export function worldIndex(source=worldSource()){
  const stamp=JSON.stringify([source,level?.mtimeMs,level?.size,environment,files.map(({file,stat})=>[file,stat.size,stat.mtimeMs])]);
  if(lastIndex?.stamp===stamp)return lastIndex.index;
  const meta=level?readLevelNbt(path.join(directory,'level.dat'))?.Data:null;
+ if(level&&!meta)throw Error('无法读取存档的 level.dat');
  const version=meta?.Version?.Name,data_version=meta?.DataVersion??meta?.Version?.Id;
  if(data_version!==undefined&&!supportedDataVersion(data_version)||version!==undefined&&!supportedMinecraft(version))
   throw Error('此存档版本超出当前读取范围：'+(version??data_version));
@@ -53,12 +43,8 @@ export function worldIndex(source=worldSource()){
  const minecraft=version??baselineMinecraft;
  const revision=createHash('sha256').update(JSON.stringify([source?.world_uuid,minecraft,region_directory,regions.map(r=>[r.x,r.z,r.size,r.mtime])])).digest('hex');
  const environment_revision=level?createHash('sha256').update(JSON.stringify([revision,level.mtimeMs,level.size,environment])).digest('hex'):null;
- const index={directory,region_directory,world:source?.world,world_uuid:source?.world_uuid,void_world,pristine_void:!!void_world&&!regionFiles.length,dimension:'minecraft:overworld',minecraft,data_version,bounds:chunks.length||void_world?bounds:null,chunk_count:chunks.length,region_count:regions.length,regions,chunks,revision,environment_revision,source:'saved_anvil_surface',limits:'Existing generated overworld only. Unknown or incomplete data stays unknown. Surface colors are a material approximation, not client lighting.'};
+ const index={directory,region_directory,world:source?.world,world_uuid:source?.world_uuid,paper_world_uuid:source?.paper_world_uuid,void_world,pristine_void:!!void_world&&!regionFiles.length,dimension:'minecraft:overworld',minecraft,data_version,bounds:chunks.length||void_world?bounds:null,chunk_count:chunks.length,region_count:regions.length,regions,chunks,revision,environment_revision,source:'saved_anvil_surface',limits:'Existing generated overworld only. Unknown or incomplete data stays unknown. Surface colors are a material approximation, not client lighting.'};
  lastIndex={stamp,index};return index;
-}
-export function readLevelNbt(file){
- try{return parseNbt(gunzipSync(fs.readFileSync(file),{maxOutputLength:4_000_000}));}
- catch{return null;}
 }
 export function savedWorldCamera(index){
  if(!index.directory||!index.bounds)return null;
@@ -115,7 +101,7 @@ function readChunkData(fd,size,entry,region,cx,cz,missing){
  }
  const bytes=compression===1?gunzipSync(payload,{maxOutputLength}):compression===2?inflateSync(payload,{maxOutputLength}):
   compression===3?payload:compression===4?decodeAnvilLz4(payload,maxOutputLength):null;
- return bytes?parseNbt(bytes):null;
+ return bytes?normalizeAnvilPalette(parseNbt(bytes)):null;
 }
 export function readWorldChunk(cx,cz,directory,voidWorld){
  if(directory===undefined){
@@ -145,13 +131,14 @@ export function sampleSurface(x,z,visibleOnly=false,directory,voidWorld){if(!Num
 export function materialColor(state){const id=state.replace('minecraft:','').split('[')[0];
  if(/water|bubble_column/.test(id))return 0x397ba8;if(/lava|fire/.test(id))return 0xd65b25;if(/snow|quartz|white_concrete|white_wool/.test(id))return 0xdce4e3;if(/sand|sandstone|end_stone/.test(id))return 0xc9bd88;if(/grass|moss/.test(id))return 0x738a4b;if(/leaves|vine|fern/.test(id))return 0x405f3b;if(/log|wood|planks|stairs|slab/.test(id)&&/oak|spruce|birch|jungle|acacia|mangrove|cherry/.test(id))return /dark_oak|spruce/.test(id)?0x69533b:0xa08658;if(/dirt|mud|farmland/.test(id))return 0x7f6950;if(/terracotta|bricks/.test(id))return 0xa77963;if(/glass/.test(id))return 0x99c2c2;if(/ice/.test(id))return 0x97bdcf;if(/deepslate|blackstone|basalt/.test(id))return 0x4f5357;return 0x8a8c85;
 }
-export function surfaceTile(tx,tz,level,cacheRoot,index=worldIndex(),sliceY=null){
+export function surfaceTile(tx,tz,level,cacheRoot,index=worldIndex(),sliceY=null,construction){
  if(![tx,tz,level].every(Number.isSafeInteger)||level<0||level>10||Math.abs(tx)>2000000||Math.abs(tz)>2000000)throw Error('Invalid surface tile');
  if(sliceY!==null&&(!Number.isSafeInteger(sliceY)||sliceY< -64||sliceY>319))throw Error('地图切片高度须在 Y -64 至 319 内');
  const file=sliceY===null?path.join(cacheRoot,`tile-${level}-${tx}-${tz}.json`):null;
  const step=2**level,size=64,span=step*size,minX=tx*span,minZ=tz*span;
  const parts=index.regions.filter(r=>r.x*512<minX+span&&(r.x+1)*512>minX&&r.z*512<minZ+span&&(r.z+1)*512>minZ);
- const revision=createHash('sha256').update(JSON.stringify([index.world_uuid,index.minecraft,index.region_directory,index.void_world,parts.map(r=>[r.x,r.z,r.mtime,r.size])])+(sliceY===null?'':'/Y='+sliceY)).digest('hex');
+ const revision=createHash('sha256').update(JSON.stringify([index.world_uuid,index.minecraft,index.region_directory,index.void_world,parts.map(r=>[r.x,r.z,r.mtime,r.size])])+
+  (sliceY===null?'':'/Y='+sliceY)).update(construction?.mapTileKey?.(tx,tz,level)??construction?.visibility_revision??'').digest('hex');
  if(file&&fs.existsSync(file)){try{const old=JSON.parse(fs.readFileSync(file,'utf8'));if(old.version===3&&old.revision===revision)return old;}catch{}}
  // Map tiles scan many columns in the same .mca. Keep one region open and read its location table once.
  const regions=new Map(parts.map(r=>[r.x+','+r.z,r.file]));
@@ -180,9 +167,22 @@ export function surfaceTile(tx,tz,level,cacheRoot,index=worldIndex(),sliceY=null
    if(!chunks.has(key)){try{chunks.set(key,readTileChunk(cx,cz));}catch{chunks.set(key,null);}}
    const chunk=chunks.get(key),lx=(x%16+16)%16,lz=(z%16+16)%16;
    let s;
-   if(sliceY===null)s=chunk?.surface(lx,lz,true);
+   if(sliceY===null){
+    s=chunk?.surface(lx,lz,true);
+    const column=s&&construction?.column(x,z);
+    if(column){
+     const top=Math.max(s.y??-64,...column.keys());
+     s={state:'minecraft:air',y:null,empty:true};
+     for(let y=top;y>=-64;y--){
+      const state=construction.block(x,y,z,chunk.block(lx,y,lz));
+      if(!state||/^minecraft:(air|cave_air|void_air|barrier|structure_void|light)(\[|$)/.test(state))continue;
+      s={state,y,empty:false};break;
+     }
+    }
+   }
    else{
-    const state=chunk?.block(lx,sliceY,lz);
+    const raw=chunk?.block(lx,sliceY,lz);
+    const state=raw&&construction?construction.block(x,sliceY,z,raw):raw;
     if(state){const empty=/^minecraft:(air|cave_air|void_air|barrier|structure_void|light)(\[|$)/.test(state);s={state,y:empty?null:sliceY,empty};}
    }
    if(s){const i=py*size+px;colors[i]=s.empty?0:materialColor(s.state);heights[i]=s.y;availability[i]=s.empty?1:2;known++;}

@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {PROJECT} from './workspace-paths.mjs';
 import {baselineMinecraft,supportedMinecraft} from '../minecraft-version.js';
+import {blockRules26_3} from './anvil-block-palette.mjs';
 
 const assets=path.join(PROJECT,'assets');
 let registry;
@@ -43,10 +44,17 @@ export function normalizeBlockState(value,version=baselineMinecraft){
  if(!match)throw Error('无效的 Minecraft 方块状态 '+String(value));
  if(!supportedMinecraft(version))throw Error('不支持的方块版本 '+version);
  const [,name,properties]=match;
- registry??=JSON.parse(fs.readFileSync(path.join(assets,'block-states-1.20.1.json'),'utf8'));
- const stateful=Object.hasOwn(registry,name)?registry[name]:undefined;
- if(version===baselineMinecraft&&!stateful&&!['air','cave_air','void_air'].includes(name)&&!fs.existsSync(path.join(assets,'minecraft','blockstates',name+'.json')))throw Error('1.20.1 方块不存在 '+name);
- const [values,defaults,required=[]]=version===baselineMinecraft?stateful??[{},{}]:modelStateRules(version,name,stateful);
+ let rules;
+ if(version==='26.3'){
+  rules=blockRules26_3('minecraft:'+name);
+  if(!rules)throw Error(version+' 方块不存在 '+name);
+ }else{
+  registry??=JSON.parse(fs.readFileSync(path.join(assets,'block-states-1.20.1.json'),'utf8'));
+  const stateful=Object.hasOwn(registry,name)?registry[name]:undefined;
+  if(version===baselineMinecraft&&!stateful&&!['air','cave_air','void_air'].includes(name)&&!fs.existsSync(path.join(assets,'minecraft','blockstates',name+'.json')))throw Error('1.20.1 方块不存在 '+name);
+  rules=version===baselineMinecraft?stateful??[{},{}]:modelStateRules(version,name,stateful);
+ }
+ const [values,defaults,required=[]]=rules;
  const result={...defaults},seen=new Set();
  for(const entry of properties?.split(',')??[]){
   const [key,setting,...tail]=entry.split('=');

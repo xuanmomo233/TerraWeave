@@ -20,6 +20,11 @@ dialog [role="alert"]:not(:empty) {
   border-radius:6px;background:color-mix(in srgb,var(--panel) 92%,#b43e47);color:var(--text);
 }
 dialog form > label {display:grid;gap:5px;margin:12px 0;}
+.design-conversion-issues:not([hidden]) {display:grid;gap:10px;max-height:36vh;overflow:auto;padding:0;margin:12px 0;list-style:none;}
+.design-conversion-issues > li {display:grid;gap:5px;padding:9px 10px;border:1px solid var(--border);border-radius:5px;}
+.design-conversion-issues code,.design-conversion-issues small {overflow-wrap:anywhere;}
+.design-conversion-issues small {color:var(--muted);}
+.design-conversion-pages:not([hidden]) {display:flex;justify-content:flex-end;gap:8px;}
 .folder-field {margin:12px 0;}
 .folder-field > label {margin:0 0 5px;}
 .folder-picker {display:grid;grid-template-columns:minmax(0,1fr) auto;gap:var(--panel-action-gap);}

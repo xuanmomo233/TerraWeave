@@ -1,7 +1,7 @@
 use base64::{engine::general_purpose::STANDARD,Engine};
 use serde_json::{json,Value};
 use sha2::{Digest,Sha256};
-use std::{fs,io::Write,path::{Path,PathBuf},process::{Command,Stdio},sync::atomic::{AtomicU64,Ordering},time::{SystemTime,UNIX_EPOCH}};
+use std::{fs,io::Write,path::{Path,PathBuf},process::{Command,Stdio},sync::{Mutex,OnceLock,atomic::{AtomicU64,Ordering}},time::{SystemTime,UNIX_EPOCH}};
 pub fn project()->PathBuf{
  static DIRECTORY:std::sync::OnceLock<PathBuf>=std::sync::OnceLock::new();
  DIRECTORY.get_or_init(||{
@@ -23,26 +23,55 @@ pub fn node_program()->std::ffi::OsString {
  }
  if cfg!(windows) {"node.exe".into()} else {"node".into()}
 }
-pub(crate) fn root()->PathBuf{
+fn startup_root()->PathBuf{
  let project=project();
  std::env::var_os("TERRAWEAVE_STATE").map(|p|project.join(p)).unwrap_or_else(||project.join("project-state/workbench"))
 }
+struct DesktopProject{root:PathBuf,_instance:fs::File,last_heartbeat:u64,epoch:u64,operations:usize}
+impl DesktopProject{
+ fn check_page(&self,epoch:u64)->Result<(),String>{
+  if self.epoch==epoch{Ok(())}else{Err("请求来自已切换的工程页面".into())}
+ }
+}
+static ACTIVE_PROJECT:OnceLock<Mutex<DesktopProject>>=OnceLock::new();
+fn active_project()->&'static Mutex<DesktopProject>{ACTIVE_PROJECT.get().expect("Desktop project initialized")}
+pub(crate) fn root()->PathBuf{
+ ACTIVE_PROJECT.get().map(|p|p.lock().expect("Desktop project lock").root.clone()).unwrap_or_else(startup_root)
+}
+pub(crate) fn project_env(command:&mut Command,state:&Path){
+ static PRIMARY:OnceLock<PathBuf>=OnceLock::new();
+ static PRIMARY_WORLD:OnceLock<Option<std::ffi::OsString>>=OnceLock::new();
+ let primary=PRIMARY.get_or_init(||std::env::var_os("TERRAWEAVE_PRIMARY_STATE").map(|p|project().join(p)).unwrap_or_else(startup_root));
+ let primary_world=PRIMARY_WORLD.get_or_init(||std::env::var_os("TERRAWEAVE_PRIMARY_WORLD").or_else(||
+  (startup_root()==*primary).then(||std::env::var_os("TERRAWEAVE_WORLD")).flatten()));
+ command.env("TERRAWEAVE_STATE",state).env("TERRAWEAVE_PRIMARY_STATE",primary);
+ if let Some(world)=primary_world{command.env("TERRAWEAVE_PRIMARY_WORLD",world);}
+ if state!=startup_root(){
+  command.env_remove("TERRAWEAVE_WORLD");
+  if state==primary{if let Some(world)=primary_world{command.env("TERRAWEAVE_WORLD",world);}}
+ }
+}
 fn ms()->u128{SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()}
 static WRITES:AtomicU64=AtomicU64::new(0);
-static LAST_HEARTBEAT:AtomicU64=AtomicU64::new(0);
 fn valid(id:&str)->bool{!id.is_empty()&&id.len()<100&&id.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'-')}
 fn write(path:&Path,value:&Value)->Result<(),String>{
  let pending=path.with_extension(format!("pending-{}-{}",std::process::id(),WRITES.fetch_add(1,Ordering::Relaxed)));
  fs::write(&pending,serde_json::to_vec(value).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
  fs::rename(pending,path).map_err(|e|e.to_string())
 }
-pub fn claim_instance()->Result<fs::File,String>{
- fs::create_dir_all(root()).map_err(|e|e.to_string())?;
+fn lock_project(root:&Path)->std::io::Result<fs::File>{
+ fs::create_dir_all(root)?;
  let mut options=fs::OpenOptions::new();options.write(true).create(true);
  #[cfg(windows)]{use std::os::windows::fs::OpenOptionsExt;options.share_mode(0);}
- let file=options.open(root().join("desktop.instance.lock")).map_err(|e|e.to_string())?;
- #[cfg(unix)] file.try_lock().map_err(|e|e.to_string())?;
+ let file=options.open(root.join("desktop.instance.lock"))?;
+ #[cfg(unix)] file.try_lock().map_err(std::io::Error::from)?;
  Ok(file)
+}
+pub fn claim_instance()->Result<(),String>{
+ let root=startup_root();
+ let instance=lock_project(&root).map_err(|e|e.to_string())?;
+ ACTIVE_PROJECT.set(Mutex::new(DesktopProject{root,_instance:instance,last_heartbeat:0,epoch:0,operations:0}))
+  .map_err(|_|"桌面工程已初始化".into())
 }
 pub fn show_existing(){
  let id=format!("{}-{}",ms(),std::process::id());let _=fs::create_dir_all(root().join("requests"));
@@ -50,10 +79,9 @@ pub fn show_existing(){
  let _=fs::write(root().join("wake-window"),[]);
 }
 pub fn monitor_window(window:tauri::WebviewWindow){
- let wake=root().join("wake-window");
  std::thread::spawn(move||loop{
   let _=workbench_heartbeat();
-  if fs::remove_file(&wake).is_ok(){
+  if fs::remove_file(root().join("wake-window")).is_ok(){
    let _=window.show();
    let _=window.unminimize();
    let _=window.set_focus();
@@ -62,14 +90,25 @@ pub fn monitor_window(window:tauri::WebviewWindow){
  });
 }
 #[tauri::command]
-pub fn workbench_heartbeat()->Result<(),String>{let now=ms() as u64;if LAST_HEARTBEAT.fetch_update(Ordering::Relaxed,Ordering::Relaxed,|last|(now.saturating_sub(last)>=1000).then_some(now)).is_err(){return Ok(())}write(&root().join("heartbeat.json"),&json!({"pid":std::process::id(),"at_ms":now.to_string(),"version":2}))}
+pub fn workbench_heartbeat()->Result<(),String>{
+ let mut state=active_project().lock().map_err(|e|e.to_string())?;
+ refresh_heartbeat(&mut state)
+}
+fn refresh_heartbeat(state:&mut DesktopProject)->Result<(),String>{
+ let now=ms() as u64;
+ if now.saturating_sub(state.last_heartbeat)<1000{return Ok(())}
+ write(&state.root.join("heartbeat.json"),&heartbeat(now))?;
+ state.last_heartbeat=now;
+ Ok(())
+}
+fn heartbeat(now:u64)->Value{json!({"pid":std::process::id(),"at_ms":now.to_string(),"version":2})}
 fn read(path:&Path,max:u64)->Result<Value,String>{
  if fs::metadata(path).map_err(|e|e.to_string())?.len()>max{return Err("Workbench data exceeds limit".into())}
  serde_json::from_slice(&fs::read(path).map_err(|e|e.to_string())?).map_err(|e|e.to_string())
 }
 #[tauri::command]
-pub async fn workbench_poll()->Result<Value,String>{
- tauri::async_runtime::spawn_blocking(poll_workbench).await.map_err(|e|e.to_string())?
+pub async fn workbench_poll(project_epoch:u64)->Result<Value,String>{
+ tauri::async_runtime::spawn_blocking(move||poll_workbench(project_epoch)).await.map_err(|e|e.to_string())?
 }
 fn queue_dirs(r:&Path)->Result<(),String>{
  for name in ["requests","processing","responses","snapshots","regions","captures"]{
@@ -81,13 +120,15 @@ fn reply(r:&Path,id:&str,result:&Value)->Result<(),String>{
  write(&r.join("responses").join(format!("{id}.json")),result)
 }
 pub fn recover_requests()->Result<(),String>{
- let r=root();
- queue_dirs(&r)?;
+ recover_project_requests(&root())
+}
+fn recover_project_requests(r:&Path)->Result<(),String>{
+ queue_dirs(r)?;
  for entry in fs::read_dir(r.join("processing")).map_err(|e|e.to_string())?.filter_map(Result::ok){
   let name=entry.file_name();
   let Some(id)=name.to_str().and_then(|s|s.strip_suffix(".json")).filter(|s|valid(s)) else{continue};
   let output=r.join("responses").join(format!("{id}.json"));
-  if !output.exists(){reply(&r,id,&json!({"ok":false,"error":"工作台已重启，该请求已中断"}))?;}
+  if !output.exists(){reply(r,id,&json!({"ok":false,"error":"工作台已重启，该请求已中断"}))?;}
   fs::remove_file(entry.path()).map_err(|e|e.to_string())?;
  }
  let cutoff=ms().saturating_sub(900_000);
@@ -147,11 +188,12 @@ fn claim_next(r:&Path)->Result<Value,String>{
  }
  Ok(Value::Null)
 }
-fn poll_workbench()->Result<Value,String>{
- let r=root();
- queue_dirs(&r)?;
- workbench_heartbeat()?;
- claim_next(&r)
+fn poll_workbench(project_epoch:u64)->Result<Value,String>{
+ let mut active=active_project().lock().map_err(|e|e.to_string())?;
+ active.check_page(project_epoch)?;
+ refresh_heartbeat(&mut active)?;
+ queue_dirs(&active.root)?;
+ claim_next(&active.root)
 }
 fn store_images(r:&Path,id:&str,q:&Value,result:&mut Value)->Result<(),String>{
  let data=std::mem::take(&mut result["result"]["images"]);
@@ -192,6 +234,28 @@ fn store_images(r:&Path,id:&str,q:&Value,result:&mut Value)->Result<(),String>{
 mod queue_tests{
  use super::*;
  #[test]
+ fn stale_page_and_pending_queue_are_detected_during_handoff(){
+  let temp=std::env::temp_dir();
+  let root=temp.join(format!("terraweave-handoff-{}-{}",std::process::id(),ms()));
+  queue_dirs(&root).unwrap();
+  let active=DesktopProject{_instance:lock_project(&root).unwrap(),root:root.clone(),last_heartbeat:0,epoch:7,operations:0};
+  assert!(active.check_page(6).is_err());
+  assert!(active.check_page(7).is_ok());
+  assert!(lock_project(&root).is_err());
+  assert!(!has_desktop_requests(&root).unwrap());
+  let queued=root.join("requests/queued.json");
+  write(&queued,&json!({"id":"queued","kind":"scene_view"})).unwrap();
+  assert!(has_desktop_requests(&root).unwrap());
+  assert_eq!(claim_next(&root).unwrap()["id"],"queued");
+  assert!(has_desktop_requests(&root).unwrap());
+  fs::remove_file(root.join("processing/queued.json")).unwrap();
+  assert!(!has_desktop_requests(&root).unwrap());
+  drop(active);
+  let resolved=root.canonicalize().unwrap();
+  assert_eq!(resolved.parent(),Some(temp.canonicalize().unwrap().as_path()));
+  fs::remove_dir_all(resolved).unwrap();
+ }
+ #[test]
  fn expired_or_missing_region_does_not_block_next_request(){
   let temp=std::env::temp_dir();
   let directory=temp.join(format!("terraweave-queue-{}-{}",std::process::id(),ms()));
@@ -214,9 +278,9 @@ mod queue_tests{
  }
 }
 #[tauri::command]
-pub fn workbench_complete(id:String,mut result:Value)->Result<(),String>{
+pub fn workbench_complete(id:String,mut result:Value,project_epoch:u64)->Result<(),String>{
  if !valid(&id){return Err("Invalid request identity".into());}
- let r=root();
+ let r=page_root(project_epoch)?;
  let claimed=r.join("processing").join(format!("{id}.json"));
  let q=read(&claimed,65536)?;
  if result["ok"]==true&&matches!(q["kind"].as_str(),Some("capture"|"capture_map"|"capture_scene"|"capture_viewport")){
@@ -225,17 +289,83 @@ pub fn workbench_complete(id:String,mut result:Value)->Result<(),String>{
  if q["reply"]!=false{reply(&r,&id,&result)?;}
  fs::remove_file(claimed).map_err(|e|e.to_string())
 }
+fn page_root(epoch:u64)->Result<PathBuf,String>{
+ let active=active_project().lock().map_err(|e|e.to_string())?;
+ active.check_page(epoch)?;
+ Ok(active.root.clone())
+}
+fn has_desktop_requests(root:&Path)->Result<bool,String>{
+ for name in ["processing","requests"]{
+  for entry in fs::read_dir(root.join(name)).map_err(|e|e.to_string())?{
+   if entry.map_err(|e|e.to_string())?.path().extension().and_then(|s|s.to_str())==Some("json"){return Ok(true)}
+  }
+ }
+ Ok(false)
+}
+struct ProjectOperation;
+impl Drop for ProjectOperation{
+ fn drop(&mut self){
+  if let Ok(mut active)=active_project().lock(){active.operations-=1;}
+ }
+}
+fn background_read(tool:&str)->bool{
+ matches!(tool,"ui_snapshot"|"world_map_info"|"world_map_tile"|"world_model_tile"|"world_scene_info"
+  |"world_volume_tile"|"planning_state"|"workspace_status"|"workbench_status"|"list_regions"|"list_drafts"
+  |"list_history"|"list_captures"|"read_editor_state"|"project_locations"|"list_projects"|"render_settings"|"iris_scene_inputs")
+}
 #[tauri::command]
-pub async fn workbench_call(tool:String,args:Value)->Result<Value,String>{
+pub async fn workbench_call(tool:String,args:Value,project_epoch:u64)->Result<Value,String>{
+ let (state,operation)={
+  let mut active=active_project().lock().map_err(|e|e.to_string())?;
+  active.check_page(project_epoch)?;
+  let lease=(!background_read(&tool)).then(||{active.operations+=1;ProjectOperation});
+  (active.root.clone(),lease)
+ };
  tauri::async_runtime::spawn_blocking(move||{
-  if crate::ui_worker::handles(&tool)&&!(tool=="world_scene_info"&&args["preview"]!=true){return crate::ui_worker::request(&tool,args)}
+  let _operation=operation;
+  if crate::ui_worker::handles(&tool)&&!(tool=="world_scene_info"&&args["preview"]!=true){return crate::ui_worker::request(&tool,args,&state)}
   let mut command=Command::new(node_program());command.arg(project().join("tools/creative-workbench.mjs")).arg("--json").current_dir(project()).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+  project_env(&mut command,&state);
   command.env("TERRAWEAVE_DESKTOP_EXE",std::env::current_exe().map_err(|e|e.to_string())?);
   #[cfg(windows)]{use std::os::windows::process::CommandExt;command.creation_flags(0x08000000);}
   let mut child=command.spawn().map_err(|e|e.to_string())?;
   child.stdin.take().ok_or("Missing tool stdin")?.write_all(serde_json::to_string(&json!({"tool":tool,"args":args})).unwrap().as_bytes()).map_err(|e|e.to_string())?;
   let output=child.wait_with_output().map_err(|e|e.to_string())?;let v:Value=serde_json::from_slice(&output.stdout).map_err(|_|format!("Invalid workbench tool response: {}",String::from_utf8_lossy(&output.stderr)))?;
   if !output.status.success()||v["error"].is_string(){return Err(v["error"].as_str().unwrap_or("Workbench tool failed").into())}Ok(v)
+ }).await.map_err(|e|e.to_string())?
+}
+#[tauri::command]
+pub async fn switch_project(id:String,project_epoch:u64)->Result<u64,String>{
+ let source=page_root(project_epoch)?;
+ let details=workbench_call("project_locations".into(),json!({"id":id}),project_epoch).await?;
+ let target=PathBuf::from(details["project_directory"].as_str().ok_or("无法读取目标工程目录")?);
+ tauri::async_runtime::spawn_blocking(move||{
+  {
+   let mut active=active_project().lock().map_err(|e|e.to_string())?;
+   active.check_page(project_epoch)?;
+   if active.root==target{return Ok(project_epoch)}
+   if active.operations!=0||has_desktop_requests(&source)?{
+    return Err("请等待当前工程的操作完成后再切换".into());
+   }
+   let instance=lock_project(&target).map_err(|error|{
+    if error.kind()==std::io::ErrorKind::WouldBlock||cfg!(windows)&&matches!(error.raw_os_error(),Some(32|33)){
+     "目标工程已在另一个窗口打开，可从工程列表显示其窗口".to_owned()
+    }else{format!("无法打开目标工程：{error}")}
+   })?;
+   recover_project_requests(&target)?;
+   let now=ms() as u64;
+   let new_heartbeat=target.join("heartbeat.json");
+   write(&new_heartbeat,&heartbeat(now))?;
+   if let Err(error)=fs::remove_file(source.join("heartbeat.json")){
+    if error.kind()!=std::io::ErrorKind::NotFound{
+     let _=fs::remove_file(new_heartbeat);
+     return Err(error.to_string());
+    }
+   }
+   *active=DesktopProject{root:target,_instance:instance,last_heartbeat:now,epoch:project_epoch+1,operations:0};
+  }
+  crate::ui_worker::retire(&source);
+  Ok(project_epoch+1)
  }).await.map_err(|e|e.to_string())?
 }
 #[tauri::command]
@@ -260,12 +390,13 @@ pub fn workbench_window_action(window:tauri::Window,action:String,title:Option<S
  Ok(json!({"decorated":window.is_decorated().map_err(|e|e.to_string())?,"maximized":window.is_maximized().map_err(|e|e.to_string())?,"fullscreen":window.is_fullscreen().map_err(|e|e.to_string())?}))
 }
 #[tauri::command]
-pub fn workbench_read_image(capture_id:String,index:usize)->Result<String,String>{
+pub fn workbench_read_image(capture_id:String,index:usize,project_epoch:u64)->Result<String,String>{
  if !valid(&capture_id)||index>7{return Err("Invalid saved image identity".into())}
- let file=root().join("captures").join(&capture_id).join(format!("view-{index}.png"));
+ let root=page_root(project_epoch)?;
+ let file=root.join("captures").join(&capture_id).join(format!("view-{index}.png"));
  if fs::metadata(&file).map_err(|e|e.to_string())?.len()>9*1024*1024{return Err("Saved image exceeds limit".into())}
  let bytes=fs::read(file).map_err(|e|e.to_string())?;
- let metadata=read(&root().join("captures").join(&capture_id).join("capture.json"),65536)?;
+ let metadata=read(&root.join("captures").join(&capture_id).join("capture.json"),65536)?;
  if metadata["images"][index]["sha256"]!=format!("{:x}",Sha256::digest(&bytes)){return Err("Saved capture image changed".into())}
  Ok(format!("data:image/png;base64,{}",STANDARD.encode(bytes)))
 }
