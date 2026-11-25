@@ -665,18 +665,24 @@ export function mountWorkspaceUI(context){
   meta.textContent=failed?desc+' · '+failed+' 张读取失败':desc;
   if(failed)shownCapture=undefined;
  }
- async function capture(){
+ async function capture({preview=false}={}){
   return run(async()=>{
    const view=$('view'),scale=Math.min(devicePixelRatio,1920/view.clientWidth,1920/view.clientHeight);
    const width=Math.max(256,Math.round(view.clientWidth*scale)),height=Math.max(256,Math.round(view.clientHeight*scale));
    const result = macro?.active
     ? await call('capture_map', {view: macro.getView(), width, height})
     : await call('capture_current_view', {width, height});
-   await refresh();selectedCapture=result.capture_id ?? result.request_id;dock('gallery');return result;
-  });
+   await refresh();selectedCapture=result.capture_id ?? result.request_id;dock('gallery');
+   if(preview){
+    $('large-image').src=await invokeProject('workbench_read_image',{captureId:selectedCapture,index:0});
+    $('large-image').alt='完整全景';
+    $('image-dialog').showModal();
+   }
+   return result;
+  },preview?'正在绘制完整全景…':undefined);
  }
  const captureVisible = capture;
- $('capture').onclick=captureVisible;$('close-image').onclick=()=>$('image-dialog').close();
+ $('capture').onclick=()=>captureVisible();$('close-image').onclick=()=>$('image-dialog').close();
  for(const name of ['isometric','north','south','east','west','top'])$(name).onclick=()=>context.frame(name);$('focus-tool').onclick=()=>macro?.active?macro.fit():context.frame('isometric');$('axis-x').onclick=()=>context.frame('east');$('axis-y').onclick=()=>context.frame('top');$('axis-z').onclick=()=>context.frame('south');
  let sliceTimer;const cut=()=>{const r=context.getRegion();if(!r)return;const max_y=Number($('layer').value);$('layer-number').value=max_y;context.setView({min_y:$('single-layer').checked?max_y:r.loaded_bounds[1],max_y,show_selection:$('outline').checked,show_grid:$('grid').checked,show_plans:$('planning-overlay').checked,show_invisible:$('invisible-blocks').checked}).catch(e=>say(String(e)));};
  $('layer').oninput=()=>{$('layer-number').value=$('layer').value;clearTimeout(sliceTimer);sliceTimer=setTimeout(cut,90);};$('layer-number').onchange=()=>{$('layer').value=$('layer-number').value;cut();};for(const id of ['single-layer','outline','grid','planning-overlay','invisible-blocks'])$(id).onchange=cut;
@@ -983,7 +989,7 @@ export function mountWorkspaceUI(context){
  document.querySelectorAll('[data-resize]').forEach(e=>e.onpointerdown=event=>{event.preventDefault();const name=e.dataset.resize,start=name==='bottom'?event.clientY:event.clientX,initial=parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--'+name));document.body.classList.add('resizing');const move=ev=>{const delta=(name==='bottom'?ev.clientY:ev.clientX)-start,size=Math.max(name==='bottom'?100:170,Math.min(name==='bottom'?360:420,initial+(name==='left'?delta:-delta)));document.documentElement.style.setProperty('--'+name,size+'px');};const up=()=>{document.removeEventListener('pointermove',move);document.removeEventListener('pointerup',up);document.body.classList.remove('resizing');const layout={};for(const key of ['left','right','bottom'])layout[key]=parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--'+key));localStorage.setItem('terraweave-layout',JSON.stringify(layout));};document.addEventListener('pointermove',move);document.addEventListener('pointerup',up);});
  function planningHistory(state){$('history-list').replaceChildren();for(const entry of [...(state.history??[])].reverse()){const row=document.createElement('div');row.className='history-row';row.append(text('span',String(entry.id+1)),text('span',entry.label,'title'),text('span','规划'),text('span',entry.at?date(entry.at):'','time'));$('history-list').append(row);}$('history-info').textContent='地图规划 · 可撤销 '+state.undo_count+' / 可重做 '+state.redo_count;$('undo').disabled=busy||!state.undo_count;$('redo').disabled=busy||!state.redo_count;$('undo-context').disabled=busy||!state.undo_count;$('redo-context').disabled=busy||!state.redo_count;$('undo').textContent='撤销规划';$('redo').textContent='重做规划';$('undo-context').title='撤销规划';$('redo-context').title='重做规划';}
  refresh().then(()=>{if(!context.getRegion())say('准备就绪 · 在地图总览中选区规划');}).catch(e=>say(String(e)));
- return {get busy(){return busy||sessionLoading||!!openingTab;},get loadingDocument(){return !!openingTab;},cancelTabView,requestedRegion:()=>documents.find(d=>d.key===openingTab)?.region,recovery,restoreSession,formValues,setRegion,draftDeleted,openDraftAction,openNamedAction,rememberView,storedView,restoringView(r){return restoringDocument===documentKey(r)?storedView(r):null;},refresh:()=>refresh().catch(e=>say(String(e))),showMenu:popup,say,saveBounds,paintAt,toolChanged,run,planningHistory,usePlanningHistory(){historyScope='plan';},bindMap(map){macro=map;},updateDraftSummary(draft){drafts=drafts.map(d=>d.id===draft.id&&d.revision<=draft.revision?draft:d);sync();},mapActive(){renderTabs();sync();},markDone(){},picked(p,state,appearance){picked={coordinate:p,key:activeKey,snapshot:context.getRegion()?.snapshot_hash};fields('d',[...p,...p]);const details=appearance?.kind==='container'
+ return {capture,get busy(){return busy||sessionLoading||!!openingTab;},get loadingDocument(){return !!openingTab;},cancelTabView,requestedRegion:()=>documents.find(d=>d.key===openingTab)?.region,recovery,restoreSession,formValues,setRegion,draftDeleted,openDraftAction,openNamedAction,rememberView,storedView,restoringView(r){return restoringDocument===documentKey(r)?storedView(r):null;},refresh:()=>refresh().catch(e=>say(String(e))),showMenu:popup,say,saveBounds,paintAt,toolChanged,run,planningHistory,usePlanningHistory(){historyScope='plan';},bindMap(map){macro=map;},updateDraftSummary(draft){drafts=drafts.map(d=>d.id===draft.id&&d.revision<=draft.revision?draft:d);sync();},mapActive(){renderTabs();sync();},markDone(){},picked(p,state,appearance){picked={coordinate:p,key:activeKey,snapshot:context.getRegion()?.snapshot_hash};fields('d',[...p,...p]);const details=appearance?.kind==='container'
   ?[appearance.name,...(appearance.loot_pending?['战利品尚未生成']:[]),...appearance.slots.map(s=>'格 '+(s.slot+1)+' · '+s.item+' × '+s.count)].filter(Boolean):[];
   $('picked-block').textContent=[p.join(', '),state,...details].join('\n');$('coordinate-status').textContent=p.join(' / ');},stats(n){$('render-stats').textContent=n.toLocaleString()+' 方块';},setViewFields(view){$('layer').value=view.max_y;$('layer-number').value=view.max_y;$('single-layer').checked=view.min_y===view.max_y;$('outline').checked=view.show_selection;$('grid').checked=view.show_grid??false;$('planning-overlay').checked=view.show_plans??false;$('invisible-blocks').checked=view.show_invisible??false;document.querySelectorAll('[data-display-mode]').forEach(e=>e.classList.toggle('active',e.dataset.displayMode===(view.display_mode??'scene')));if(sessionRestored&&!sessionLoading)recovery.schedule();},setLimits(value){$('limits').textContent=value;}};
 }

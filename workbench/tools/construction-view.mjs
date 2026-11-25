@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {createHash,randomUUID} from 'node:crypto';
 import {worldSource} from './world-source.mjs';
+import {readGeneratedConstruction} from './generated-construction.mjs';
 
 const id=/^[a-zA-Z0-9-]{1,99}$/;
 const operation=/^[0-9a-f-]{36}\.json$/;
@@ -54,10 +55,11 @@ function legacyOwners(root){
  return owners;
 }
 
-export function effectiveConstructionState(actual,history,hidden){
- if(!history||actual!==history[1])return actual;
+export function effectiveConstructionState(actual,history,hidden,base=state=>state){
+ if(!history)return base(actual);
+ if(actual!==history[1])return actual;
  for(let i=history.length-2;i>=2;i-=2)if(!hidden.has(history[i]))return history[i+1];
- return history[0];
+ return base(history[0]);
 }
 
 function appendChange(previous,change,record,plan){
@@ -152,18 +154,25 @@ export function constructionView(root,worldUuid,planning,paperWorldUuid){
   .map(p=>p.id).sort();
  if(!hiddenIds.length)return null;
  const index=constructionIndex(root,worldUuid,paperWorldUuid);
- const hidden=new Set(hiddenIds.filter(plan=>Object.hasOwn(index?.plan_tiles??{},plan)));
+ const source=readGeneratedConstruction(root,worldUuid);
+ const hidden=new Set(hiddenIds.filter(plan=>Object.hasOwn(index?.plan_tiles??{},plan)||source?.planTiles.has(plan)));
  if(!hidden.size)return null;
- const visibility_revision=hash([index.revision,[...hidden]]);
+ const revisions=[index?.revision,source?.revision],visibility_revision=hash([...revisions,[...hidden]]);
  if(cachedViews.get(root)?.visibility_revision===visibility_revision)return cachedViews.get(root);
- const affected=new Map(),mapTiles=new Map(),exact=new Set(),loaded=new Map(),columns=new Map();
+ const generated=source?.project(hidden);
+ const affected=new Map(),mapTiles=new Map(),exact=new Set(),loaded=new Map(),columns=new Map(),emptyColumn=new Map();
  const add=(tiles,key,plan)=>{
   if(!tiles.has(key))tiles.set(key,new Set());
   tiles.get(key).add(plan);
  };
  for(const plan of hidden){
-  for(const key of index.model_tiles[plan])add(affected,key,plan);
-  for(const key of index.plan_tiles[plan]){
+  for(const key of index?.model_tiles[plan]??[])add(affected,key,plan);
+  const generatedTiles=source?.planTiles.get(plan)??[];
+  for(const key of generatedTiles){
+   const [x,z]=key.split(',').map(Number);
+   for(let dz=-1;dz<=1;dz++)for(let dx=-1;dx<=1;dx++)add(affected,(x+dx)+','+(z+dz),plan);
+  }
+  for(const key of new Set([...(index?.plan_tiles[plan]??[]),...generatedTiles])){
    exact.add(key);
    const [x,z]=key.split(',').map(Number);
    for(let level=0;level<=10;level++){
@@ -172,11 +181,11 @@ export function constructionView(root,worldUuid,planning,paperWorldUuid){
    }
   }
  }
- const signatures=tiles=>Object.fromEntries([...tiles].map(([key,plans])=>[key,hash([index.revision,[...plans]])]));
+ const signatures=tiles=>Object.fromEntries([...tiles].map(([key,plans])=>[key,hash([...revisions,[...plans]])]));
  const visibility_tiles=signatures(affected),visibility_map_tiles=signatures(mapTiles);
  const tileRows=(x,z)=>{
   const key=tileOf(x,z);
-  if(!exact.has(key))return [];
+  if(!index||!exact.has(key))return [];
   if(!loaded.has(key))loaded.set(key,optional(path.join(index.directory,key+'.json'))??[]);
   return loaded.get(key);
  };
@@ -192,18 +201,20 @@ export function constructionView(root,worldUuid,planning,paperWorldUuid){
    }
    columns.set(tile,byColumn);
   }
-  return columns.get(tile).get(x+','+z);
+  return columns.get(tile).get(x+','+z)??(generated?.affected.has(tile)?emptyColumn:undefined);
  }
- const result={visibility_revision,visibility_tiles,visibility_map_tiles,
+ const resolve=(x,y,z,actual,history)=>effectiveConstructionState(actual,history,hidden,
+  generated?state=>generated.block(x,y,z,state):undefined);
+ const result={visibility_revision,visibility_tiles,visibility_map_tiles,generated,
   mapTileKey:(x,z,level)=>visibility_map_tiles[level+':'+x+','+z]??'',
   tileKey:(x,z)=>visibility_tiles[x+','+z]??'',exactChunks:[...exact].flatMap(key=>{
    const [x,z]=key.split(',').map(Number);
    return [[x*2,z*2],[x*2+1,z*2],[x*2,z*2+1],[x*2+1,z*2+1]];
   }),
-  column,block:(x,y,z,actual)=>effectiveConstructionState(actual,column(x,z)?.get(y),hidden),
+  column,block:(x,y,z,actual)=>resolve(x,y,z,actual,column(x,z)?.get(y)),
   chunk(cx,cz){
    return tileRows(cx*16,cz*16).filter(([x,,z])=>Math.floor(x/16)===cx&&Math.floor(z/16)===cz)
-    .map(([x,y,z,history])=>[x,y,z,actual=>effectiveConstructionState(actual,history,hidden)]);
+    .map(([x,y,z,history])=>[x,y,z,actual=>resolve(x,y,z,actual,history)]);
   }
  };
  cachedViews.set(root,result);

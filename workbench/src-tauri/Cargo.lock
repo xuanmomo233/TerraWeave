@@ -3555,7 +3555,7 @@ dependencies = [
 
 [[package]]
 name = "terraweave"
-version = "0.7.8"
+version = "0.7.9"
 dependencies = [
  "base64 0.22.1",
  "gl_generator",

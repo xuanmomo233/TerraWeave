@@ -117,7 +117,7 @@ export function mapService(ctx){
    const result=await desktopRequest({kind:'capture_scene',scene,width,height,angles:views.length?[]:angles,views,current_view,focus,show_plans:args.show_plans??false,show_invisible:args.show_invisible??false,planning_revision:state.revision});
    if(result.world_revision!==scene.revision||worldIndex().revision!==scene.revision)throw Error('世界存档在截图期间发生变化，请刷新重试');
    if(result.planning_revision!==state.revision)throw Error('Planning revision changed during panoramic capture');
-   const folder=path.dirname(result.images[0].path),geometry=JSON.stringify(result.scene_geometry),plans=JSON.stringify(state);fs.writeFileSync(path.join(folder,'scene-geometry.json'),geometry);fs.writeFileSync(path.join(folder,'planning.json'),plans);delete result.scene_geometry;result.scene_geometry_sha256=createHash('sha256').update(geometry).digest('hex');result.planning_snapshot_hash=createHash('sha256').update(plans).digest('hex');fs.writeFileSync(path.join(folder,'capture.json'),JSON.stringify(result));return result;
+   const folder=path.dirname(result.images[0].path),geometry=JSON.stringify(result.scene_geometry),plans=JSON.stringify(state);fs.writeFileSync(path.join(folder,'scene-geometry.json'),geometry);fs.writeFileSync(path.join(folder,'planning.json'),plans);delete result.scene_geometry;delete result.planning_snapshot;result.scene_geometry_sha256=createHash('sha256').update(geometry).digest('hex');result.planning_snapshot_hash=createHash('sha256').update(plans).digest('hex');fs.writeFileSync(path.join(folder,'capture.json'),JSON.stringify(result));return result;
   }
   if(name==='world_map_tile'){
    const index=worldIndex(),view=args.visibility_revision===undefined&&args.visibility_key===undefined?null:construction(index);

@@ -1107,11 +1107,11 @@ try{
   return debug?gl.getParameter(debug.UNMASKED_RENDERER_WEBGL):null;
  });
  assert.equal(probedRenderer??null,actualRenderer);
- assert.equal(fallback.resident_tiles,192);
+ assert.ok(fallback.resident_tiles>=288);
  assert.ok(fallback.background_vertex_budget<fallback.max_vertices);
- const larger=225;
- residencyFixture={...scene,revision:scene.revision+'-capacity',bounds:[0,64,0,479,64,479],
-  occupied_chunks:Array.from({length:larger},(_,i)=>[2*(i%15),2*Math.floor(i/15),64,64]),helper_chunks:[]};
+ const larger=fallback.resident_tiles+33;
+ residencyFixture={...scene,revision:scene.revision+'-capacity',bounds:[0,64,0,639,64,639],
+  occupied_chunks:Array.from({length:larger},(_,i)=>[2*(i%20),2*Math.floor(i/20),64,64]),helper_chunks:[]};
  await send({kind:'world_scene',scene:residencyFixture});
  const underFallback=await send({kind:'scene_view'});
  assert.ok(underFallback.render_stats.model_tiles<=fallback.resident_tiles);

@@ -4,6 +4,30 @@ import path from 'node:path';
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
 
+test('desktop and unbound tools resume a registered project, explicit targets take priority',async t=>{
+ const {startupPaths}=await import('./workspace-paths.mjs?isolated-startup-test');
+ const install=fs.mkdtempSync(path.join(os.tmpdir(),'terraweave-startup-'));
+ t.after(()=>fs.rmSync(install,{recursive:true,force:true}));
+ const primary=path.join(install,'project-state','workbench'),id='11111111-2222-3333-4444-555555555555';
+ const child=path.join(primary,'projects',id),session=path.join(primary,'desktop-session.json');
+ fs.mkdirSync(child,{recursive:true});
+ fs.writeFileSync(path.join(child,'project.json'),JSON.stringify({schema:1,id,name:'山谷'}));
+ assert.deepEqual(startupPaths(install,{}),{primary,root:primary});
+ fs.writeFileSync(session,JSON.stringify({project_id:id}));
+ assert.deepEqual(startupPaths(install,{}),{primary,root:child});
+ assert.deepEqual(startupPaths(install,{TERRAWEAVE_STATE:primary}),{primary,root:primary});
+ assert.deepEqual(startupPaths(install,{TERRAWEAVE_STATE:child}),{primary,root:child});
+ assert.deepEqual(startupPaths(install,{TERRAWEAVE_WORLD:'explicit'}),{primary,root:primary});
+ const isolated=path.join(install,'other');
+ assert.deepEqual(startupPaths(install,{TERRAWEAVE_STATE:isolated}),{primary:isolated,root:isolated});
+ fs.writeFileSync(path.join(child,'project.json'),JSON.stringify({schema:1,id:'primary',name:'stale'}));
+ assert.deepEqual(startupPaths(install,{}),{primary,root:primary});
+ for(const value of ['{',JSON.stringify({project_id:'../elsewhere'}),JSON.stringify({project_id:'primary'})]){
+  fs.writeFileSync(session,value);
+  assert.deepEqual(startupPaths(install,{}),{primary,root:primary});
+ }
+});
+
 test('new projects preserve the original files and bind only their own save',async t=>{
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'terraweave-projects-'));
  const keys=['TERRAWEAVE_STATE','TERRAWEAVE_PRIMARY_STATE','TERRAWEAVE_WORLD','TERRAWEAVE_PRIMARY_WORLD'];
@@ -51,10 +75,16 @@ test('new projects preserve the original files and bind only their own save',asy
  await assert.rejects(call('create_project',{type:'save',name:'无效存档',directory:path.join(root,'missing')}),/ENOENT/);
  await assert.rejects(call('open_project',{id:'../../outside'}),/工程不存在/);
  assert.equal((await call('list_projects')).length,4);
+ const generated=path.join('authoring','generated-construction','revision','0,0.gz');
+ fs.mkdirSync(path.join(ROOT,path.dirname(generated)),{recursive:true});
+ fs.writeFileSync(path.join(ROOT,generated),'generated ownership fixture');
+ fs.writeFileSync(path.join(ROOT,'authoring','generated-construction.json'),'{}');
  const parent=path.join(root,'backups');fs.mkdirSync(parent);
  const backup=await call('backup_project',{directory:parent});
  const restored=await call('restore_project_backup',{directory:backup.directory});
  assert.equal(fs.readFileSync(path.join(restored.project_directory,'planning.json'),'utf8'),planning);
+ assert.equal(fs.readFileSync(path.join(restored.project_directory,generated),'utf8'),'generated ownership fixture');
+ assert.equal(fs.readFileSync(path.join(restored.project_directory,'authoring','generated-construction.json'),'utf8'),'{}');
  fs.appendFileSync(path.join(backup.directory,'planning.json'),' ');
  await assert.rejects(call('restore_project_backup',{directory:backup.directory}),/校验失败/);
  assert.equal((await call('list_projects')).length,5);

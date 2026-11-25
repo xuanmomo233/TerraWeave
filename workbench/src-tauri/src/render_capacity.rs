@@ -34,9 +34,9 @@ fn adapter_memory(
     local_bytes: Option<u64>,
 ) -> (Option<u64>, Option<bool>) {
     match (integrated, local_bytes) {
-        (Some(true), Some(0)) => (None, Some(true)),
+        // Firmware reservations do not change the memory architecture of an integrated adapter.
+        (Some(true), _) => (None, Some(true)),
         (Some(false), Some(bytes)) if bytes > 0 => (Some(bytes >> 20), Some(false)),
-        // An iGPU can report a nonzero firmware reservation. Its size is not a discrete VRAM budget.
         _ => (None, None),
     }
 }
@@ -188,7 +188,10 @@ mod tests {
 
     #[test]
     fn integrated_reservations_never_count_as_discrete_memory() {
-        assert_eq!(adapter_memory(Some(true), Some(512 << 20)), (None, None));
+        assert_eq!(
+            adapter_memory(Some(true), Some(512 << 20)),
+            (None, Some(true))
+        );
         assert_eq!(adapter_memory(Some(true), Some(0)), (None, Some(true)));
         assert_eq!(adapter_memory(None, Some(8192 << 20)), (None, None));
         assert_eq!(

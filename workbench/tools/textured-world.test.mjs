@@ -29,6 +29,24 @@ test('lily pads keep their tinted, cutout surface instead of a missing-model cub
  geometry.dispose();
 });
 
+test('an omitted axis uses the saved version default without losing explicit axes',async()=>{
+ const face={texture:'#surface',cullface:'up'};
+ const assets={
+  '/assets/minecraft/blockstates/deepslate.json':{variants:{
+   'axis=y':{model:'minecraft:block/default_axis'},
+   'axis=x':{model:'minecraft:block/explicit_axis'},
+  }},
+  '/assets/minecraft/models/block/default_axis.json':{textures:{surface:'block/top'},elements:[{from:[0,0,0],to:[16,16,16],faces:{up:face}}]},
+  '/assets/minecraft/models/block/explicit_axis.json':{textures:{surface:'block/side'},elements:[{from:[0,0,0],to:[16,16,16],faces:{up:face}}]},
+ };
+ const options={readJson:async name=>assets[name],makeMaterial:texture=>({texture})};
+ for(const [state,texture] of [['deepslate','block/top'],['deepslate[axis=x]','block/side']]){
+  const [{material,geometry}]=await buildState('minecraft:'+state,options);
+  assert.equal(material.texture,texture);
+  geometry.dispose();
+ }
+});
+
 test('animation honors frame rectangles, listed order, duration and interpolation',()=>{
  const animation=textureAnimation(32,16,{width:16,height:16,frametime:4,frames:[1,{index:0,time:2}],interpolate:true});
  assert.equal(animation.columns,2);
@@ -66,6 +84,7 @@ test('render capacity uses independent CPU and GPU limits and a conservative fal
  assert.ok(tightGpu.cpuTiles>tightRam.cpuTiles);
  assert.ok(tightGpu.maxVertices<tightRam.maxVertices);
  const powerful=profile(32*1024,16*1024,8192),shared=profile(32*1024,16*1024,8192,true);
+ assert.ok(profile(16*1024,6*1024,null,null).maxVertices>DEFAULT_RENDER_CAPACITY.maxVertices);
  for(const key of Object.keys(DEFAULT_RENDER_CAPACITY))assert.ok(powerful[key]>DEFAULT_RENDER_CAPACITY[key],key);
  assert.ok(shared.maxVertices<powerful.maxVertices);
  for(const reserved of [256,8192]){
@@ -158,7 +177,7 @@ test('model preparation and revisiting vertex-budget candidates reuse cached wor
   return [{geometry:new THREE.BoxGeometry(),material:new THREE.MeshBasicMaterial()}];
  };
  const left={intersectsBox:box=>box.min.x===0},right={intersectsBox:box=>box.min.x===32};
- const update=frustum=>world.update(0,0,1,[0,0,0],null,[0,0,0],undefined,frustum,36);
+ const update=frustum=>world.update(0,0,1,[0,0,0],null,[0,0,0],undefined,frustum,17);
  await world.initialize({revision:'same',occupied_chunks:[[0,0],[2,0]]});world.enabled=true;
  const first=update(left);await started.promise;gate.resolve();await first;
  await update(right);await update(left);
@@ -191,7 +210,7 @@ test('live capacity changes trim CPU data and reselect meshes under both vertex 
  const update=()=>world.update(0,0,0,[0,0,0],null,[0,0,0],undefined,null,1e8,10000);
  world.enabled=true;await update();
  const first=world.meshes.get('0,0');assert.equal(world.allTilesResident,true);
- const smaller={cpuTiles:6,residentTiles:4,streamTiles:3,initialTiles:2,maxVertices:108};
+ const smaller={cpuTiles:6,residentTiles:4,streamTiles:3,initialTiles:2,maxVertices:51};
  assert.equal(world.setCapacity(smaller),true);assert.equal(world.setCapacity({...smaller}),false);
  assert.equal(world.cache.size,6);assert.equal(world.allTilesResident,false);
  await update();
@@ -222,7 +241,7 @@ test('a palace-sized background stays resident in a local editing window when th
 test('turning to a newly visible area keeps off-screen meshes when they still fit the budget',async()=>{
  const reads=[];
  const world=new Harness(async(name,{x,z})=>{reads.push(x);return {...tile,x,z};});
- await world.initialize({revision:'large',occupied_chunks:Array.from({length:220},(_,x)=>[x*2,0])});
+ await world.initialize({revision:'large',occupied_chunks:Array.from({length:420},(_,x)=>[x*2,0])});
  world.enabled=true;
  const origin=[0,0,0],eye=[0,80,0],first={intersectsBox:box=>box.min.x===0},turned={intersectsBox:box=>box.min.x===3200};
  await world.update(0,0,0,origin,null,eye,undefined,first);
@@ -275,16 +294,36 @@ test('a vertex-limited scene can swap the visible tile without a change in candi
  await world.initialize({revision:'limited',occupied_chunks:[[0,0],[2,0]]});
  world.enabled=true;
  const origin=[0,0,0],left={intersectsBox:box=>box.min.x<32},right={intersectsBox:box=>box.min.x>=32};
- await world.update(0,0,0,origin,null,[0,80,0],undefined,left,36);
+ await world.update(0,0,0,origin,null,[0,80,0],undefined,left,17);
  assert.deepEqual([...world.meshes.keys()],['0,0']);
  const candidateKey=world.signature;
  assert.equal(world.coverageKey,'0,0');
- await world.update(0,0,0,origin,null,[0,80,0],undefined,right,36);
+ await world.update(0,0,0,origin,null,[0,80,0],undefined,right,17);
  assert.deepEqual([...world.meshes.keys()],['1,0']);
  assert.equal(world.signature,candidateKey);
  assert.equal(world.coverageKey,'1,0');
  assert.equal(world.loadedVertices,36);
  assert.equal(world.omittedTiles,1);
+ world.clear();
+});
+
+test('complete captures retain all visible tiles even when only one fits in memory at a time',async()=>{
+ const world=new Harness(async(name,{x,z})=>({...tile,x,z}));
+ world.setCapacity({...DEFAULT_RENDER_CAPACITY,maxVertices:17});
+ await world.initialize({revision:'capture',occupied_chunks:[[0,0],[2,0],[4,0],[6,0]]});
+ const origin=[0,0,0],frustum={intersectsBox:box=>box.min.x<96};
+ const entries=await world.prepareCapture(origin,[frustum]);
+ const drawn=[];
+ for(const batch of world.captureBatches(entries)){
+  assert.equal(batch.length,1);
+  await world.withCaptureBatch(batch,origin,async()=>{
+   await Promise.resolve();
+   assert.equal(world.scene.children.length,1);
+   drawn.push(...world.meshes.keys());
+  });
+  assert.equal(world.scene.children.length,0);
+ }
+ assert.deepEqual(drawn,['0,0','1,0','2,0']);
  world.clear();
 });
 

@@ -3,6 +3,7 @@ import {Matrix4,Vector3} from 'three';
 import {createTextureAtlas,modelGroupKey} from './textured-world.js';
 import {awaitTextures} from './model-terrain.js';
 import {callWorkbench} from './workbench-api.js';
+import {fluidKind} from './tools/fluid-shape.mjs';
 
 const blockEntity=/^minecraft:(?:conduit|chest|trapped_chest|ender_chest|.*_bed|.*_banner|.*_sign|.*_head|.*_skull|.*shulker_box|end_portal)(?:\[|$)/;
 const celestialUp=new Vector3(0,1,0);
@@ -131,6 +132,7 @@ function frameData(camera,region,snapshot,lod,inputs,width,height,start){
  const p=camera.position.toArray().map((n,i)=>n+snapshot.bounds[i]);
  const eye=p.map(Math.floor),key=eye.join(',');
  const eyeBlock=(!region.panorama?snapshot.blocks[key]:undefined)??(lod.enabled?lod.stateAt(...eye):undefined);
+ const eyeFluid=fluidKind(eyeBlock);
  const biome=biomeAt(inputs.world,p),swamp=biome==='minecraft:swamp'||biome==='minecraft:mangrove_swamp';
  const temperatures={'minecraft:forest':.7,'minecraft:birch_forest':.6,'minecraft:taiga':.25,'minecraft:snowy_plains':0,'minecraft:desert':2,'minecraft:mangrove_swamp':.8,'minecraft:swamp':.8};
  return {width,height,near:camera.near,far:camera.far,view:camera.matrixWorldInverse.toArray(),
@@ -141,7 +143,7 @@ function frameData(camera,region,snapshot,lod,inputs,width,height,start){
   shadow_light:light.multiplyScalar(100).applyMatrix4(rotation).toArray(),sun_world:sun.toArray(),
   fog_color:[.753,.847,1],day_time:inputs.world.day_time,moon_phase:inputs.world.moon_phase,
   time_counter:(performance.now()-start)/1000,rain:inputs.world.raining?1:0,biome_temp:temperatures[biome]??.8,
-  in_swamp:swamp?1:0,eye_in_water:/^minecraft:lava/.test(eyeBlock??'')?2:/^minecraft:water/.test(eyeBlock??'')?1:0};
+  in_swamp:swamp?1:0,eye_in_water:eyeFluid==='lava'?2:eyeFluid==='water'?1:0};
 }
 
 export class OfflineIrisView{

@@ -4,6 +4,8 @@ import {createHash} from 'node:crypto';
 import {savedBlocks} from './render-context.mjs';
 import {worldIndex} from './world-surface.mjs';
 import {validateDesignPacket} from './world-writer.mjs';
+import {blockRule as rule,versionIndex} from './block-state-catalog.mjs';
+export {registryContains} from './block-state-catalog.mjs';
 
 const id={type:'string'};
 const replacements={type:'object',additionalProperties:id};
@@ -21,28 +23,12 @@ const statePattern=/^(?:minecraft:)?([a-z0-9_]+)(?:\[([a-z0-9_=,]+)\])?$/;
 const limit=80;
 const maxExportBytes=64*1024*1024;
 const hash=value=>createHash('sha256').update(value).digest('hex');
-let catalog;
 const renames=new Map([
  ['minecraft:grass','minecraft:short_grass'],['minecraft:short_grass','minecraft:grass'],
  ['minecraft:chain','minecraft:iron_chain'],['minecraft:iron_chain','minecraft:chain']
 ]);
 const absentFalse=new Set(['waterlogged','powered','ominous']);
 
-function versionIndex(version){
- catalog??=JSON.parse(fs.readFileSync(new URL('./design-block-catalog.json',import.meta.url),'utf8'));
- const index=catalog.versions.findIndex(([id])=>id===version);
- if(index===-1)throw Error('没有可用于方案转换的官方方块表 '+(version??'（方案未记录版本）'));
- return index;
-}
-function rule(id,version){
- if(!Object.hasOwn(catalog.blocks,id))return;
- const versionRange=catalog.blocks[id].find(([from,to])=>version>=from&&version<=to);
- return versionRange&&catalog.rules[versionRange[2]];
-}
-export function registryContains(version,name,id){
- const release=versionIndex(version),entries=catalog.registries[name];
- return Object.hasOwn(entries,id)&&!!(entries[id]&1<<release);
-}
 function parseState(value){
  const match=typeof value==='string'&&statePattern.exec(value);
  if(!match)return null;

@@ -11,5 +11,5 @@ if errorlevel 1 exit /b %errorlevel%
 "%USERPROFILE%\.cargo\bin\cargo.exe" build --manifest-path src-tauri/Cargo.toml --target-dir native-build --features custom-protocol
 if errorlevel 1 exit /b %errorlevel%
 if /I "%~1"=="--compile-only" exit /b 0
-if not exist bin mkdir bin
-copy /Y "native-build\debug\terraweave.exe" "bin\TerraWeave.exe" >nul
+node tools\install-desktop.mjs
+exit /b %errorlevel%

@@ -91,21 +91,31 @@ export function projectConstructionSnapshot(snapshot,view){
  const {bounds}=snapshot;
  let {blocks,context_blocks,block_entities,block_entity_positions}=snapshot;
  const changedEntities=new Set();
- for(let cz=Math.floor((bounds[2]-1)/16);cz<=Math.floor((bounds[5]+1)/16);cz++)
- for(let cx=Math.floor((bounds[0]-1)/16);cx<=Math.floor((bounds[3]+1)/16);cx++){
-  for(const [x,y,z,resolve] of view.chunk(cx,cz)){
-   const key=x+','+y+','+z,inside=Object.hasOwn(blocks,key);
-   const current=inside?blocks[key]:context_blocks?.[key];
-   if(current===undefined)continue;
-   const state=resolve(current);
-   if(state===current)continue;
-   if(inside){
-    if(blocks===snapshot.blocks)blocks={...blocks};
-    blocks[key]=state;
-    if(block_entities?.[key])changedEntities.add(key);
-   }else{
-    if(context_blocks===snapshot.context_blocks)context_blocks={...context_blocks};
-    context_blocks[key]=state;
+ function replace(key,current,state,inside){
+  if(state===current)return;
+  if(inside){
+   if(blocks===snapshot.blocks)blocks={...blocks};
+   blocks[key]=state;
+   if(block_entities?.[key])changedEntities.add(key);
+  }else{
+   if(context_blocks===snapshot.context_blocks)context_blocks={...context_blocks};
+   context_blocks[key]=state;
+  }
+ }
+ if(view.generated){
+  for(const [source,inside] of [[blocks,true],[context_blocks??{},false]]){
+   for(const [key,current] of Object.entries(source)){
+    const [x,y,z]=key.split(',').map(Number);
+    replace(key,current,view.block(x,y,z,current),inside);
+   }
+  }
+ }else{
+  for(let cz=Math.floor((bounds[2]-1)/16);cz<=Math.floor((bounds[5]+1)/16);cz++)
+  for(let cx=Math.floor((bounds[0]-1)/16);cx<=Math.floor((bounds[3]+1)/16);cx++){
+   for(const [x,y,z,resolve] of view.chunk(cx,cz)){
+    const key=x+','+y+','+z,inside=Object.hasOwn(blocks,key);
+    const current=inside?blocks[key]:context_blocks?.[key];
+    if(current!==undefined)replace(key,current,resolve(current),inside);
    }
   }
  }

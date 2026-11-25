@@ -23,9 +23,55 @@ pub fn node_program()->std::ffi::OsString {
  }
  if cfg!(windows) {"node.exe".into()} else {"node".into()}
 }
-fn startup_root()->PathBuf{
- let project=project();
- std::env::var_os("TERRAWEAVE_STATE").map(|p|project.join(p)).unwrap_or_else(||project.join("project-state/workbench"))
+const DESKTOP_SESSION:&str="desktop-session.json";
+struct Startup{primary:PathBuf,root:PathBuf}
+fn catalog_project(primary:&Path,id:&str)->Option<PathBuf>{
+ if id.len()!=36||!id.bytes().enumerate().all(|(i,b)|match i{
+  8|13|18|23=>b==b'-',_=>b.is_ascii_digit()||(b'a'..=b'f').contains(&b)
+ }){return None}
+ let root=primary.join("projects").join(id);
+ let descriptor=read(&root.join("project.json"),65536).ok()?;
+ (descriptor["schema"]==1&&descriptor["id"]==id&&descriptor["name"].is_string()).then_some(root)
+}
+fn resolve_startup(install:&Path,state:Option<PathBuf>,catalog:Option<PathBuf>,pinned_world:bool)->Startup{
+ let primary=catalog.unwrap_or_else(||{
+  if let Some(root)=&state{
+   if let Some(projects)=root.parent().filter(|p|p.file_name().is_some_and(|n|n=="projects")){
+    if let (Some(parent),Some(id))=(projects.parent(),root.file_name().and_then(|n|n.to_str())){
+     if catalog_project(parent,id).is_some(){return parent.to_path_buf()}
+    }
+   }
+   root.clone()
+  }else{install.join("project-state/workbench")}
+ });
+ let root=state.unwrap_or_else(||{
+  if !pinned_world{
+   if let Ok(session)=read(&primary.join(DESKTOP_SESSION),4096){
+    if let Some(root)=session["project_id"].as_str().and_then(|id|catalog_project(&primary,id)){return root}
+   }
+  }
+  primary.clone()
+ });
+ Startup{primary,root}
+}
+fn startup()->&'static Startup{
+ static STARTUP:OnceLock<Startup>=OnceLock::new();
+ STARTUP.get_or_init(||{
+  let install=project();
+  let scoped=|key|std::env::var_os(key).filter(|p|!p.is_empty()).map(|p|install.join(p));
+  resolve_startup(&install,scoped("TERRAWEAVE_STATE"),scoped("TERRAWEAVE_PRIMARY_STATE"),
+   std::env::var_os("TERRAWEAVE_WORLD").is_some_and(|p|!p.is_empty()))
+ })
+}
+fn remember_project(primary:&Path,state:&Path){
+ let id=if state==primary{"primary"}else{
+  let Some(id)=state.file_name().and_then(|v|v.to_str()) else{return};
+  if catalog_project(primary,id).as_deref()!=Some(state){return}
+  id
+ };
+ let file=primary.join(DESKTOP_SESSION);
+ if read(&file,4096).is_ok_and(|previous|previous["project_id"]==id){return}
+ if let Err(e)=write(&file,&json!({"project_id":id})){eprintln!("保存最近使用的工程失败：{e}");}
 }
 struct DesktopProject{root:PathBuf,_instance:fs::File,last_heartbeat:u64,epoch:u64,operations:usize}
 impl DesktopProject{
@@ -36,17 +82,17 @@ impl DesktopProject{
 static ACTIVE_PROJECT:OnceLock<Mutex<DesktopProject>>=OnceLock::new();
 fn active_project()->&'static Mutex<DesktopProject>{ACTIVE_PROJECT.get().expect("Desktop project initialized")}
 pub(crate) fn root()->PathBuf{
- ACTIVE_PROJECT.get().map(|p|p.lock().expect("Desktop project lock").root.clone()).unwrap_or_else(startup_root)
+ ACTIVE_PROJECT.get().map(|p|p.lock().expect("Desktop project lock").root.clone()).unwrap_or_else(||startup().root.clone())
 }
 pub(crate) fn project_env(command:&mut Command,state:&Path){
- static PRIMARY:OnceLock<PathBuf>=OnceLock::new();
  static PRIMARY_WORLD:OnceLock<Option<std::ffi::OsString>>=OnceLock::new();
- let primary=PRIMARY.get_or_init(||std::env::var_os("TERRAWEAVE_PRIMARY_STATE").map(|p|project().join(p)).unwrap_or_else(startup_root));
+ let initial=startup();
+ let primary=&initial.primary;
  let primary_world=PRIMARY_WORLD.get_or_init(||std::env::var_os("TERRAWEAVE_PRIMARY_WORLD").or_else(||
-  (startup_root()==*primary).then(||std::env::var_os("TERRAWEAVE_WORLD")).flatten()));
+  (initial.root==*primary).then(||std::env::var_os("TERRAWEAVE_WORLD")).flatten()));
  command.env("TERRAWEAVE_STATE",state).env("TERRAWEAVE_PRIMARY_STATE",primary);
  if let Some(world)=primary_world{command.env("TERRAWEAVE_PRIMARY_WORLD",world);}
- if state!=startup_root(){
+ if state!=initial.root{
   command.env_remove("TERRAWEAVE_WORLD");
   if state==primary{if let Some(world)=primary_world{command.env("TERRAWEAVE_WORLD",world);}}
  }
@@ -68,7 +114,7 @@ fn lock_project(root:&Path)->std::io::Result<fs::File>{
  Ok(file)
 }
 pub fn claim_instance()->Result<(),String>{
- let root=startup_root();
+ let root=startup().root.clone();
  let instance=lock_project(&root).map_err(|e|e.to_string())?;
  ACTIVE_PROJECT.set(Mutex::new(DesktopProject{root,_instance:instance,last_heartbeat:0,epoch:0,operations:0}))
   .map_err(|_|"桌面工程已初始化".into())
@@ -79,6 +125,14 @@ pub fn show_existing(){
  let _=fs::write(root().join("wake-window"),[]);
 }
 pub fn monitor_window(window:tauri::WebviewWindow){
+ let focused_window=window.clone();
+ let remember=move||{
+  if focused_window.is_visible().unwrap_or(false)&&focused_window.is_focused().unwrap_or(false){
+   remember_project(&startup().primary,&root());
+  }
+ };
+ remember();
+ window.on_window_event(move|event|if let tauri::WindowEvent::Focused(true)=event{remember()});
  std::thread::spawn(move||loop{
   let _=workbench_heartbeat();
   if fs::remove_file(root().join("wake-window")).is_ok(){
@@ -234,6 +288,35 @@ fn store_images(r:&Path,id:&str,q:&Value,result:&mut Value)->Result<(),String>{
 mod queue_tests{
  use super::*;
  #[test]
+ fn startup_resumes_a_registered_project_without_changing_explicit_bindings(){
+  let temp=std::env::temp_dir().join(format!("terraweave-startup-{}-{}",std::process::id(),ms()));
+  let primary=temp.join("project-state/workbench");
+  let id="11111111-2222-3333-4444-555555555555";
+  let child=primary.join("projects").join(id);
+  fs::create_dir_all(&child).unwrap();
+  write(&child.join("project.json"),&json!({"schema":1,"id":id,"name":"山谷"})).unwrap();
+  let resume=||resolve_startup(&temp,None,None,false);
+  assert_eq!(resume().root,primary);
+  remember_project(&primary,&child);
+  assert_eq!(resume().root,child);
+  assert_eq!(resolve_startup(&temp,None,None,true).root,primary);
+  assert_eq!(resolve_startup(&temp,Some(primary.clone()),None,false).root,primary);
+  let pinned=resolve_startup(&temp,Some(child.clone()),None,false);
+  assert_eq!(pinned.primary,primary);assert_eq!(pinned.root,child);
+  remember_project(&primary,&temp);
+  assert_eq!(resume().root,child);
+  remember_project(&primary,&primary);
+  assert_eq!(resume().root,primary);
+  write(&primary.join(DESKTOP_SESSION),&json!({"project_id":"../elsewhere"})).unwrap();
+  assert_eq!(resume().root,primary);
+  remember_project(&primary,&child);
+  fs::remove_file(child.join("project.json")).unwrap();
+  assert_eq!(resume().root,primary);
+  let dir=temp.canonicalize().unwrap();
+  assert_eq!(dir.parent(),Some(std::env::temp_dir().canonicalize().unwrap().as_path()));
+  fs::remove_dir_all(dir).unwrap();
+ }
+ #[test]
  fn stale_page_and_pending_queue_are_detected_during_handoff(){
   let temp=std::env::temp_dir();
   let root=temp.join(format!("terraweave-handoff-{}-{}",std::process::id(),ms()));
@@ -335,7 +418,7 @@ pub async fn workbench_call(tool:String,args:Value,project_epoch:u64,view_epoch:
  }).await.map_err(|e|e.to_string())?
 }
 #[tauri::command]
-pub async fn switch_project(id:String,project_epoch:u64)->Result<u64,String>{
+pub async fn switch_project(window:tauri::Window,id:String,project_epoch:u64)->Result<u64,String>{
  let source=page_root(project_epoch)?;
  let details=workbench_call("project_locations".into(),json!({"id":id}),project_epoch,None).await?;
  let target=PathBuf::from(details["project_directory"].as_str().ok_or("无法读取目标工程目录")?);
@@ -365,6 +448,9 @@ pub async fn switch_project(id:String,project_epoch:u64)->Result<u64,String>{
    *active=DesktopProject{root:target,_instance:instance,last_heartbeat:now,epoch:project_epoch+1,operations:0};
   }
   crate::ui_worker::retire(&source);
+  if window.is_visible().unwrap_or(false)&&window.is_focused().unwrap_or(false){
+   remember_project(&startup().primary,&root());
+  }
   Ok(project_epoch+1)
  }).await.map_err(|e|e.to_string())?
 }
@@ -372,7 +458,9 @@ pub async fn switch_project(id:String,project_epoch:u64)->Result<u64,String>{
 pub fn workbench_show(window:tauri::Window)->Result<(),String>{
  window.show().map_err(|e|e.to_string())?;
  window.unminimize().map_err(|e|e.to_string())?;
- window.set_focus().map_err(|e|e.to_string())
+ window.set_focus().map_err(|e|e.to_string())?;
+ remember_project(&startup().primary,&root());
+ Ok(())
 }
 #[tauri::command]
 pub fn workbench_window_action(window:tauri::Window,action:String,title:Option<String>)->Result<Value,String>{

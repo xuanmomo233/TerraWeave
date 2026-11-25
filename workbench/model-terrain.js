@@ -2,10 +2,12 @@ import {invoke} from '@tauri-apps/api/core';
 import * as THREE from 'three';
 import {mergeGeometries} from 'three/addons/utils/BufferGeometryUtils.js';
 import {fluidGeometry} from './fluid-geometry.js';
+import {aquaticPlant} from './tools/fluid-shape.mjs';
 import {specialModel} from './special-models.js';
 import {baselineMinecraft,supportedMinecraft} from './minecraft-version.js';
 import {dyes} from './tools/block-entity-appearance.mjs';
 import {partitionVariants,selectVariants,variantChoices} from './tools/model-variants.mjs';
+import {modelProperties} from './tools/block-state-catalog.mjs';
 import {setTextureImage} from './texture-animation.js';
 export {selectVariants} from './tools/model-variants.mjs';
 const cache=new Map(),mats=new Map(),maps=new Map(),loader=new THREE.TextureLoader();
@@ -51,19 +53,23 @@ function material(t,id,tint,minecraft=baselineMinecraft){
 }
 export async function awaitTextures(materials){const maps=[...new Set(materials.flat().map(m=>m?.map).filter(Boolean))];await Promise.all(maps.map(m=>m.userData.ready));const errors=maps.map(m=>m.userData.loadError).filter(Boolean);if(errors.length)throw Error('材质尚未就绪：'+errors.join('; '));}
 export function parseState(s){const m=/^minecraft:([a-z0-9_]+)(?:\[([^\]]+)\])?$/.exec(s);if(!m)throw Error('Invalid state '+s);return {id:m[1],props:Object.fromEntries((m[2]||'').split(',').filter(Boolean).map(x=>x.split('=')))}}
+function modelState(state,minecraft=baselineMinecraft){
+ const {id,props}=parseState(state);
+ return {id,props:modelProperties('minecraft:'+id,props,minecraft)};
+}
 const choiceCache=new Map();
 export async function chooseVariantGroups(state,items,position,minecraft=baselineMinecraft){
  if(items.length===0)return [{items}];
  const key=minecraft+'|'+state;
  if(!choiceCache.has(key)){
-  const {id,props}=parseState(state);
+  const {id,props}=modelState(state,minecraft);
   choiceCache.set(key,json('/assets/minecraft/blockstates/'+id+'.json',minecraft)
    .then(blockstate=>variantChoices(blockstate,props)).catch(()=>[]));
  }
  return partitionVariants(await choiceCache.get(key),items,position);
 }
 const opaqueCache=new Map();
-export function opaqueModel(state,minecraft=baselineMinecraft){const key=minecraft+"|"+state,read=url=>json(url,minecraft);if(!opaqueCache.has(key))opaqueCache.set(key,(async()=>{try{const {id,props}=parseState(state);if(/glass|leaves|ice|slime|honey|spawner|barrier|light|water|lava|powder_snow/.test(id))return false;const bs=await read('/assets/minecraft/blockstates/'+id+'.json');if(bs.multipart)return false;const choices=variantChoices(bs,props)[0];return (await Promise.all(choices.map(v=>model(v.model,read)))).every(m=>m.elements?.some(e=>!e.rotation&&e.from.every(n=>n===0)&&e.to.every(n=>n===16)&&Object.keys(e.faces).length===6));}catch{return false;}})());return opaqueCache.get(key);}
+export function opaqueModel(state,minecraft=baselineMinecraft){const key=minecraft+"|"+state,read=url=>json(url,minecraft);if(!opaqueCache.has(key))opaqueCache.set(key,(async()=>{try{const {id,props}=modelState(state,minecraft);if(/glass|leaves|ice|slime|honey|spawner|barrier|light|water|lava|powder_snow/.test(id))return false;const bs=await read('/assets/minecraft/blockstates/'+id+'.json');if(bs.multipart)return false;const choices=variantChoices(bs,props)[0];return (await Promise.all(choices.map(v=>model(v.model,read)))).every(m=>m.elements?.some(e=>!e.rotation&&e.from.every(n=>n===0)&&e.to.every(n=>n===16)&&Object.keys(e.faces).length===6));}catch{return false;}})());return opaqueCache.get(key);}
 const faceAxes={south:[[1,0,0],[0,1,0]],north:[[-1,0,0],[0,1,0]],east:[[0,0,-1],[0,1,0]],west:[[0,0,1],[0,1,0]],up:[[1,0,0],[0,0,-1]],down:[[1,0,0],[0,0,1]]};
 function lockFaceUV(uv,face,variant){
  const [u,v]=faceAxes[face].map(axis=>new THREE.Vector3(...axis));
@@ -91,11 +97,17 @@ export function modelFaceTint(id,props,index){
 }
 export const invisibleMarkerMaterial=()=>material('item/barrier','barrier',false);
 export async function buildState(s,options={}){
- const {id,props}=parseState(s);
+ const {id,props}=modelState(s,options.minecraft);
  const read=options.readJson??(url=>json(url,options.minecraft));
  const mkmat=options.makeMaterial??((...args)=>material(...args,options.minecraft));
  if(['barrier','structure_void','light'].includes(id)){if(!options.showInvisible||id==='light')return [];return [{geometry:new THREE.PlaneGeometry(.86,.86).translate(.5,.5,.5),material:mkmat('item/'+id,id,false)}];}
- if(id==='water'||id==='lava'){const level=Number(props.level??0),height=level>=8?8/9:Math.max(1/9,(8-level)/9);return [{geometry:fluidGeometry(options.fluidCorners??[height,height,height,height],options.fluidMask??options.occlusionMask??0),material:mkmat('block/'+id+(level>0?'_flow':'_still'),id,false)}];}
+ if(id==='water'||id==='lava'){
+  const mask=options.fluidMask??options.occlusionMask??0;
+  if(mask===63)return [];
+  const level=Number(props.level??0),height=level>=8?8/9:Math.max(1/9,(8-level)/9);
+  const geometry=fluidGeometry(options.fluidCorners??[height,height,height,height],mask);
+  return [{geometry,material:mkmat('block/'+id+(level>0?'_flow':'_still'),id,false)}];
+ }
  if(id==='bubble_column'){
   const water=await buildState('minecraft:water[level=0]',options);
   const bubbles=[[.32,.24,.36],[.58,.68,.63],[.71,.42,.38]].flatMap(([x,y,z])=>[0,Math.PI/2].map(angle=>
@@ -113,8 +125,9 @@ export async function buildState(s,options={}){
   return parts;
  }
  if(id==='pitcher_crop'&&props.half==='upper'&&Number(props.age)<3)return [];
- if(props.waterlogged==='true'){const dry=s.replace('waterlogged=true','waterlogged=false'),parts=await buildState(dry,options),water=await buildState('minecraft:water[level=0]',{...options,occlusionMask:options.fluidMask??0});return [...parts,...water];}
- const entity=specialModel(id,props,mkmat,options.blockEntity,options.minecraft);if(entity)return entity;
+ const water=aquaticPlant(id)||props.waterlogged==='true'
+  ?await buildState('minecraft:water[level=0]',{...options,fluidMask:options.fluidMask??0}):[];
+ const entity=specialModel(id,props,mkmat,options.blockEntity,options.minecraft);if(entity)return [...entity,...water];
  if(/^(?:glow_)?item_frame$/.test(id))props.map??='false';
  const bs=await read('/assets/minecraft/blockstates/'+id+'.json'),variants=selectVariants(bs,props,options.variantIndices),byTex=new Map();
  for(const v of variants){
@@ -134,7 +147,7 @@ export async function buildState(s,options={}){
  g.translate(-.5,-.5,-.5);g.rotateX(-(v.x||0)*Math.PI/180);g.rotateY(-(v.y||0)*Math.PI/180);g.translate(.5,.5,.5);g.computeVertexNormals();
  const t=textureName(f.texture,m.textures),tint=modelFaceTint(id,props,f.tintindex),key=t+'|'+tint;if(!byTex.has(key))byTex.set(key,{t,tint,gs:[]});byTex.get(key).gs.push(g);
  }} }
- if(!byTex.size)return [];
- return [...byTex.values()].map(({t,tint,gs})=>({geometry:mergeGeometries(gs),material:mkmat(t,id,tint)}));
+ const modelParts=[...byTex.values()].map(({t,tint,gs})=>({geometry:mergeGeometries(gs),material:mkmat(t,id,tint)}));
+ return [...modelParts,...water];
 }
 export function validate(d){if(d.schema!==1||!supportedMinecraft(d.minecraft)||!Array.isArray(d.bounds)||d.bounds.length!==6)throw Error('需要受支持的 Minecraft Java / schema 1 的地图数据');const b=d.bounds;if(!b.every(Number.isSafeInteger))throw Error('无效边界');const n=(b[3]-b[0]+1)*(b[4]-b[1]+1)*(b[5]-b[2]+1);if(n<1||n>100000||Object.keys(d.blocks||{}).length!==n)throw Error('区域必须完整，且不超过100000个位置');for(const [key,s]of Object.entries(d.blocks)){const xyz=key.split(',').map(Number);if(xyz.length!==3||xyz.some((v,i)=>!Number.isSafeInteger(v)||v<b[i]||v>b[i+3])||xyz.join(',')!==key)throw Error('无效坐标 '+key);parseState(s)}return d;}

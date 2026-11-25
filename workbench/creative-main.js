@@ -12,7 +12,7 @@ import {mountMapWorkspace} from './map-workspace.js';
 import {TexturedWorld} from './textured-world.js';
 import {chooseRenderCapacity} from './render-capacity.js';
 import {PlanningOverlay} from './planning-overlay.js';
-import {captureCamera,captureFrustum,renderCapture} from './capture-renderer.js';
+import {captureCamera,captureFrustum,paintCaptureBatch,readCapture,renderCapture} from './capture-renderer.js';
 import {PlanningSketch,planningPoint,pointLabel} from './planning-sketch.js';
 import './scene.css';
 import './editor-layout.css';
@@ -107,9 +107,19 @@ panoramaButton.onclick=()=>{
  else ui.run(()=>api('open_world_scene'));
 };
 $('detail-controls').querySelector('.view-buttons').prepend(panoramaButton);
+const completePreviewButton=document.createElement('button');
+completePreviewButton.textContent='完整预览';
+completePreviewButton.title='分批绘制整个存档的实景模型';
+completePreviewButton.hidden=true;
+completePreviewButton.onclick=()=>{
+ if(capturing||sceneChanging||ui.busy||!region?.panorama)return;
+ frame('isometric');
+ void ui.capture({preview:true});
+};
+panoramaButton.after(completePreviewButton);
 const lod=new TexturedWorld(worldGeometry,api,parts,(done,total,incremental)=>{
  const pending=done<total,tiles=total/2;
- sceneLoading.hidden=macro.active||!pending;
+ sceneLoading.hidden=macro.active||!pending||incremental;
  if(!pending)return;
  const percent=Math.floor(done/total*100),action=incremental?'更新':'加载';
  sceneLoading.textContent='正在'+action+' '+tiles+' 个模型图块 · '+percent+'%';
@@ -153,6 +163,7 @@ function setTool(name){
 }
 function clearDocument({keepWorld=false,keepLocal=false}={}){
  resetNavigation();
+ completePreviewButton.hidden=true;
  region=null;snapshot=null;showGeometry(localGeometry,false);showGeometry(worldGeometry,false);
  if(!keepLocal){
   residentGeometry=null;chunks.reset({chunks:[]},319);
@@ -324,7 +335,7 @@ function switchLocalRenderer(next,geometry){
  for(const entry of chunks.loaded.values())localGeometry.add(entry.group);
 }
 function trimLocalCache(){
- let used=lod.loadedVertices+(residentGeometry?.vertices??0);
+ let used=lod.loadedCost+(residentGeometry?.vertices??0);
  for(const {geometry} of cachedLocalGeometry.values())used+=geometry.vertices;
  for(const [key,entry] of cachedLocalGeometry){
   if(cachedLocalGeometry.size<=2&&used<=lod.capacity.maxVertices)return;
@@ -466,18 +477,26 @@ async function updateWorldVolume(tileLimit){
  const eye=camera.position.toArray().map((n,i)=>n+origin[i]),target=controls.target.toArray().map((n,i)=>n+origin[i]);
  const cut=owner.panorama?null:snapshot.bounds;
  const budget=backgroundVertexBudget();
+ const residentLimit=Math.min(lod.tiles.length,lod.capacity.residentTiles);
+ const grow=tileLimit===undefined&&owner.panorama&&!lod.info?.preview_index&&
+  lod.meshes.size>0&&!lod.budgetLimited&&lod.meshes.size<residentLimit;
+ const limit=grow?Math.min(residentLimit,lod.meshes.size+lod.capacity.streamTiles):tileLimit;
  volumeLoadEye=eye;
- await lod.update(target[0],target[2],camera.position.distanceTo(controls.target),origin,cut,eye,undefined,captureFrustum(camera),budget,tileLimit);
+ await lod.update(target[0],target[2],camera.position.distanceTo(controls.target),origin,cut,eye,undefined,captureFrustum(camera),budget,limit,grow);
  if(owner!==region||lod.loading||lod.residentRevision!==lod.info?.revision)return;
+ if(!lod.info.preview_index&&!lod.budgetLimited&&owner.panorama&&lod.meshes.size<residentLimit)volumeQueued=true;
  trimLocalCache();
  if(owner.panorama){
   // Prefer visible world geometry when retaining the last local view would exceed the scene budget.
-  if(residentGeometry&&residentGeometry.vertices+lod.loadedVertices>lod.capacity.maxVertices){
+  if(residentGeometry&&residentGeometry.vertices+lod.loadedCost>lod.capacity.maxVertices){
    residentGeometry=null;chunks.reset({chunks:[]},319);
   }
   const resident=lod.meshes.size,total=lod.tiles.length;
+  const incomplete=lod.budgetLimited||total>lod.capacity.residentTiles;
+  completePreviewButton.hidden=!incomplete;
   $('render-stats').textContent=resident+' / '+total+' 图块 · 完整材质';
-  $('source-status').textContent=lod.allTilesResident?'全部实景图块已加载 · 自由相机':'按视角加载实景模型';
+  $('source-status').textContent=lod.allTilesResident?'全部实景图块已加载 · 自由相机':
+   incomplete?'部分实景图块未驻留 · 可打开完整预览':'正在补载实景图块';
  }else $('source-status').textContent=lod.omittedTiles?'已载入选区周围的实景模型 · 部分远处图块未驻留':'选区周围的实景模型已载入';
  requestDraw();
 }
@@ -499,7 +518,7 @@ async function refreshRenderCapacity(){
   const capacity=chooseRenderCapacity(metrics,renderHardware?lod.capacity:undefined);
   renderHardware=metrics;
   if(lod.setCapacity(capacity)){
-   if(!lod.enabled&&residentGeometry&&residentGeometry.vertices+lod.loadedVertices>capacity.maxVertices)lod.clear();
+  if(!lod.enabled&&residentGeometry&&residentGeometry.vertices+lod.loadedCost>capacity.maxVertices)lod.clear();
    capacityChanged=true;
    volumeQueued=true;
   }
@@ -654,6 +673,40 @@ async function exportViews(q,data,frozenPlans,views){
  }
  return {images,report:shaded?iris.report:undefined};
 }
+async function exportPanoramaBatches(q,data,plans,views,entries,batches){
+ const {scene,lod:staged,snapshot:{bounds}}=data,origin=bounds.slice(0,3);
+ const targets=views.map(view=>{
+  const buffer=new THREE.WebGLRenderTarget(q.width,q.height);
+  buffer.texture.colorSpace=THREE.SRGBColorSpace;
+  return {...view,buffer};
+ });
+ const yieldFrame=()=>globalThis.scheduler?.yield?.()??new Promise(resolve=>setTimeout(resolve,0));
+ try{
+  staged.animate(captureAnimationTime);
+  let first=true;
+  for(const batch of batches){
+   await staged.withCaptureBatch(batch,origin,()=>paintCaptureBatch(renderer,scene,targets,first),'opaque');
+   first=false;
+   await yieldFrame();
+  }
+  for(const view of targets){
+   const distance=({tile:{x,z}})=>Math.hypot(x*32+16-view.pose.position[0],z*32+16-view.pose.position[2]);
+   const layers=entries.filter(({profile})=>profile.materials.some(material=>material.transparent)||q.show_invisible)
+    .sort((a,b)=>distance(b)-distance(a));
+   for(const batch of staged.captureBatches(layers)){
+    await staged.withCaptureBatch(batch,origin,()=>paintCaptureBatch(renderer,scene,[view],false),'transparent');
+    await yieldFrame();
+   }
+  }
+  const overlay=new PlanningOverlay(document.createElement('div'));
+  overlay.update(plans,q.show_plans,(x,z)=>snapshotHeight(data,x,z),data.key);
+  return {images:targets.map(({name,pose,camera,buffer})=>({name,camera:pose,
+   data_url:overlay.capture(readCapture(renderer,buffer),camera,origin).toDataURL('image/png')})),
+   report:iris.active?{status:'分批全景使用工坊实景光照'}:undefined};
+ }finally{
+  for(const {buffer} of targets)buffer.dispose();
+ }
+}
 async function capturePanorama(q){
  const current=q.current_view?sceneView():null;
  if(current?.mode==='map'||current?.mode==='empty')throw Error('请先打开三维场景，或指定截图相机');
@@ -661,7 +714,7 @@ async function capturePanorama(q){
  return captureScope(async()=>{
   const plans=await api('planning_state');
   if(plans.revision!==q.planning_revision)throw Error('规划已变化，请重新截图');
-  const bounds=q.scene.bounds,scene=captureScene('scene');
+  const bounds=q.scene.bounds,scene=captureScene(q.display_mode??'scene');
   const staged=new TexturedWorld(scene,api,parts,undefined,chooseVariantGroups);
   staged.setCapacity(lod.capacity);
   const placed={...q.scene,id:'capture-world',panorama:true,loaded_bounds:bounds};
@@ -669,20 +722,35 @@ async function capturePanorama(q){
   const requested=current?[{...current,name:'当前实景'}]:q.views?.length?q.views:q.angles.map(name=>({name}));
   const views=requested.map(spec=>({...captureCamera(q.width,q.height,bounds,q.focus??bounds,spec),name:spec.name}));
   try{
-   if(lod.info?.revision===q.scene.revision){staged.info=lod.info;staged.cache=new Map(lod.cache);staged.prepared=new Map(lod.prepared);}
+   if(lod.info?.revision===q.scene.revision){
+    staged.info=lod.info;
+    staged.cache=new Map(lod.cache);
+    staged.prepared=new Map(lod.prepared);
+    for(const group of lod.meshes.values()){
+     if(!lod.hasCurrentTile(group.userData.tile.x+','+group.userData.tile.z))continue;
+     const tile=group.userData.tile,key=q.scene.revision+':'+tile.x+','+tile.z;
+     const visibility=group.userData.visibility_key;
+     const cacheKey=visibility?key+':'+visibility:key;
+     staged.cache.set(cacheKey,tile);
+     staged.preparedTiles.set(tile,{tile,profile:group.userData.profile});
+    }
+   }
    await staged.initialize(q.scene);
    if(q.show_invisible){
     const marker=invisibleMarkerMaterial();await awaitTextures([marker]);staged.setShowInvisible(true,marker.map);
    }
    staged.enabled=true;
-   const first=views[0].pose,frusta=views.map(v=>captureFrustum(v.camera));
-   await staged.update(first.target[0],first.target[2],0,bounds.slice(0,3),null,first.position,undefined,
-    {intersectsBox:box=>frusta.some(f=>f.intersectsBox(box))});
-   const {images,report}=await exportViews(q,{scene,lod:staged,chunks,snapshot:snap,region:placed,key:'export:'+staged.signature},plans,views);
-   const evidence=staged.evidence();
+   const origin=bounds.slice(0,3),entries=await staged.prepareCapture(origin,views.map(v=>captureFrustum(v.camera)));
+   const batches=[...staged.captureBatches(entries)];
+   const data={scene,lod:staged,chunks,snapshot:snap,region:placed,key:'export:'+q.scene.revision};
+   const {images,report}=batches.length<=1
+    ?await staged.withCaptureBatch(batches[0]??[],origin,()=>exportViews(q,data,plans,views))
+    :await exportPanoramaBatches(q,data,plans,views,entries,batches);
+   const evidence=staged.evidence(true,entries.map(({tile})=>tile));
    for(const image of images)image.camera.tiles=evidence.tiles.map(t=>({x:t.x,z:t.z,detail:'full',revision:t.revision}));
    return {images,world_uuid:q.scene.world_uuid,world_revision:q.scene.revision,bounds,
-    planning_revision:plans.revision,view:{iris:report,panoramic:true,show_plans:q.show_plans,show_invisible:!!q.show_invisible},
+    planning_revision:plans.revision,planning_snapshot:plans,
+    view:{iris:report,panoramic:true,includes_background:true,capture_batches:batches.length,show_plans:q.show_plans,show_invisible:!!q.show_invisible},
     scene_geometry:{...evidence,world_uuid:q.scene.world_uuid},source:'saved_anvil_textured_render',created_at:new Date().toISOString(),minecraft_client_screenshot:false};
   }finally{staged.clear();staged.markerMaterial.dispose();}
  });
@@ -720,7 +788,7 @@ async function display(q,acceptsView=()=>true){
   if(!applySceneCamera(q.camera??(oldCamera?.position?oldCamera:saved?.camera)))frame();
   showGeometry(localGeometry,true);
   const compatible=lod.info?.world_uuid===region.world_uuid&&(!region.world_revision||lod.info.revision===region.world_revision);
-  if(!compatible||!region.transient&&residentGeometry.vertices+lod.loadedVertices>lod.capacity.maxVertices)lod.clear();
+  if(!compatible||!region.transient&&residentGeometry.vertices+lod.loadedCost>lod.capacity.maxVertices)lod.clear();
   lod.enabled=!!region.transient&&!region.pristine_void;showGeometry(worldGeometry,lod.enabled);
   if(lod.enabled)lod.rebase(bounds.slice(0,3),bounds);
   else if(lod.loading)lod.cancelUpdate();
@@ -802,6 +870,12 @@ async function captures(q){
 async function captureViewport(q){
  if(macro.active||!snapshot)throw Error('当前为地图，请使用地图截图');
  const r=region,snap=snapshot,viewSettings={...settings},pose=sceneView();
+ if(r.panorama){
+  const [world,plans]=await Promise.all([api('world_scene_info',{render_view:true}),api('planning_state')]);
+  if(region!==r||world.revision!==r.world_revision)throw Error('场景或存档已变化，请刷新后截图');
+  return capturePanorama({...q,...viewSettings,scene:world,planning_revision:plans.revision,
+   views:[{...pose,name:'当前完整实景'}]});
+ }
  return captureScope(async()=>{
   await renderQueue;
   if(lod.loading)await lod.loading;

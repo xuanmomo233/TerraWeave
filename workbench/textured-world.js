@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import {awaitTextures} from './model-terrain.js';
 import {updateAnimatedTexture} from './texture-animation.js';
 import {DEFAULT_RENDER_CAPACITY} from './render-capacity.js';
+import {compactBlockLookup,compactModelBytes,compactWorldMesh,coordinateOf,indexCount,vertexCount} from './compact-world-mesh.js';
 
 export function createTextureAtlas(materials,previous){
   const maps=[...new Set([...materials].map(m=>m.map).filter(Boolean))];
@@ -75,12 +76,15 @@ vec4 sampleAtlas(sampler2D image, vec2 uv) {
 }
 
 const BAKE_SLICE_MS=8;
+// Charge compact buffers against the same byte allowance as the expanded mesh.
+const EXPANDED_VERTEX_BYTES=58;
 export const MAX_SCENE_VERTICES=DEFAULT_RENDER_CAPACITY.maxVertices;
 const helper=s=>/^minecraft:(barrier|structure_void|light)(\[|$)/.test(s);
 export const modelGroupKey=(g,minecraft)=>JSON.stringify([minecraft,g.state,g.mask,g.fluid_mask,g.fluid_corners,g.block_entity,g.variantIndices]);
 const keyFor=modelGroupKey;
 export class TexturedWorld{
  capacity=DEFAULT_RENDER_CAPACITY;
+ loadedCost=0;
  coverageKey='';
  pendingTiles=new Map();
  pendingParts=new Map();
@@ -108,7 +112,7 @@ export class TexturedWorld{
   this.capacity=capacity;
   this.trimTileCache();
   if(previous.residentTiles!==capacity.residentTiles||previous.streamTiles!==capacity.streamTiles||previous.maxVertices!==capacity.maxVertices){
-   if(!this.enabled&&(this.meshes.size>capacity.residentTiles||this.loadedVertices>capacity.maxVertices))this.clear();
+   if(!this.enabled&&(this.meshes.size>capacity.residentTiles||this.loadedCost>capacity.maxVertices))this.clear();
    else this.cancelUpdate();
    this.capacityDirty=true;
   }
@@ -117,7 +121,7 @@ export class TexturedWorld{
  trimTileCache(){while(this.cache.size>this.capacity.cpuTiles)this.cache.delete(this.cache.keys().next().value);}
  setShowInvisible(value,map){this.showInvisible=value;if(map&&this.markerMaterial.map!==map){this.markerMaterial.map=map;this.markerMaterial.needsUpdate=true;}for(const group of this.meshes.values())for(const child of group.children)if(child.isPoints)child.visible=value;}
  dispose(group){for(const child of group.children)child.geometry.dispose();}
- clear(){this.cancelUpdate();for(const group of this.meshes.values()){this.scene.remove(group);this.dispose(group);}this.meshes.clear();this.lookups.clear();for(const mat of this.materials.values())mat.dispose();this.materials.clear();this.atlas?.texture.dispose();this.atlas=null;this.signature='';this.coverageKey='';this.residentRevision=undefined;this.completeResidency=undefined;this.loadedVertices=0;this.omittedTiles=0;this.lastUpdate=undefined;}
+ clear(){this.cancelUpdate();for(const group of this.meshes.values()){this.scene.remove(group);this.dispose(group);}this.meshes.clear();this.lookups.clear();for(const mat of this.materials.values())mat.dispose();this.materials.clear();this.atlas?.texture.dispose();this.atlas=null;this.signature='';this.coverageKey='';this.residentRevision=undefined;this.completeResidency=undefined;this.loadedVertices=0;this.loadedCost=0;this.omittedTiles=0;this.lastUpdate=undefined;}
  rebase(origin,bounds){this.origin=[...origin];this.cutBounds=bounds;for(const group of this.meshes.values())group.position.set(...group.userData.origin.map((n,i)=>n-origin[i]));this.uniforms.active.value=!!bounds;if(bounds){this.uniforms.min.value.set(...bounds.slice(0,3).map((n,i)=>n-origin[i]));this.uniforms.max.value.set(...bounds.slice(3).map((n,i)=>n+1-origin[i]));}}
  indexTiles(info){
   const result=new Map(),world=info.bounds??[-64,-64,-64,63,319,63];
@@ -133,6 +137,12 @@ export class TexturedWorld{
  }
  visibilityKey(key){return this.info?.visibility_tiles?.[key]??'';}
  hasCurrentTile(key){const group=this.meshes.get(key);return !!group&&(group.userData.visibility_key??'')===this.visibilityKey(key);}
+ tileBox(tile,origin,box=new THREE.Box3()){
+  const x=tile.x*32-origin[0],z=tile.z*32-origin[2];
+  box.min.set(x,tile.min_y-origin[1],z);
+  box.max.set(x+32,tile.max_y+1-origin[1],z+32);
+  return box;
+ }
  wanted(eye,target,frustum,origin,limit=this.capacity.streamTiles,keepResidents=false){
   limit=Math.min(limit,this.capacity.residentTiles);
   const box=new THREE.Box3();
@@ -140,9 +150,7 @@ export class TexturedWorld{
    const x=tile.x*32,z=tile.z*32;
    const distance=(p)=>Math.hypot(Math.max(0,x-p[0],p[0]-x-32),Math.max(0,z-p[2],p[2]-z-32));
    const near=distance(eye);
-   box.min.set(x-origin[0],tile.min_y-origin[1],z-origin[2]);
-   box.max.set(x+32-origin[0],tile.max_y+1-origin[1],z+32-origin[2]);
-   const visible=frustum?.intersectsBox(box);
+   const visible=frustum?.intersectsBox(this.tileBox(tile,origin,box));
    const retained=this.residentRevision===this.info.revision&&this.meshes.has(tile.key);
    // Only newly visible tiles can displace residents. Nearby unseen tiles fill spare capacity.
    const priority=visible?0:keepResidents&&retained?1:near<=128?2:3;
@@ -155,15 +163,17 @@ export class TexturedWorld{
   return wanted.map(entry=>entry.tile);
  }
  tileResources(tile){
-  let vertices=0;
+  let vertices=0,bytes=0;
   const materials=new Set();
   for(const group of tile.groups){
+   bytes+=group.positions.length*(group.state==='minecraft:barrier'?16:4);
    for(const part of this.prepared.get(keyFor(group,tile.minecraft))??[]){
-    vertices+=group.positions.length*(part.geometry.index?.count??part.geometry.getAttribute('position').count);
+    vertices+=group.positions.length*indexCount(part.geometry);
+    bytes+=group.positions.length*compactModelBytes(part.geometry);
     materials.add(part.material);
    }
   }
-  return {vertices,materials:[...materials]};
+  return {vertices,cost:Math.ceil(bytes/EXPANDED_VERTEX_BYTES),materials:[...materials]};
  }
  async tile(t,onRead){
   const {revision,visibility_revision}=this.info,visible=this.visibilityKey(t.key),key=revision+':'+t.key+(visible?':'+visible:'');
@@ -206,6 +216,64 @@ export class TexturedWorld{
   }
   return {...data,groups};
  }
+ async prepareTile(raw,current){
+  let result=this.preparedTiles.get(raw);
+  if(!result){
+   const tile=await this.prepare(raw,current);
+   if(!tile)return;
+   result={tile,profile:this.tileResources(tile)};
+   this.preparedTiles.set(raw,result);
+  }
+  return result;
+ }
+ async prepareCapture(origin,frusta){
+  const box=new THREE.Box3();
+  const candidates=this.tiles.filter(tile=>frusta.some(frustum=>frustum.intersectsBox(this.tileBox(tile,origin,box))));
+  const entries=new Array(candidates.length);
+  let cursor=0;
+  const load=async()=>{
+   while(cursor<candidates.length){
+    const i=cursor++,tile=candidates[i];
+    entries[i]=await this.prepareTile(await this.tile(tile));
+   }
+  };
+  const completed=await Promise.allSettled([load(),load(),load(),load()]);
+  const failed=completed.find(result=>result.status==='rejected');
+  if(failed)throw failed.reason;
+  const materials=[...new Set(entries.flatMap(({profile})=>profile.materials))];
+  await awaitTextures(materials);
+  this.atlas=this.createAtlas(materials);
+  return entries;
+ }
+ *captureBatches(entries){
+  let batch=[],cost=0;
+  for(const entry of entries){
+   if(batch.length&&(cost+entry.profile.cost>this.capacity.maxVertices||batch.length>=this.capacity.residentTiles)){
+    yield batch;
+    batch=[];cost=0;
+   }
+   // A single exact tile is indivisible here and must still be drawn.
+   batch.push(entry);
+   cost+=entry.profile.cost;
+  }
+  if(batch.length)yield batch;
+ }
+ async withCaptureBatch(batch,origin,draw,pass){
+  const groups=[];
+  try{
+   for(const {tile} of batch){
+    const group=this.bake(tile,origin,this,pass);
+    groups.push(group);
+    this.meshes.set(tile.x+','+tile.z,group);
+    this.scene.add(group);
+   }
+   this.coverageKey=[...this.meshes.keys()].sort().join('|');
+   return await draw(groups);
+  }finally{
+   for(const group of groups){this.scene.remove(group);this.dispose(group);}
+   this.meshes.clear();
+  }
+ }
  createAtlas(materials,previous){return createTextureAtlas(materials,previous);}
  style(material){return JSON.stringify([material.transparent??false,material.opacity??1,material.side??0,material.wireframe??false,material.emissiveIntensity??0,material.emissive?.getHex()??0,material.alphaTest??.1,material.depthWrite??true]);}
  atlasMaterial(source,resources=this){
@@ -216,8 +284,8 @@ export class TexturedWorld{
   if(source.emissive?.getHex()){m.emissive.copy(source.emissive);m.emissiveIntensity=source.emissiveIntensity;m.emissiveMap=atlas.texture;}
   m.onBeforeCompile=shader=>{
    Object.assign(shader.uniforms,{previewCut:this.uniforms.active,previewMin:this.uniforms.min,previewMax:this.uniforms.max});
-   shader.vertexShader='attribute vec3 blockOrigin;varying vec3 vPreviewOwner;\n'+shader.vertexShader;
-   shader.vertexShader=shader.vertexShader.replace('#include <worldpos_vertex>','#include <worldpos_vertex>\nvPreviewOwner=(modelMatrix*vec4(blockOrigin,1.0)).xyz;');
+   shader.vertexShader='attribute float blockOwner;varying vec3 vPreviewOwner;\n'+shader.vertexShader;
+   shader.vertexShader=shader.vertexShader.replace('#include <worldpos_vertex>','#include <worldpos_vertex>\nvPreviewOwner=(modelMatrix*vec4(mod(blockOwner,32.0),floor(blockOwner/1024.0)-64.0,mod(floor(blockOwner/32.0),32.0),1.0)).xyz;');
    shader.fragmentShader='varying vec3 vPreviewOwner;uniform bool previewCut;uniform vec3 previewMin;uniform vec3 previewMax;\n'+shader.fragmentShader;
    shader.fragmentShader=shader.fragmentShader.replace('#include <dithering_fragment>','vec3 owner=floor(vPreviewOwner+vec3(0.5));if(previewCut&&all(greaterThanEqual(owner,previewMin))&&all(lessThan(owner,previewMax)))discard;\n#include <dithering_fragment>');
    atlasMipSampling(shader,atlas);
@@ -225,22 +293,41 @@ export class TexturedWorld{
   resources.materials.set(key,m);
   return m;
  }
- bake(tile,origin,resources=this){const atlas=resources.atlas;
-  const buckets=new Map(),lookup=new Map(),markers=[];for(const g of tile.groups){for(const p of g.positions)lookup.set(p,g.state);if(helper(g.state)){if(g.state==='minecraft:barrier')for(const p of g.positions)markers.push(p%32+tile.bounds[0]+.5-origin[0],Math.floor(p/1024)-63.5-origin[1],Math.floor(p/32)%32+tile.bounds[2]+.5-origin[2]);continue;}
-   for(const part of this.prepared.get(keyFor(g,tile.minecraft))??[]){const key=this.style(part.material),geometry=part.geometry;if(!buckets.has(key))buckets.set(key,{source:part.material,items:[],count:0});const bucket=buckets.get(key),count=geometry.index?.count??geometry.getAttribute('position').count;bucket.items.push({g,part,count});bucket.count+=count*g.positions.length;}
-  }
-  resources.lookups.set(tile.x+','+tile.z,lookup);const group=new THREE.Group();group.userData={origin:[...origin],tile};
-  for(const bucket of buckets.values()){const positions=new Float32Array(bucket.count*3),normals=new Float32Array(bucket.count*3),uvs=new Float32Array(bucket.count*2),slots=atlas.dimension/atlas.tileSize>256?new Float32Array(bucket.count):new Uint16Array(bucket.count),colors=new Float32Array(bucket.count*3),blockOrigins=new Float32Array(bucket.count*3),owners=new Uint32Array(bucket.count/3);let cursor=0;
-   for(const {g,part,count}of bucket.items){const geometry=part.geometry,p=geometry.getAttribute('position'),n=geometry.getAttribute('normal'),uv=geometry.getAttribute('uv'),rect=atlas.rects.get(part.material.map)??atlas.white,tint=part.material.color??new THREE.Color(0xffffff),placeholder=part.placeholder?.5:0;
-    for(const encoded of g.positions){const x=encoded%32+tile.bounds[0]-origin[0]+placeholder,y=Math.floor(encoded/1024)-64-origin[1]+placeholder,z=Math.floor(encoded/32)%32+tile.bounds[2]-origin[2]+placeholder;
-     for(let v=0;v<count;v++){const i=geometry.index?.getX(v)??v,j=cursor*3,k=cursor*2;if(cursor%3===0)owners[cursor/3]=encoded;positions[j]=p.getX(i)+x;positions[j+1]=p.getY(i)+y;positions[j+2]=p.getZ(i)+z;blockOrigins[j]=x-placeholder;blockOrigins[j+1]=y-placeholder;blockOrigins[j+2]=z-placeholder;normals[j]=n?.getX(i)??0;normals[j+1]=n?.getY(i)??1;normals[j+2]=n?.getZ(i)??0;uvs[k]=uv?.getX(i)??0;uvs[k+1]=uv?.getY(i)??0;slots[cursor]=rect.slot;colors[j]=tint.r;colors[j+1]=tint.g;colors[j+2]=tint.b;cursor++;}
-    }
+ bake(tile,origin,resources=this,pass){
+  const {atlas}=resources,buckets=new Map(),markers=[];
+  for(const g of tile.groups){
+   if(helper(g.state)){
+    if(pass!=='opaque'&&g.state==='minecraft:barrier')for(const p of g.positions)markers.push(...coordinateOf(p).map(n=>n+.5));
+    continue;
    }
-   const geometry=new THREE.BufferGeometry();geometry.setAttribute('position',new THREE.BufferAttribute(positions,3));geometry.setAttribute('blockOrigin',new THREE.BufferAttribute(blockOrigins,3));geometry.setAttribute('normal',new THREE.BufferAttribute(normals,3));geometry.setAttribute('uv',new THREE.BufferAttribute(uvs,2));geometry.setAttribute('atlasSlot',new THREE.BufferAttribute(slots,1));geometry.setAttribute('color',new THREE.BufferAttribute(colors,3));geometry.computeBoundingSphere();geometry.computeBoundingBox();const mesh=new THREE.Mesh(geometry,this.atlasMaterial(bucket.source,resources));mesh.userData={owners,tile,atlasSource:bucket.source};group.add(mesh);
+   for(const part of this.prepared.get(keyFor(g,tile.minecraft))??[]){
+    if(pass&&!!part.material.transparent!==(pass==='transparent'))continue;
+    const key=this.style(part.material);
+    if(!buckets.has(key))buckets.set(key,{source:part.material,items:[],vertices:0,indices:0});
+    const bucket=buckets.get(key);
+    bucket.items.push({g,part});
+    bucket.vertices+=vertexCount(part.geometry)*g.positions.length;
+    bucket.indices+=indexCount(part.geometry)*g.positions.length;
+   }
   }
-  if(markers.length){const geometry=new THREE.BufferGeometry();geometry.setAttribute('position',new THREE.Float32BufferAttribute(markers,3));const points=new THREE.Points(geometry,this.markerMaterial);points.visible=this.showInvisible;group.add(points);}return group;
+  const tileKey=tile.x+','+tile.z;
+  if(pass!=='transparent'||!resources.lookups.has(tileKey))resources.lookups.set(tileKey,compactBlockLookup(tile.groups));
+  const group=new THREE.Group(),tileOrigin=[tile.bounds[0],0,tile.bounds[2]];
+  group.userData={origin:tileOrigin,tile};
+  group.position.set(...tileOrigin.map((n,i)=>n-origin[i]));
+  for(const bucket of buckets.values()){
+   const mesh=compactWorldMesh(bucket,atlas,this.atlasMaterial(bucket.source,resources));
+   mesh.userData={tile,atlasSource:bucket.source};
+   group.add(mesh);
+  }
+  if(markers.length){
+   const geometry=new THREE.BufferGeometry();
+   geometry.setAttribute('position',new THREE.Float32BufferAttribute(markers,3));
+   const points=new THREE.Points(geometry,this.markerMaterial);points.visible=this.showInvisible;group.add(points);
+  }
+  return group;
  }
- async update(x,z,distance,origin,bounds,eye=[x,0,z],_scale,frustum,budget=this.capacity.maxVertices,tileLimit){
+ async update(x,z,distance,origin,bounds,eye=[x,0,z],_scale,frustum,budget=this.capacity.maxVertices,tileLimit,keepResidents=tileLimit===undefined){
   if(!this.enabled)return;
   if(!this.info)await this.initialize();
   if(!this.enabled)return;
@@ -249,9 +336,12 @@ export class TexturedWorld{
   budget=Math.min(budget,this.capacity.maxVertices);
   const stream=preview||totalTiles>this.capacity.residentTiles;
   const limit=tileLimit??(stream?this.capacity.streamTiles:this.capacity.residentTiles);
-  const wanted=this.wanted(eye,[x,0,z],frustum,origin,limit,tileLimit===undefined),keys=wanted.map(t=>t.key);
+  const wanted=this.wanted(eye,[x,0,z],frustum,origin,limit,keepResidents),keys=wanted.map(t=>t.key);
   const signature=[revision,budget,...[...keys].sort().map(key=>key+'='+this.visibilityKey(key))].join(':'),order=keys.join(':');
-  const sameSet=this.signature===signature,reorder=sameSet&&this.budgetLimited;
+  const sameSet=this.signature===signature;
+  const box=new THREE.Box3();
+  const reorder=sameSet&&this.budgetLimited&&frustum&&wanted.some(tile=>
+   !this.hasCurrentTile(tile.key)&&frustum.intersectsBox(this.tileBox(tile,origin,box)));
   const loadingSignature=reorder?signature+'|'+order:signature;
   if(this.loading&&this.loadingGeneration===this.generation&&this.loadingSignature===loadingSignature)return this.loading;
   if(sameSet&&(!reorder||this.residentOrder===order)){
@@ -281,13 +371,8 @@ export class TexturedWorld{
      entry.tile={...raw,groups:entry.tile.groups};
     }else{
      entry.resident=undefined;
-     let prepared=this.preparedTiles.get(raw);
-     if(!prepared){
-      const tile=await this.prepare(raw,current);
-      if(!current())return;
-      prepared={tile,profile:this.tileResources(tile)};
-      this.preparedTiles.set(raw,prepared);
-     }
+     const prepared=await this.prepareTile(raw,current);
+     if(!current())return;
      Object.assign(entry,prepared);
     }
     finished++;progress();
@@ -299,10 +384,10 @@ export class TexturedWorld{
     if(!current())return;
     const failed=results.find(r=>r.status==='rejected');
     if(failed)throw failed.reason;
-    let vertices=0;
+    let vertices=0,cost=0;
     const selected=entries.filter(({profile})=>{
-     if(vertices+profile.vertices>budget)return false;
-     vertices+=profile.vertices;return true;
+     if(cost+profile.cost>budget)return false;
+     cost+=profile.cost;vertices+=profile.vertices;return true;
     });
     const materials=[...new Set(selected.flatMap(entry=>entry.profile.materials))];
     await awaitTextures(materials);
@@ -352,7 +437,7 @@ export class TexturedWorld{
     for(const [key,group] of next)if(this.meshes.get(key)!==group)this.scene.add(group);
     Object.assign(this,{atlas:resources.atlas,materials:resources.materials,lookups:resources.lookups,meshes:next,
      signature,coverageKey:[...next.keys()].sort().join('|'),residentRevision:revision,residentOrder:order,capacityDirty:false,completeResidency:undefined,budgetLimited:selected.length<wanted.length,
-     loadedVertices:vertices,omittedTiles:totalTiles-selected.length,bakedTiles:this.bakedTiles+rebuilt,
+     loadedVertices:vertices,loadedCost:cost,omittedTiles:totalTiles-selected.length,bakedTiles:this.bakedTiles+rebuilt,
      lastUpdate:{candidates:dirty.length,reads,rebuilt,retained:next.size-rebuilt,atlas_replaced:!!oldAtlas&&!reuseAtlas}});
     this.rebase(this.origin??origin,this.cutBounds);
     committed=true;
@@ -374,6 +459,10 @@ export class TexturedWorld{
  stateAt(x,y,z){const key=Math.floor(x/32)+','+Math.floor(z/32),encoded=(y+64)*1024+((z%32+32)%32)*32+(x%32+32)%32;return this.lookups.get(key)?.get(encoded);}
  meshList(){return [...this.meshes.values()].flatMap(group=>group.children.filter(child=>child.isMesh));}
  animate(now){return this.enabled&&(this.atlas?.animate?.(now)??false);}
- hitBlock(hit){const encoded=hit.object.userData.owners[hit.faceIndex],b=hit.object.userData.tile.bounds,coordinate=[encoded%32+b[0],Math.floor(encoded/1024)-64,Math.floor(encoded/32)%32+b[2]];return {coordinate,state:this.stateAt(...coordinate),appearance:hit.object.userData.tile.block_entities?.[coordinate.join()],normal:hit.face.normal.toArray()};}
- evidence(geometry=true){const tiles=[...this.meshes.values()].map(g=>g.userData.tile);if(!geometry)return {tiles};const keys=new Set(tiles.flatMap(t=>t.groups.filter(g=>!helper(g.state)).map(group=>keyFor(group,t.minecraft)))),models={};for(const key of keys)models[key]=(this.prepared.get(key)??[]).map(p=>({position:Array.from(p.geometry.getAttribute('position').array),normal:Array.from(p.geometry.getAttribute('normal')?.array??[]),uv:Array.from(p.geometry.getAttribute('uv')?.array??[]),index:p.geometry.index?Array.from(p.geometry.index.array):undefined,color:p.material.color?.getHex(),style:this.style(p.material),atlas_rect:this.atlas.rects.get(p.material.map)??this.atlas.white}));return {world_revision:this.info.revision,tiles,models,atlas_png:this.atlas.canvas.toDataURL('image/png'),representation:'minecraft_block_models',source:'saved_anvil_exact_models'};}
+ hitBlock(hit){
+  const tile=hit.object.userData.tile,encoded=hit.object.geometry.getAttribute('blockOwner').getX(hit.face.a);
+  const [x,y,z]=coordinateOf(encoded),coordinate=[x+tile.bounds[0],y,z+tile.bounds[2]];
+  return {coordinate,state:this.stateAt(...coordinate),appearance:tile.block_entities?.[coordinate.join()],normal:hit.face.normal.toArray()};
+ }
+ evidence(geometry=true,tiles=[...this.meshes.values()].map(g=>g.userData.tile)){if(!geometry)return {tiles};const keys=new Set(tiles.flatMap(t=>t.groups.filter(g=>!helper(g.state)).map(group=>keyFor(group,t.minecraft)))),models={};for(const key of keys)models[key]=(this.prepared.get(key)??[]).map(p=>({position:Array.from(p.geometry.getAttribute('position').array),normal:Array.from(p.geometry.getAttribute('normal')?.array??[]),uv:Array.from(p.geometry.getAttribute('uv')?.array??[]),index:p.geometry.index?Array.from(p.geometry.index.array):undefined,color:p.material.color?.getHex(),style:this.style(p.material),atlas_rect:this.atlas.rects.get(p.material.map)??this.atlas.white}));return {world_revision:this.info.revision,tiles,models,atlas_png:this.atlas.canvas.toDataURL('image/png'),representation:'minecraft_block_models',source:'saved_anvil_exact_models'};}
 }

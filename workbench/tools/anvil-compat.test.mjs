@@ -59,6 +59,44 @@ for(const [version,dataVersion] of Object.entries(javaReleases)){
  });
 }
 
+test('saved submerged plants keep their models without exposing water faces around them',t=>{
+ const world=fs.mkdtempSync(path.join(os.tmpdir(),'terraweave-seagrass-'));
+ t.after(()=>fs.rmSync(world,{recursive:true}));
+ const region=path.join(world,'region');
+ fs.mkdirSync(region);
+ const version=javaReleases['1.20.1'];
+ fs.writeFileSync(path.join(world,'level.dat'),gzipSync(root(compound(tag(10,'Data',compound(
+  num('DataVersion',version),tag(10,'Version',compound(str('Name','1.20.1'),num('Id',version)))
+ ))))));
+ const states=['air','water','seagrass','mud'].map(name=>compound(str('Name','minecraft:'+name)));
+ const cell=(x,y,z)=>y*256+z*16+x;
+ const words=Array(256).fill(0n);
+ const set=(x,y,z,id)=>{
+  const i=cell(x,y,z);
+  words[i>>4]|=BigInt(id)<<BigInt((i&15)*4);
+ };
+ for(let y=2;y<=4;y++)for(let z=2;z<=4;z++)for(let x=2;x<=4;x++){
+  set(x,y,z,x===3&&z===3?(y===3?2:y===2?3:1):1);
+ }
+ const packed=Buffer.alloc(4+words.length*8);
+ packed.writeInt32BE(words.length);
+ words.forEach((value,i)=>packed.writeBigUInt64BE(value,4+i*8));
+ const section=compound(tag(1,'Y',Buffer.from([0])),tag(10,'block_states',compound(tag(9,'palette',list(10,...states)),tag(12,'data',packed))));
+ const content=deflateSync(root(compound(num('DataVersion',version),str('Status','full'),tag(9,'sections',list(10,section)))));
+ const mca=Buffer.alloc(3*4096);
+ mca.writeUInt32BE(2<<8|1,0);
+ mca.writeUInt32BE(content.length+1,8192);
+ mca[8196]=2;content.copy(mca,8197);
+ fs.writeFileSync(path.join(region,'r.0.0.mca'),mca);
+ const tile=modelTile(0,0,path.join(world,'model-cache'),worldIndex(identifyWorld(world)));
+ const packedTile=(x,y,z)=>(y+64)*1024+z*32+x;
+ const plant=tile.groups.find(g=>g.positions.includes(packedTile(3,3,3)));
+ assert.equal(plant.state,'minecraft:seagrass');
+ assert.equal(plant.fluid_mask,63);
+ const water=tile.groups.find(g=>g.positions.includes(packedTile(2,3,3)));
+ assert.equal(water.fluid_mask&1,1);
+});
+
 test('legacy and modern banner and container NBT preserves their visible information',()=>{
  assert.deepEqual(blockEntityAppearance({id:'minecraft:banner',Patterns:[{Pattern:'cr',Color:14}]}),
   blockEntityAppearance({id:'minecraft:banner',patterns:[{pattern:'minecraft:cross',color:'red'}]}));

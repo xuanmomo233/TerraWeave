@@ -7,13 +7,17 @@ import {createRestoredProject,projectLocations} from './project-catalog.mjs';
 const manifestName='terraweave-backup.json';
 const dataFiles=new Set(['workspace.json','planning.json','current-region.json','map-view.json','editor-state.json']);
 const dataFolders=new Set(['regions','snapshots','drafts','history','captures','exports','worlds']);
+const authoringFiles=new Set(['generated-construction.json','construction.json','expanded-construction.json']);
+const authoringFolders=new Set(['generated-construction','writer-state']);
 const format='terraweave-project-backup';
 function portablePath(relative){
  if(typeof relative!=='string')throw Error('备份含无效的工程路径');
  const parts=relative.split('/');
  if(parts.some(part=>!part||/[<>:"\\|?*\u0000-\u001f]|[. ]$/u.test(part)||
   /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)/i.test(part))||
-    !(dataFolders.has(parts[0])||parts.length===1&&dataFiles.has(parts[0])))throw Error('备份含不支持的工程路径');
+    !(dataFolders.has(parts[0])||parts.length===1&&dataFiles.has(parts[0])||
+      parts[0]==='authoring'&&(authoringFolders.has(parts[1])||parts.length===2&&authoringFiles.has(parts[1]))))
+  throw Error('备份含不支持的工程路径');
  return parts;
 }
 function checkedPath(root,relative){
@@ -42,7 +46,7 @@ export async function backupProject(project,directory,worldRecord){
  const parent=fs.realpathSync(directory);
  if(!(await stat(parent)).isDirectory())throw Error('请选择保存备份的文件夹');
  const relative=path.relative(project.root,parent).split(path.sep)[0];
- if(dataFolders.has(relative))throw Error('请选择工程数据文件夹以外的位置来保存备份');
+ if(dataFolders.has(relative)||relative==='authoring')throw Error('请选择工程数据文件夹以外的位置来保存备份');
  const name='织境工程备份-'+new Date().toISOString().replace(/[:.]/g,'-')+'-'+randomUUID().slice(0,6);
  const target=path.join(parent,name),stage=target+'.pending';
  await mkdir(stage);
@@ -58,7 +62,8 @@ export async function backupProject(project,directory,worldRecord){
   else throw Error('工程中含有不可复制的文件：'+relative);
  }
  try{
-  for(const relative of [...dataFiles,...dataFolders])if(fs.existsSync(path.join(project.root,relative)))await visit(relative);
+  const ownership=[...authoringFiles,...authoringFolders].map(name=>'authoring/'+name);
+  for(const relative of [...dataFiles,...dataFolders,...ownership])if(fs.existsSync(path.join(project.root,relative)))await visit(relative);
   const details=projectLocations(project.id);
   const source=worldRecord?{...worldRecord,directory:details.source_kind==='project-world'
    ?path.relative(project.root,details.directory).split(path.sep).join('/'):worldRecord.directory,owned:details.source_kind==='project-world'}:null;

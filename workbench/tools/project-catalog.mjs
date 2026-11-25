@@ -1,31 +1,21 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {randomUUID} from 'node:crypto';
-import {PROJECT,ROOT} from './workspace-paths.mjs';
+import {PRIMARY_ROOT,ROOT,projectDescriptor,registeredProject} from './workspace-paths.mjs';
 import {identifyWorld,saveWorldSource,worldSource} from './world-source.mjs';
 import {writeVoidWorld} from './void-world.mjs';
 import {worldIndex} from './world-surface.mjs';
 
-export const primaryRoot = path.resolve(PROJECT,process.env.TERRAWEAVE_PRIMARY_STATE??ROOT);
+export const primaryRoot = PRIMARY_ROOT;
 export const primaryWorld = process.env.TERRAWEAVE_PRIMARY_WORLD??(ROOT===primaryRoot?process.env.TERRAWEAVE_WORLD:undefined);
 const projects = path.join(primaryRoot,'projects');
-const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const descriptor = id => path.join(id==='primary'?primaryRoot:path.join(projects,id),'project.json');
 
 function readDescriptor(id){
- try {
-  const data=JSON.parse(fs.readFileSync(descriptor(id),'utf8'));
-  if(data.schema!==1||data.id!==id||typeof data.name!=='string')return null;
-  return data;
- }catch(error){
-  if(error.code==='ENOENT'||error instanceof SyntaxError)return null;
-  throw error;
- }
+ return projectDescriptor(path.dirname(descriptor(id)),id);
 }
 function registered(id){
- if(typeof id!=='string'||!uuid.test(id))return null;
- const data=readDescriptor(id);
- return data?{id,name:data.name,root:path.join(projects,id),created_at:data.created_at}:null;
+ return registeredProject(primaryRoot,id);
 }
 function primary(){
  const metadata=readDescriptor('primary');
