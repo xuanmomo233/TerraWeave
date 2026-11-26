@@ -275,12 +275,20 @@ export class TexturedWorld{
   }
  }
  createAtlas(materials,previous){return createTextureAtlas(materials,previous);}
- style(material){return JSON.stringify([material.transparent??false,material.opacity??1,material.side??0,material.wireframe??false,material.emissiveIntensity??0,material.emissive?.getHex()??0,material.alphaTest??.1,material.depthWrite??true]);}
+ style(material){
+  return JSON.stringify([material.transparent??false,material.opacity??1,material.side??0,material.wireframe??false,
+   material.emissiveIntensity??0,material.emissive?.getHex()??0,material.alphaTest??.1,material.depthWrite??true,
+   material.isMeshBasicMaterial??false,material.polygonOffset??false,material.polygonOffsetFactor??0,material.polygonOffsetUnits??0]);
+ }
  atlasMaterial(source,resources=this){
   const key=this.style(source);
   if(resources.materials.has(key))return resources.materials.get(key);
   const atlas=resources.atlas;
-  const m=new THREE.MeshLambertMaterial({map:atlas.texture,vertexColors:true,alphaTest:source.alphaTest??.1,transparent:source.transparent??false,opacity:source.opacity??1,depthWrite:source.depthWrite??true,side:source.side??THREE.FrontSide,wireframe:source.wireframe??false});
+  const Material=source.isMeshBasicMaterial?THREE.MeshBasicMaterial:THREE.MeshLambertMaterial;
+  const m=new Material({map:atlas.texture,vertexColors:true,alphaTest:source.alphaTest??.1,
+   transparent:source.transparent??false,opacity:source.opacity??1,depthWrite:source.depthWrite??true,
+   side:source.side??THREE.FrontSide,wireframe:source.wireframe??false,polygonOffset:source.polygonOffset??false,
+   polygonOffsetFactor:source.polygonOffsetFactor??0,polygonOffsetUnits:source.polygonOffsetUnits??0});
   if(source.emissive?.getHex()){m.emissive.copy(source.emissive);m.emissiveIntensity=source.emissiveIntensity;m.emissiveMap=atlas.texture;}
   m.onBeforeCompile=shader=>{
    Object.assign(shader.uniforms,{previewCut:this.uniforms.active,previewMin:this.uniforms.min,previewMax:this.uniforms.max});

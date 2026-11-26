@@ -4,15 +4,15 @@ Minecraft 地图规划与创作工作台。先在整张世界地图上划分区�
 
 ## 下载
 
-当前桌面版本 [v0.7.9](https://github.com/xuanmomo233/TerraWeave/releases/tag/v0.7.9)。
+当前桌面版本 [v0.7.10](https://github.com/xuanmomo233/TerraWeave/releases/tag/v0.7.10)。
 
 | 下载 | 使用方式 |
 | --- | --- |
-| [Windows x64 便携开发包](https://github.com/xuanmomo233/TerraWeave/releases/download/v0.7.9/TerraWeave-0.7.9-windows-x64-portable.zip) | 完整解压后双击第一层的 `织境工坊.exe` |
-| [Windows x64 双语安装包](https://github.com/xuanmomo233/TerraWeave/releases/download/v0.7.9/TerraWeave-0.7.9-windows-x64-setup.exe) | 安装向导支持简体中文、English 和自选目录 |
+| [Windows x64 便携开发包](https://github.com/xuanmomo233/TerraWeave/releases/download/v0.7.10/TerraWeave-0.7.10-windows-x64-portable.zip) | 完整解压后双击第一层的 `织境工坊.exe` |
+| [Windows x64 双语安装包](https://github.com/xuanmomo233/TerraWeave/releases/download/v0.7.10/TerraWeave-0.7.10-windows-x64-setup.exe) | 安装向导支持简体中文、English 和自选目录 |
 | [TerraWeave.jar 1.2.0](https://github.com/xuanmomo233/TerraWeave/releases/download/plugin-v1.2.0/TerraWeave.jar) | 所有已验收的 Paper 版本共用同一份 JAR |
 
-v0.7.9 修复桌面启动时的黑色控制台窗口，启动后恢复上次在前台使用的工程。大地图按内存预算保留已加载的图块，可用「完整预览」分批绘制全景。由 AI 生成的地形、水系与林带可随各自规划显隐。建筑改动可在 1.20.1 至 26.3 之间转换。需要向 Paper 写入方块时可使用 TerraWeave 插件 1.2.0。
+v0.7.10 改进 Java 1.20.1 至 26.3 的材质兼容，修复 26.3 的玻璃、玻璃板和红石粉，并补齐部分方块的透明渲染和特殊模型。建筑改动可在同一版本范围内转换。需要向 Paper 写入方块时可使用 TerraWeave 插件 1.2.0。
 
 ## 启动与目录
 
@@ -146,3 +146,5 @@ TerraWeave 插件 1.2.0 在 Paper 1.20.1 至 26.3 范围内通过了 20 个官�
 `npm test` 为单元测试；`npm run test:map` 验证地表、模型及规划核心逻辑；`npm run test:storage` 检查去重与缓存。`npm run test:ui` 在隔离浏览器检查地图绘制、旋转、隐藏／删除／撤销、150% 缩放、面板边界、三维和截图恢复，不改动真实规划。`tools/verify-map-codex.mjs` 用独立 Codex 进程检查工具调用、实际读图及临时规划清理。`npm run test:writer:live` 独立启动已有测试服，执行一次可逆写入并关服。离线界面回归直接读取保存的世界。
 
 `npm run test:materials` 使用隔离场景复验原版和当前材质包的方块着色、特殊模型、贴图方向、加权变体与动画，并保存实际渲染图和检查报告。
+
+跨版本审计可运行 `node tools/verify-vanilla-materials.mjs <客户端目录> <报告.json>`。客户端目录按 `1.20.1.jar` 等版本名放置 Mojang 原版客户端，脚本检查每版方块状态选出的模型、贴图与动画元数据。26.3 的玻璃和特殊方块可分别用 `npm run test:materials -- --glass-26.3` 和 `npm run test:materials -- --special-26.3` 出图复验。

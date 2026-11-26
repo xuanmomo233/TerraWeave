@@ -47,6 +47,45 @@ test('an omitted axis uses the saved version default without losing explicit axe
  }
 });
 
+test('26.3 texture descriptors survive aliases and retain per-face translucency and tint',async()=>{
+ const prefix='/assets/minecraft/';
+ const files={
+  'blockstates/redstone_wire.json':{variants:{'':{model:'minecraft:block/wire'}}},
+  'models/block/wire.json':{parent:'block/wire_base',textures:{
+   layer:{sprite:'minecraft:block/redstone_dust_dot',force_translucent:true},
+   solid:'minecraft:block/redstone_dust_dot'
+  }},
+  'models/block/wire_base.json':{textures:{alias:'#layer'},elements:[{
+   from:[0,0,0],to:[16,16,16],faces:{
+    up:{texture:'alias',tintindex:0},down:{texture:'#solid',tintindex:0}
+   }
+  }]}
+ };
+ const parts=await buildState('minecraft:redstone_wire[power=15]',{minecraft:'26.3',
+  readJson:async name=>files[name.slice(prefix.length)],
+  makeMaterial:(sprite,id,tint,forceTranslucent)=>({sprite,...materialSettings(id,tint,forceTranslucent)})});
+ assert.equal(parts.length,2);
+ for(const {geometry,material} of parts){
+  assert.equal(material.sprite,'block/redstone_dust_dot');
+  assert.equal(material.color,modelFaceTint('redstone_wire',{power:'15'},0));
+  assert.equal(geometry.index.count,6);
+  geometry.dispose();
+ }
+ assert.equal(parts[0].material.transparent,true);
+ assert.equal(parts[0].material.depthWrite,false);
+ assert.equal(parts[1].material.transparent,undefined);
+});
+
+test('vanilla translucent blocks preserve partial texture alpha',()=>{
+ for(const block of ['slime_block','honey_block','frosted_ice','nether_portal']){
+  const material=materialSettings(block);
+  assert.equal(material.transparent,true,block);
+  assert.equal(material.depthWrite,false,block);
+ }
+ assert.equal(materialSettings('glass').transparent,false);
+ assert.equal(materialSettings('grass_block').transparent,false);
+});
+
 test('animation honors frame rectangles, listed order, duration and interpolation',()=>{
  const animation=textureAnimation(32,16,{width:16,height:16,frametime:4,frames:[1,{index:0,time:2}],interpolate:true});
  assert.equal(animation.columns,2);
@@ -58,12 +97,39 @@ test('animation honors frame rectangles, listed order, duration and interpolatio
  assert.equal(textureAnimation(16,32,null),null);
 });
 
+test('emissive model layers keep their separate unlit and depth-offset atlas material',async()=>{
+ const face={from:[1,0,8],to:[15,16,8],faces:{south:{texture:'#surface'}}};
+ const assets={
+  '/assets/minecraft/blockstates/open_eyeblossom.json':{variants:{'':{model:'block/open_eyeblossom'}}},
+  '/assets/minecraft/models/block/open_eyeblossom.json':{textures:{surface:'block/open_eyeblossom'},elements:[
+   face,{...face,light_emission:15}
+  ]}
+ };
+ const parts=await buildState('minecraft:open_eyeblossom',{minecraft:'26.3',
+  readJson:async name=>assets[name],makeMaterial:(_sprite,_id,_tint,_transparent,lightEmission)=>lightEmission
+   ?new THREE.MeshBasicMaterial({polygonOffset:true,polygonOffsetFactor:-1,polygonOffsetUnits:-1})
+   :new THREE.MeshLambertMaterial()});
+ assert.equal(parts.length,2);
+ const world=new TexturedWorld(new THREE.Scene(),()=>{},buildState);
+ const atlas={texture:new THREE.Texture()},resources={atlas,materials:new Map()};
+ const lit=world.atlasMaterial(parts[0].material,resources),unlit=world.atlasMaterial(parts[1].material,resources);
+ assert.equal(lit.isMeshLambertMaterial,true);
+ assert.equal(unlit.isMeshBasicMaterial,true);
+ assert.equal(unlit.polygonOffset,true);
+ assert.equal(unlit.polygonOffsetFactor,-1);
+ assert.equal(unlit.polygonOffsetUnits,-1);
+ assert.equal(unlit.map,atlas.texture);
+ for(const {geometry,material} of parts){geometry.dispose();material.dispose();}
+ lit.dispose();unlit.dispose();atlas.texture.dispose();world.markerMaterial.dispose();
+});
+
 test('redstone and stems use state-dependent tint, while neutral tinted faces retain their textures',()=>{
  assert.equal(modelFaceTint('redstone_wire',{power:'0'},0),0x4c0000);
  assert.equal(modelFaceTint('redstone_wire',{power:'15'},0),0xff3200);
  assert.equal(modelFaceTint('pumpkin_stem',{age:'7'},0),0xe0c71c);
  assert.equal(modelFaceTint('attached_melon_stem',{},0),0xe0c71c);
  assert.ok(modelFaceTint('pink_petals',{},0));
+ assert.equal(modelFaceTint('leaf_litter',{},0),0x5c3c32);
  assert.equal(modelFaceTint('stonecutter',{},0),false);
 });
 

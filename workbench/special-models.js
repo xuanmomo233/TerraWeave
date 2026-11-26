@@ -1,5 +1,7 @@
 import * as THREE from 'three';
 import {mergeGeometries} from 'three/addons/utils/BufferGeometryUtils.js';
+import {baselineMinecraft,javaReleases} from './minecraft-version.js';
+import {copperStatueModel} from './copper-statues.js';
 function cuboid(size,center,uvSize,offset=[0,0],textureSize=[64,64]){
  const g=new THREE.BoxGeometry(...size),uv=g.getAttribute('uv'),[w,h,d]=uvSize,[u,v]=offset,rects=[[u+d+w,v+d,d,h],[u,v+d,d,h],[u+d,v,w,d],[u+d+w,v,w,d],[u+d+w+d,v+d,w,h],[u+d,v+d,w,h]];
  for(let face=0;face<6;face++)for(let n=0;n<4;n++){const i=face*4+n,[x,y,width,height]=rects[face];uv.setXY(i,(x+uv.getX(i)*width)/textureSize[0],1-(y+(1-uv.getY(i))*height)/textureSize[1]);}g.translate(...center);return g;
@@ -32,6 +34,28 @@ function signInk(side,hanging){
  const ink=new Ink({map,alphaTest:.35});
  signMaterials.set(key,ink);
  return ink;
+}
+
+export function signFaceText(id,appearance,element,face,board){
+ const side=face==='south'?'front':face==='north'?'back':null;
+ if(!side||element.to[0]-element.from[0]<14||element.to[1]-element.from[1]<8||
+    element.to[2]-element.from[2]>2)return null;
+ const material=signInk(appearance[side],id.endsWith('_hanging_sign'));
+ if(!material)return null;
+ const geometry=board.clone(),positions=geometry.getAttribute('position'),normal=geometry.getAttribute('normal');
+ const points=[0,1,2,3].map(i=>new THREE.Vector3().fromBufferAttribute(positions,i));
+ const center=points[0].clone().add(points[2]).multiplyScalar(.5);
+ const right=points[1].clone().sub(points[0]).normalize();
+ const up=points[3].clone().sub(points[0]).normalize();
+ const offset=new THREE.Vector3().fromBufferAttribute(normal,0).multiplyScalar(.001);
+ for(const [i,vertex] of points.entries()){
+  vertex.sub(center);
+  const p=center.clone().addScaledVector(right,vertex.dot(right)*.9)
+   .addScaledVector(up,vertex.dot(up)*.88).add(offset);
+  positions.setXYZ(i,p.x,p.y,p.z);
+ }
+ geometry.setAttribute('uv',new THREE.Float32BufferAttribute([0,0,1,0,1,1,0,1],2));
+ return {geometry,material};
 }
 function signModel(id,props,makeMaterial,appearance){
  const [,wood,wall,hanging]=/^([a-z_]+?)(_wall)?(_hanging)?_sign$/.exec(id);
@@ -104,24 +128,41 @@ function potModel(id,props,makeMaterial,appearance){
  return result;
 }
 
-export function specialModel(id,props,makeMaterial,appearance){
- if(/_sign$/.test(id))return signModel(id,props,makeMaterial,appearance);
- if(id.endsWith('_bed'))return bedModel(id,props,makeMaterial);
+function chestModel(id,props,makeMaterial){
+ const copper=/^(?:waxed_)?(?:(exposed|weathered|oxidized)_)?copper_chest$/.exec(id);
+ const sprite=copper?'copper'+(copper[1]?'_'+copper[1]:''):({chest:'normal',trapped_chest:'trapped',ender_chest:'ender'})[id];
+ if(!sprite)return null;
+ const type=id==='ender_chest'?'single':props.type??'single';
+ const left=type==='left',right=type==='right';
+ const x=left?8.5:right?7.5:8,width=left||right?15:14;
+ const boxes=[
+  cuboid([width/16,10/16,14/16],[x/16,5/16,.5],[width,10,14],[0,19]),
+  cuboid([width/16,5/16,14/16],[x/16,11.5/16,.5],[width,5,14])
+ ];
+ const lockWidth=left||right?1:2,lockCenter=left?15.5:right?.5:8;
+ boxes.push(cuboid([lockWidth/16,4/16,1/16],[lockCenter/16,9/16,.5/16],[lockWidth,4,1],[2,4]));
+ const suffix=left||right?'_'+type:'';
+ return [{geometry:orient(mergeGeometries(boxes),props.facing),material:makeMaterial('entity/chest/'+sprite+suffix,id,false)}];
+}
+
+export function specialModel(id,props,makeMaterial,appearance,minecraft=baselineMinecraft){
+ const relocatedEntityTextures=javaReleases[minecraft]>=javaReleases['26.1'];
+ if(id.endsWith('_sign')&&javaReleases[minecraft]<javaReleases['26.2'])return signModel(id,props,makeMaterial,appearance);
+ if(id.endsWith('_bed')&&javaReleases[minecraft]<javaReleases['26.2'])return bedModel(id,props,makeMaterial);
  if(Object.hasOwn(skullTextures,id.replace(/(?:_wall)?_(?:skull|head)$/,'')))return skullModel(id,props,makeMaterial);
  if(id==='decorated_pot')return potModel(id,props,makeMaterial,appearance);
+ if(/(?:^|_)copper_golem_statue$/.test(id))return copperStatueModel(id,props,makeMaterial,cuboid,orient,minecraft);
  if(id==='end_portal'||id==='end_gateway'){
   const geometry=id==='end_portal'?new THREE.PlaneGeometry(1,1).rotateX(-Math.PI/2).translate(.5,.75,.5):
    new THREE.BoxGeometry(1,1,1).translate(.5,.5,.5);
-  return [{geometry,material:makeMaterial('entity/end_portal',id,false)}];
+  const sprite=relocatedEntityTextures?'entity/end_portal/end_portal':'entity/end_portal';
+  return [{geometry,material:makeMaterial(sprite,id,false)}];
  }
  if(id==='conduit'){
   const size=6/16;
   return [{geometry:new THREE.BoxGeometry(size,size,size).translate(.5,.5,.5),material:makeMaterial('block/conduit',id,false)}];
  }
- if(['chest','trapped_chest','ender_chest'].includes(id)){
-  const texture=id==='ender_chest'?'ender':id==='trapped_chest'?'trapped':'normal',type=props.type??'single',suffix=type==='single'?'':'_'+type;
-  const boxes=[cuboid([14/16,10/16,14/16],[.5,5/16,.5],[14,10,14],[0,19]),cuboid([14/16,5/16,14/16],[.5,11.5/16,.5],[14,5,14]),cuboid([2/16,4/16,1/16],[.5,9/16,.5/16],[2,4,1])];return [{geometry:orient(mergeGeometries(boxes),props.facing),material:makeMaterial('entity/chest/'+texture+suffix,id,false)}];
- }
+ if(id==='chest'||id.endsWith('_chest'))return chestModel(id,props,makeMaterial);
  if(id==='shulker_box'||id.endsWith('_shulker_box')){
   const color=id.replace(/_?shulker_box$/,''),facing={down:[0,-1,0],north:[0,0,-1],south:[0,0,1],east:[1,0,0],west:[-1,0,0]}[props.facing]??[0,1,0];
   const rotation=new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,1,0),new THREE.Vector3(...facing));
@@ -137,7 +178,8 @@ export function specialModel(id,props,makeMaterial,appearance){
   const body=depth=>place(cuboid([20/24,40/24,depth],[.5,y,z],[20,40,1]));
   const frame=[new THREE.BoxGeometry(22/24,2/24,2/24).translate(.5,y+.84,z)];
   if(!wall)frame.push(new THREE.BoxGeometry(2/24,1.93,2/24).translate(.5,.965,.5));
-  const parts=[{geometry:body(1/24),material:makeMaterial('entity/banner_base',id,true)},
+  const sprite=relocatedEntityTextures?'entity/banner/banner_base':'entity/banner_base';
+  const parts=[{geometry:body(1/24),material:makeMaterial(sprite,id,true)},
    {geometry:place(mergeGeometries(frame)),material:makeMaterial('block/oak_planks',id,false)}];
   for(const [index,pattern] of (appearance?.patterns??[]).entries()){
    parts.push({geometry:body(1/24+(index+1)*.0008),

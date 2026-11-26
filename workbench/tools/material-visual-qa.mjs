@@ -10,14 +10,32 @@ import {ensureVanillaAssets} from './vanilla-assets.mjs';
 
 const root=fileURLToPath(new URL('../',import.meta.url)),assets=path.join(root,'assets');
 const out=process.env.TERRAWEAVE_MATERIAL_QA_OUTPUT??path.join(root,'packages/material-visual-qa');
+const glass=process.argv.includes('--glass-26.3'),special=process.argv.includes('--special-26.3');
+const minecraft=glass||special?'26.3':'1.20.1';
 fs.mkdirSync(out,{recursive:true});
-await ensureVanillaAssets('1.20.1');
+await ensureVanillaAssets(minecraft);
 ensurePackAnimationMetadata(assets);
 const overlays=assetRoots(assets);
 const {chromium}=await import(pathToFileURL(process.env.TERRAWEAVE_PLAYWRIGHT??
  'C:/Users/杨骋达/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright/index.mjs').href);
 
-const cases=[
+const colors=['white','orange','magenta','light_blue','yellow','lime','pink','gray',
+ 'light_gray','cyan','purple','blue','brown','green','red','black'];
+const glassCases=['glass',...colors.map(color=>color+'_stained_glass'),'tinted_glass',
+ 'glass_pane[north=true,south=true]',...colors.map(color=>color+'_stained_glass_pane[east=true,west=true]'),
+ 'redstone_wire[power=13,east=side,west=side]'];
+const specialCases=[
+ 'heavy_core','slime_block','honey_block','frosted_ice','nether_portal','end_portal','end_gateway','black_banner',
+ 'red_bed[part=head,facing=south]','red_bed[part=foot,facing=south]',
+ 'straw_bed[part=head,facing=south]','straw_bed[part=foot,facing=south]',
+ 'open_eyeblossom','potted_open_eyeblossom','firefly_bush','leaf_litter',
+ 'copper_chest','exposed_copper_chest','weathered_copper_chest','waxed_oxidized_copper_chest',
+ 'copper_golem_statue[copper_golem_pose=standing]','exposed_copper_golem_statue[copper_golem_pose=sitting]',
+ 'weathered_copper_golem_statue[copper_golem_pose=running]','waxed_oxidized_copper_golem_statue[copper_golem_pose=star]',
+ 'oak_sign[rotation=0]','oak_wall_sign[facing=south]',
+ 'oak_hanging_sign[attached=true,rotation=0]','oak_wall_hanging_sign[facing=south]',
+];
+const cases=glass?glassCases:special?specialCases:[
  'redstone_wire[power=0,east=side,west=side]','redstone_wire[power=15,east=side,west=side]',
  'pumpkin_stem[age=7]','melon_stem[age=3]','attached_pumpkin_stem[facing=east]','attached_melon_stem[facing=north]',
  'bamboo_sapling','pink_petals[flower_amount=4]','potted_fern','lava_cauldron','powder_snow_cauldron[level=3]','stonecutter',
@@ -29,22 +47,24 @@ const cases=[
 const blocks={};
 for(let z=0;z<=24;z++)for(let x=0;x<=39;x++)blocks[[x,63,z]]='minecraft:smooth_stone';
 for(const [i,state] of cases.entries()){
- const x=state.startsWith('yellow_bed[part=foot')?26:2+i%8*5,z=2+Math.floor(i/8)*5;
- blocks[[x,64,z]]=normalizeBlockState(state);
+ let x=state.startsWith('yellow_bed[part=foot')?26:2+i%8*5;
+ const z=2+Math.floor(i/8)*5,bed=special&&/_bed\[part=/.test(state);
+ if(bed)x=Math.floor((i%8)/2)*9+4;
+ blocks[[x,64,z+(bed&&state.includes('part=head')?1:0)]]=normalizeBlockState(state,minecraft);
  if(state==='lily_pad')blocks[[x,63,z]]=normalizeBlockState('water');
 }
-for(let x=1;x<=38;x++){
+if(!glass&&!special)for(let x=1;x<=38;x++){
  blocks[[x,64,20]]=normalizeBlockState('stone');
  blocks[[x,64,22]]=normalizeBlockState('bookshelf');
  blocks[[x,64,24]]=normalizeBlockState('grass_block');
 }
 
-async function exercise({THREE,buildState,awaitTextures,chooseVariantGroups,ChunkRenderer,TexturedWorld,makeIndex,renderCapture,blocks}){
+async function exercise({THREE,buildState,awaitTextures,chooseVariantGroups,ChunkRenderer,TexturedWorld,makeIndex,renderCapture,blocks,minecraft,glass,special}){
  const require=(condition,message)=>{if(!condition)throw Error(message);};
  const view=()=>{const scene=new THREE.Scene();scene.background=new THREE.Color('#172332');
   scene.add(new THREE.HemisphereLight(0xffffff,0x777777,1.8));
   const sun=new THREE.DirectionalLight(0xffffff,2);sun.position.set(3,5,2);scene.add(sun);return scene;};
- const localScene=view(),worldScene=view(),minecraft='1.20.1',bounds=[0,63,0,39,65,24];
+ const localScene=view(),worldScene=view(),bounds=[0,63,0,39,65,24];
  const choices={local:new Map(),panoramic:new Map()};
  const pick=mode=>async(state,positions,position,version)=>{
   const groups=await chooseVariantGroups(state,positions,position,version);
@@ -76,6 +96,40 @@ async function exercise({THREE,buildState,awaitTextures,chooseVariantGroups,Chun
  const localStates=new Set(chunks.meshes().map(mesh=>mesh.userData.s));
  const panoramicStates=new Set(Object.keys(lod.evidence().models).map(key=>JSON.parse(key)[1]));
  for(const state of expected)require(localStates.has(state)&&panoramicStates.has(state),'Missing visible model for '+state);
+ if(glass||special){
+  const paneStates=new Set(),checked=[];
+  for(const mesh of chunks.meshes()){
+   const state=mesh.userData.s,id=state.slice(10).split('[')[0];
+   if(special){
+    if(id==='smooth_stone')continue;
+    require(mesh.material.map?.userData.source,'Missing special-block sprite for '+state);
+    if(['slime_block','honey_block','frosted_ice','nether_portal'].includes(id)){
+     require(mesh.material.transparent&&!mesh.material.depthWrite,'Incorrect alpha settings for '+state);
+    }
+    checked.push(state);
+    continue;
+   }
+   if(!id.includes('glass')&&id!=='redstone_wire')continue;
+   const material=mesh.material,sprite=material.map?.userData.source;
+   require(material.transparent&&!material.depthWrite,'Incorrect alpha settings for '+state);
+   if(id.endsWith('_pane')){
+    const body=id.slice(0,-5);
+    require(sprite==='block/'+body||sprite==='block/'+id+'_top','Incorrect glass pane sprite '+sprite);
+    if(sprite.endsWith('_pane_top'))paneStates.add(state);
+   }else if(id!=='redstone_wire')require(sprite==='block/'+id,'Incorrect glass sprite '+sprite);
+   checked.push(state);
+  }
+  const unique=new Set(checked);
+  require(special?unique.size===28:unique.size===36&&paneStates.size===17,'Missing expected material');
+  require(!worldScene.children.some(o=>o.material?.wireframe),'Panorama has missing-model geometry');
+  const renderer=new THREE.WebGLRenderer({antialias:true});
+  const camera=new THREE.PerspectiveCamera(43,1440/900,.1,128);
+  camera.position.set(19,94,47);camera.lookAt(19,63,11);camera.updateMatrixWorld();
+  const shot=scene=>renderCapture(renderer,scene,camera,1440,900).toDataURL('image/png');
+  const screenshots={local:shot(localScene),panoramic:shot(worldScene)};
+  renderer.dispose();
+  return {checked_states:unique.size,pane_edges:paneStates.size,screenshots};
+ }
  const tested=[];
  for(const name of ['bookshelf','grass_block','stone']){
   const selected=[...choices.local].filter(([key])=>blocks[key].startsWith('minecraft:'+name));
@@ -184,7 +238,7 @@ const bundle=await build({root,configFile:false,logLevel:'error',build:{write:fa
   return "import * as THREE from 'three';import {buildState,awaitTextures,chooseVariantGroups} from '/model-terrain.js';"
    +"import {ChunkRenderer} from '/chunk-renderer.js';import {TexturedWorld} from '/textured-world.js';"
    +"import {makeIndex} from '/chunk-index.js';import {renderCapture} from '/capture-renderer.js';"
-   +"window.materialFixture=("+exercise.toString()+")({THREE,buildState,awaitTextures,chooseVariantGroups,ChunkRenderer,TexturedWorld,makeIndex,renderCapture,blocks:"+JSON.stringify(blocks)+"});";
+   +"window.materialFixture=("+exercise.toString()+")({THREE,buildState,awaitTextures,chooseVariantGroups,ChunkRenderer,TexturedWorld,makeIndex,renderCapture,blocks:"+JSON.stringify(blocks)+",minecraft:"+JSON.stringify(minecraft)+",glass:"+glass+",special:"+special+"});";
  }
 }]});
 const output=new Map((Array.isArray(bundle)?bundle.flatMap(entry=>entry.output):bundle.output)
@@ -208,7 +262,8 @@ const server=http.createServer((req,res)=>{
    }
    const name=url.searchParams.get('name');
    if(!/^minecraft\/(?:blockstates|models|textures)\/[a-z0-9_/-]+\.(?:png|json)$/.test(name)){res.statusCode=400;res.end('Unsupported asset');return;}
-   const roots=url.searchParams.get('mode')==='vanilla'?[assets]:[...overlays,assets];
+   const vanilla=minecraft==='1.20.1'?assets:path.join(assets,'vanilla',minecraft);
+   const roots=url.searchParams.get('mode')==='vanilla'?[vanilla]:[...overlays,vanilla];
    const file=roots.map(r=>path.join(r,name)).find(p=>fs.existsSync(p));
    if(!file){res.statusCode=404;res.end(name);return;}
    const bytes=fs.readFileSync(file);
@@ -223,7 +278,7 @@ try{
  browser=await chromium.launch({headless:true,executablePath:'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
   args:['--use-angle=swiftshader','--enable-unsafe-swiftshader','--disable-background-networking']});
  const reports=[];
- for(const mode of ['vanilla','active-pack']){
+ for(const mode of glass||special?['vanilla']:['vanilla','active-pack']){
   const page=await browser.newPage();
   const errors=[];page.on('pageerror',error=>errors.push(error.message));
   await page.goto('http://127.0.0.1:'+server.address().port+'/__material_fixture?mode='+mode,{waitUntil:'domcontentloaded',timeout:90_000});
